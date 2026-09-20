@@ -138,9 +138,23 @@ always @(posedge clk) begin
 				case (who)
 				WHO_A: begin
 					// ...unless a redirect moved the fetch while it was out.
-					// a_addr may already be the NEW address, in which case
-					// this word belongs to nobody and a_pend stays set.
-					if (cur_addr_a == a_addr) begin
+					// TWO ways that happens, and the address compare alone
+					// only catches one (milestone 92). A redirect from an
+					// EARLIER cycle has already changed a_addr, so the
+					// compare fails and the word is dropped. A redirect
+					// accepted in THIS cycle has not: a_addr is written
+					// non-blocking above and still reads as the old address
+					// here, so the compare passes, the abandoned word is
+					// published as valid, and a_pend is cleared -- which
+					// also cancels the fetch the redirect had just asked
+					// for. en_a says so directly.
+					//
+					// It does not cost the ordinary back-to-back fetch:
+					// rvalid_a is a register, so ap040_inst_fetch.v sees it
+					// the cycle AFTER the acknowledgement and issues its
+					// next request then. The two coincide only on a
+					// redirect.
+					if (cur_addr_a == a_addr && !en_a) begin
 						q_a      <= mem_rdata[15:0];
 						rvalid_a <= 1'b1;
 						a_pend   <= 1'b0;

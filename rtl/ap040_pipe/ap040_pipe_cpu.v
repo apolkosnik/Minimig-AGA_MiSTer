@@ -361,9 +361,14 @@ wire [15:0] ex_sr_fwd_data;
 // commit added later would silently multiply. exe_fresh is high exactly in
 // the cycle after EX wrote its outputs.
 reg exe_fresh;
+// It must HOLD across a disabled cycle rather than clear in one (milestone
+// 92). EX's output registers are gated on ce, so a cycle with ce low leaves
+// the pending result exactly where it was and it still owes its commit;
+// computing this as `ce && !ex_stall` dropped that commit instead, and with
+// ce alternating every cycle a four-write program committed nothing at all.
 always @(posedge clk) begin
-	if (!nreset) exe_fresh <= 1'b0;
-	else         exe_fresh <= ce && !ex_stall;
+	if (!nreset)  exe_fresh <= 1'b0;
+	else if (ce)  exe_fresh <= !ex_stall;
 end
 wire commit_reg  = exe_valid && exe_fresh && exe_writes_reg;
 // The second commit: an (An)+/-(An) address update riding alongside the
@@ -522,6 +527,10 @@ ap040_pipe_regfile u_regfile
 	// banks to ISP at reset, unchanged behavior for every earlier test.
 	.sr_s     (sr_resolved[13]),
 	.sr_m     (sr_resolved[12]),
+	// ...and the architectural view for the write side -- see the port's
+	// own comment in ap040_pipe_regfile.v (milestone 92).
+	.sr_s_w   (sr_base[13]),
+	.sr_m_w   (sr_base[12]),
 
 	.we       (commit_reg),
 	.waddr    (exe_dest_reg),
@@ -574,8 +583,15 @@ wire      [31:0] eaf_l1_addr_b;
 // The arbitration itself: EX's read-modify-write store beat takes the data
 // port from EA-fetch for its cycle (ex_st_req, which EA-fetch sees as
 // port_taken).
+wire eaf_l1_rd_b;
+assign l1_rd_b   = ce && eaf_l1_rd_b;
 assign l1_addr_b = ex_st_req ? ex_st_addr : eaf_l1_addr_b;
-assign l1_wren_b = ex_st_req ? 1'b1       : eaf_l1_wren_b;
+// Gated by ce, all of them (milestone 92). ap040_pipe_l1.v has no clock
+// enable, and neither does real memory: a request left asserted through a
+// disabled cycle is a request the memory sees again. The write buffer
+// accepted one store 134 times that way. en_a needs no gate here --
+// ap040_inst_fetch.v already builds it from ce.
+assign l1_wren_b = ce && (ex_st_req ? 1'b1  : eaf_l1_wren_b);
 assign l1_size_b   = ex_st_req ? ex_st_size : eaf_l1_size_b;
 assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 
@@ -911,7 +927,7 @@ ap040_ea_fetch #(
 	.l1_addr_b        (eaf_l1_addr_b),
 	.l1_q_b           (l1_q_b),
 	.l1_rvalid_b      (l1_rvalid_b),
-	.l1_rd_b          (l1_rd_b),
+	.l1_rd_b          (eaf_l1_rd_b),
 	.l1_wren_b        (eaf_l1_wren_b),
 	.l1_size_b          (eaf_l1_size_b),
 	.l1_data_b        (eaf_l1_data_b),

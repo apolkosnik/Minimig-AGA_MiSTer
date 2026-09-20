@@ -1168,7 +1168,19 @@ wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             ret_active  ? ret_addr :
                                                                   ea_target;
 assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
-assign l1_wren_b = (live && (eac_is_push || store_now)) || exc_writing || mvm_st_want;
+// !stall_in (milestone 92): the request is combinational off eac_valid and
+// says nothing about whether this instruction has already had its turn,
+// which is right while its OWN wr_stall holds it -- the buffer is full, so
+// nothing was accepted and the request must stay up -- and wrong while
+// anything else does. Behind a divide, EX holds EA-fetch for thirty-two
+// cycles and the buffer drains and accepts again in each of them: one
+// MOVE.L D0,(A0) was posted eighteen times. The value is the same every
+// time, so RAM ends up correct and only a count can see it; a device
+// register does not work that way. The frame and MOVEM beats below carry
+// their own sequencer, which advances per accepted beat, so they post once
+// each without needing this.
+assign l1_wren_b = (live && !stall_in && (eac_is_push || store_now)) ||
+                   exc_writing || mvm_st_want;
 // The size of whatever access l1_addr_word above selected, in the same
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops

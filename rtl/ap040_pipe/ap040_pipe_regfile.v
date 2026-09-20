@@ -42,6 +42,15 @@ module ap040_pipe_regfile
 	// active stack pointer selection
 	input             sr_s,
 	input             sr_m,
+	// The bank a WRITE lands in (milestone 92). Reads take the FORWARDED
+	// SR, and must: a reader in EA-fetch has to see a mode switch that is
+	// still in EX. A write arriving from EX belongs to an instruction that
+	// is already past that point, and the bank it meant was fixed when it
+	// executed -- so it takes the ARCHITECTURAL SR instead, and a younger
+	// MOVE-to-SR cannot redirect it into the bank it is switching to.
+	// Port 3 is EA-fetch's own (MOVEM), so it stays with the reads.
+	input             sr_s_w,
+	input             sr_m_w,
 
 	// write port
 	input             we,
@@ -118,7 +127,16 @@ reg [31:0] msp;
 
 // A7 resolves to the active stack pointer
 wire [1:0] sp_sel = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1); // 0=USP 1=ISP 2=MSP
+wire [1:0] sp_sel_w = !sr_s_w ? 2'd0 : (sr_m_w ? 2'd2 : 2'd1);
 wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
+
+// The write-through bypass has to agree about WHICH A7. The unified index
+// is 15 whatever bank it names, so a write to ISP and a read of USP look
+// like the same register here; when the two selects disagree, they are not
+// the same register and the value must not be forwarded.
+wire       a7_same  = (sp_sel_w == sp_sel);
+wire       we_fwd   = we  && (a7_same || (waddr  != 4'd15));
+wire       we2_fwd  = we2 && (a7_same || (waddr2 != 4'd15));
 
 // direct expressions, not a function: a function referencing the register
 // arrays breaks continuous-assign sensitivity on some simulators.
@@ -127,19 +145,19 @@ wire [31:0] sp_active = (sp_sel == 2'd0) ? usp : (sp_sel == 2'd1) ? isp : msp;
 // write and a same-address read of the same register committing in the
 // same cycle -- the WB-forward case -- and needs the read to see it; see
 // ap040_pipe_core.v's header comment for the full picture).
-assign rdata_a = (we  && (waddr  == raddr_a)) ? wdata  :
+assign rdata_a = (we_fwd  && (waddr  == raddr_a)) ? wdata  :
                  (we3 && (waddr3 == raddr_a)) ? wdata3 :
-                 (we2 && (waddr2 == raddr_a)) ? wdata2 :
+                 (we2_fwd && (waddr2 == raddr_a)) ? wdata2 :
                  !raddr_a[3]            ? dreg[raddr_a[2:0]] :
                  (raddr_a[2:0] == 3'd7) ? sp_active : areg[raddr_a[2:0]];
-assign rdata_c = (we  && (waddr  == raddr_c)) ? wdata  :
+assign rdata_c = (we_fwd  && (waddr  == raddr_c)) ? wdata  :
                  (we3 && (waddr3 == raddr_c)) ? wdata3 :
-                 (we2 && (waddr2 == raddr_c)) ? wdata2 :
+                 (we2_fwd && (waddr2 == raddr_c)) ? wdata2 :
                  !raddr_c[3]            ? dreg[raddr_c[2:0]] :
                  (raddr_c[2:0] == 3'd7) ? sp_active : areg[raddr_c[2:0]];
-assign rdata_b = (we  && (waddr  == raddr_b)) ? wdata  :
+assign rdata_b = (we_fwd  && (waddr  == raddr_b)) ? wdata  :
                  (we3 && (waddr3 == raddr_b)) ? wdata3 :
-                 (we2 && (waddr2 == raddr_b)) ? wdata2 :
+                 (we2_fwd && (waddr2 == raddr_b)) ? wdata2 :
                  !raddr_b[3]            ? dreg[raddr_b[2:0]] :
                  (raddr_b[2:0] == 3'd7) ? sp_active : areg[raddr_b[2:0]];
 
@@ -157,7 +175,7 @@ always @(posedge clk) begin
 			if (!waddr[3])            dreg[waddr[2:0]] <= wdata;
 			else if (waddr[2:0] != 7) areg[waddr[2:0]] <= wdata;
 			else begin
-				case (sp_sel)
+				case (sp_sel_w)
 					2'd0:    usp <= wdata;
 					2'd1:    isp <= wdata;
 					default: msp <= wdata;
@@ -170,7 +188,7 @@ always @(posedge clk) begin
 			if (!waddr2[3])            dreg[waddr2[2:0]] <= wdata2;
 			else if (waddr2[2:0] != 7) areg[waddr2[2:0]] <= wdata2;
 			else begin
-				case (sp_sel)
+				case (sp_sel_w)
 					2'd0:    usp <= wdata2;
 					2'd1:    isp <= wdata2;
 					default: msp <= wdata2;
