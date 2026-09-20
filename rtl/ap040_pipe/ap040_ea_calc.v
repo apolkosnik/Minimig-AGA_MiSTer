@@ -108,6 +108,7 @@ module ap040_ea_calc
 	input             id_movem_pcrel,
 	input             id_movem_abs,
 	input      [15:0] id_movem_mask,
+	input             id_is_trapcc,
 	input             id_is_chk,
 	input             id_is_immsr,
 	input             id_immsr_to_sr,
@@ -162,6 +163,7 @@ module ap040_ea_calc
 	output reg        eac_movem_pcrel,
 	output reg        eac_movem_abs,
 	output reg [15:0] eac_movem_mask,
+	output reg        eac_is_trapcc,
 	output reg        eac_is_chk,
 	output reg        eac_is_immsr,
 	output reg        eac_immsr_to_sr,
@@ -219,6 +221,7 @@ always @(posedge clk) begin
 		eac_movem_pcrel  <= 1'b0;
 		eac_movem_abs    <= 1'b0;
 		eac_movem_mask   <= 16'h0;
+		eac_is_trapcc    <= 1'b0;
 		eac_is_chk       <= 1'b0;
 		eac_is_immsr     <= 1'b0;
 		eac_immsr_to_sr  <= 1'b0;
@@ -274,6 +277,7 @@ always @(posedge clk) begin
 			eac_movem_pcrel  <= id_movem_pcrel;
 			eac_movem_abs    <= id_movem_abs;
 			eac_movem_mask   <= id_movem_mask;
+			eac_is_trapcc    <= id_is_trapcc;
 			eac_is_chk       <= id_is_chk;
 			eac_is_immsr     <= id_is_immsr;
 			eac_immsr_to_sr  <= id_immsr_to_sr;

@@ -289,6 +289,7 @@ module ap040_ea_fetch
 	input             eac_movem_pcrel,
 	input             eac_movem_abs,
 	input      [15:0] eac_movem_mask,
+	input             eac_is_trapcc,
 	input             eac_is_chk,
 	input             eac_is_immsr,
 	input             eac_immsr_to_sr,
@@ -399,6 +400,7 @@ module ap040_ea_fetch
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
 	output reg        eaf_div_signed,
+	output reg        eaf_is_trapcc,
 	output reg        eaf_is_chk,
 	output reg        eaf_is_immsr,
 	output reg        eaf_immsr_to_sr,
@@ -671,6 +673,50 @@ reg exc_pend_chk;
 reg exc_pend_chk_n;
 wire eac_is_chk_trap = chk_now || exc_pend_chk;
 
+// TRAPcc (milestone 74). The condition is evaluated HERE, on sr_in's low
+// five bits -- the live, forwarded CCR -- because this is where a frame
+// can still be pushed. This function must match ap040_execute.v's
+// cond_true bit for bit; it is duplicated rather than shared because a
+// function cannot be declared in the .svh at module scope, and a
+// multi-condition bench guards the two against drifting apart.
+//
+// Decided once and LATCHED, like divzero and CHK. Not because the CCR is
+// one-cycle data -- it is stable -- but because an older instruction's
+// flags may still commit during the frame push, and the trap must be
+// judged on the CCR as this instruction saw it, not re-judged each beat.
+function trapcc_cond_true;
+	input [3:0] cond;
+	input [4:0] ccr;
+	begin
+		case (cond)
+			4'h0: trapcc_cond_true = 1'b1;
+			4'h1: trapcc_cond_true = 1'b0;
+			4'h2: trapcc_cond_true = !ccr[0] && !ccr[2];
+			4'h3: trapcc_cond_true =  ccr[0] ||  ccr[2];
+			4'h4: trapcc_cond_true = !ccr[0];
+			4'h5: trapcc_cond_true =  ccr[0];
+			4'h6: trapcc_cond_true = !ccr[2];
+			4'h7: trapcc_cond_true =  ccr[2];
+			4'h8: trapcc_cond_true = !ccr[1];
+			4'h9: trapcc_cond_true =  ccr[1];
+			4'hA: trapcc_cond_true = !ccr[3];
+			4'hB: trapcc_cond_true =  ccr[3];
+			4'hC: trapcc_cond_true =  ccr[3] ==  ccr[1];
+			4'hD: trapcc_cond_true =  ccr[3] !=  ccr[1];
+			4'hE: trapcc_cond_true = !ccr[2] && (ccr[3] == ccr[1]);
+			default: trapcc_cond_true = ccr[2] || (ccr[3] != ccr[1]);
+		endcase
+	end
+endfunction
+// ...and only judged while EX is not stalled: a divide in EX has not
+// produced its flags yet, and the forward that makes sr_in current for an
+// EA-fetch consumer (ap040_pipe_core.v's ex_ccr_fwd) is valid only in the
+// cycle EX's instruction actually registers.
+wire trapcc_now = eac_valid && eac_is_trapcc && !stall_in &&
+                  trapcc_cond_true(eac_cond, sr_in[4:0]);
+reg  exc_pend_trapcc;
+wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
+
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
 
@@ -746,7 +792,7 @@ wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte ||
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
 wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-                      eac_is_chk_trap;
+                      eac_is_chk_trap || eac_is_trapcc_trap;
 wire exc_active    = eac_valid && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
@@ -885,7 +931,8 @@ wire [31:0] exc_pc_field   = eac_is_jmp_odd ? (eac_pc + 32'd2) :
 wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
                               eac_is_divzero ? 8'd5 :
-                              eac_is_chk_trap ? 8'd6 : eac_imm[7:0];
+                              eac_is_chk_trap ? 8'd6 :
+                              eac_is_trapcc_trap ? 8'd7 : eac_imm[7:0];
 wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
 // Format $2's own extra "instruction address" longword -- the odd target
 // itself, LSB cleared (ap040_core.v's own convention for this field,
@@ -994,6 +1041,7 @@ always @(posedge clk) begin
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
 		eaf_is_chk     <= 1'b0;
+		eaf_is_trapcc     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
 		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
@@ -1016,6 +1064,7 @@ always @(posedge clk) begin
 		exc_pend_divzero <= 1'b0;
 		exc_pend_chk     <= 1'b0;
 		exc_pend_chk_n   <= 1'b0;
+		exc_pend_trapcc  <= 1'b0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
@@ -1032,6 +1081,9 @@ always @(posedge clk) begin
 			exc_pend_chk_n <= chk_negative;
 		end
 
+		if (exc_vec_done)     exc_pend_trapcc <= 1'b0;
+		else if (trapcc_now)  exc_pend_trapcc <= 1'b1;
+
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
@@ -1039,6 +1091,7 @@ always @(posedge clk) begin
 			mvm_rd_pend     <= 1'b0;
 			exc_pend_divzero <= 1'b0;
 			exc_pend_chk     <= 1'b0;
+			exc_pend_trapcc  <= 1'b0;
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending
@@ -1231,7 +1284,7 @@ always @(posedge clk) begin
 				// register, and the exception's result -- the new supervisor
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-				                    eac_is_chk_trap) ? 4'd15 : eac_dest_reg;
+				                    eac_is_chk_trap || eac_is_trapcc_trap) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -1267,6 +1320,7 @@ always @(posedge clk) begin
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
 				eaf_is_chk     <= eac_is_chk_trap;
+				eaf_is_trapcc     <= eac_is_trapcc_trap;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
@@ -1376,6 +1430,7 @@ always @(posedge clk) begin
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
 				eaf_is_chk      <= 1'b0;
+				eaf_is_trapcc      <= 1'b0;
 				eaf_is_div      <= 1'b0;
 				eaf_div_signed  <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
@@ -1431,6 +1486,7 @@ always @(posedge clk) begin
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
 				eaf_is_chk     <= 1'b0;
+				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;

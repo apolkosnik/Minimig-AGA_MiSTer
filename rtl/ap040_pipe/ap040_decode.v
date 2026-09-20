@@ -308,6 +308,7 @@ module ap040_decode
 	output reg        id_ea_indexed,
 	output reg        id_ea_pcrel,
 	output reg        id_is_rmw,
+	output reg        id_is_trapcc,
 	output reg        id_is_chk,
 	output reg        id_is_immsr,
 	output reg        id_immsr_to_sr,
@@ -1466,6 +1467,22 @@ wire is_jmpjsr_abs_l = is_jmpjsr_abs && abs_long;
 // (...011), so no overlap is possible with either.
 wire is_trap = (if_opcode[15:4] == 12'h4E4);
 
+// TRAPcc (milestone 74): 0101 cccc 11 111 opm -- vector 7 if the condition
+// holds, otherwise a NOP. opm 100 is the bare form, 010 carries one
+// extension word and 011 two; the immediate is not used by the hardware,
+// it is left on the stack for the handler. Scc is mode 000 and DBcc mode
+// 001, so mode 111 was unclaimed in this opcode space.
+//
+// The condition is evaluated in ap040_ea_fetch.v, where exceptions start
+// and where the live CCR already arrives as sr_in -- not in EX, where
+// Bcc/Scc/DBcc evaluate theirs, because by EX it is too late to push a
+// frame. held_cond already captures cccc for the gathering forms.
+wire trapcc_shape     = (if_opcode[15:12] == 4'b0101) && (if_opcode[7:3] == 5'b11111);
+wire is_trapcc        = trapcc_shape && (if_opcode[2:0] == 3'b100);
+wire is_trapcc_w      = trapcc_shape && (if_opcode[2:0] == 3'b010);
+wire is_trapcc_l      = trapcc_shape && (if_opcode[2:0] == 3'b011);
+wire is_trapcc_gather = is_trapcc_w || is_trapcc_l;
+
 // RTS / RTE (milestone 16, new): the "other half" of BSR/JSR's push and
 // illegal/TRAP/priv's exception-entry push, respectively -- both are pure
 // A7-pop instructions with no register field in the opcode at all (unlike
@@ -1549,7 +1566,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
-wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
+wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
@@ -1618,6 +1635,7 @@ reg         held_movem_abs;
 reg         held_imm_div;       // this immediate form is a DIVIDE, not an ALU op
 reg         held_imm_divs;
 reg         held_lea_push;      // this LEA-shaped form pushes instead of writing An
+reg         held_is_trapcc;     // TRAPcc.W / TRAPcc.L: the immediate is ignored
 reg         held_is_link;       // the tenth kind: LINK An,#d16
 reg         held_imm_chk;       // this immediate form is a CHK bound
 reg         held_is_immsr;      // ORI/ANDI/EORI to CCR or SR
@@ -1670,7 +1688,8 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
                              !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
-                             !held_is_abs && !held_is_stabs && !held_is_immsr;
+                             !held_is_abs && !held_is_stabs && !held_is_immsr &&
+                             !held_is_trapcc;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -1712,6 +1731,7 @@ always @(posedge clk) begin
 		id_ea_indexed   <= 1'b0;
 		id_ea_pcrel     <= 1'b0;
 		id_is_rmw       <= 1'b0;
+		id_is_trapcc    <= 1'b0;
 		id_is_chk       <= 1'b0;
 		id_is_immsr     <= 1'b0;
 		id_immsr_to_sr  <= 1'b0;
@@ -1776,6 +1796,7 @@ always @(posedge clk) begin
 		held_imm_divs   <= 1'b0;
 		held_lea_push   <= 1'b0;
 		held_is_link    <= 1'b0;
+		held_is_trapcc  <= 1'b0;
 		held_is_movem   <= 1'b0;
 		held_movem_dir  <= 1'b0;
 		held_movem_word <= 1'b0;
@@ -1909,7 +1930,7 @@ always @(posedge clk) begin
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs && !held_is_stabs &&
-					                    !held_is_immsr;
+					                    !held_is_immsr && !held_is_trapcc;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
 					// LEA and PEA deliver the address itself, so unlike every
@@ -1929,6 +1950,7 @@ always @(posedge clk) begin
 					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_pea       <= (held_is_lea && held_lea_push) || (held_is_abs && held_abs_push);
 					id_is_chk       <= held_is_imm && held_imm_chk;
+					id_is_trapcc    <= held_is_trapcc;
 					id_is_immsr     <= held_is_immsr;
 					id_immsr_to_sr  <= held_immsr_sr;
 					id_is_link      <= held_is_link;
@@ -1965,7 +1987,7 @@ always @(posedge clk) begin
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
 			              is_pea_gather || is_eaonly_abs || is_immsr || is_chk_imm ||
 			              is_jmp_idx || is_jmp_pcrel || is_jsr_idx || is_jsr_pcrel ||
-			              is_jmpjsr_abs) begin
+			              is_jmpjsr_abs || is_trapcc_gather) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1979,7 +2001,7 @@ always @(posedge clk) begin
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
 				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp ||
-				                 is_jmpjsr_abs_l;
+				                 is_jmpjsr_abs_l || is_trapcc_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm || is_chk_imm;
 				held_imm_chk     <= is_chk_imm;
@@ -2048,6 +2070,7 @@ always @(posedge clk) begin
 				held_is_lea   <= is_lea_disp || is_lea_idx || is_lea_pcrel || is_pea_gather;
 				held_lea_push <= is_pea_gather;
 				held_is_link  <= is_link;
+				held_is_trapcc<= is_trapcc_gather;
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
 				held_movem_word<= is_movem_w;
@@ -2071,7 +2094,7 @@ always @(posedge clk) begin
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
 				                  is_adda_imm_l || is_abs_alu_l ||
 				                  is_eaonly_abs_l || is_movem_disp ||
-				                  is_jmpjsr_abs_l) ? 2'd2 : 2'd1;
+				                  is_jmpjsr_abs_l || is_trapcc_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
@@ -2188,6 +2211,7 @@ always @(posedge clk) begin
 				id_is_lea       <= if_valid && is_lea_an;
 				id_is_pea       <= if_valid && is_pea_an;
 				id_is_chk       <= if_valid && is_chk;
+				id_is_trapcc    <= if_valid && is_trapcc;
 				id_is_immsr     <= 1'b0;
 				id_immsr_to_sr  <= 1'b0;
 				// id_size stays Long for the ALU; this forces the READ (and

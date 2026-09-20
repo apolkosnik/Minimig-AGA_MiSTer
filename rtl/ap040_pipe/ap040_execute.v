@@ -128,6 +128,7 @@ module ap040_execute
 	input             eaf_is_jmp,
 	input             eaf_is_div,
 	input             eaf_div_signed,
+	input             eaf_is_trapcc,
 	input             eaf_is_chk,
 	input             eaf_is_immsr,
 	input             eaf_immsr_to_sr,
@@ -202,6 +203,17 @@ module ap040_execute
 	output      [3:0] ex_st_be,
 
 	output            ex_stall,
+
+	// Condition-code forward (milestone 74): the flags this stage's
+	// instruction will register THIS cycle, live. ap040_pipe_core.v folds
+	// them into sr_resolved so a consumer one stage EARLIER than EX -- the
+	// exception frame's stacked SR, and TRAPcc's condition -- sees the
+	// instruction ahead of it. commit_ccr covers only the instruction in WB;
+	// between the two there was a one-cycle window in which an ALU op's
+	// flags existed but nobody upstream could read them. Bcc/Scc/DBcc never
+	// noticed, since they evaluate here in EX.
+	output            ex_ccr_fwd_valid,
+	output      [4:0] ex_ccr_fwd_data,
 
 	// "EX-forward" tap (combinational, live this cycle)
 	output            ex_fwd_valid,
@@ -455,7 +467,7 @@ wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) :
 // read correctly and then nothing redirects, so the instruction after the
 // divide runs as if nothing had happened.
 wire exc_reaching_ex = eaf_is_trap || eaf_is_illegal || eaf_is_priv || eaf_is_addrerr ||
-                        eaf_is_divzero || eaf_is_chk;
+                        eaf_is_divzero || eaf_is_chk || eaf_is_trapcc;
 
 // RTS/RTE (milestone 16) join the SAME unconditional-redirect club one
 // more time: RTS's popped PC (routed into eaf_operand_a exactly like
@@ -625,6 +637,12 @@ assign ex_fwd_valid = eaf_valid && writes_reg_resolved;
 assign ex_fwd_dest  = eaf_dest_reg;
 assign ex_fwd_data  = combined_result;
 
+// The one place the committed flags are chosen; the forward and the
+// register both read it, so they cannot disagree.
+wire [4:0] exe_flags_c = eaf_is_div ? div_flags : alu_flags;
+assign ex_ccr_fwd_valid = eaf_valid && eaf_writes_ccr && !ex_stall;   // final this cycle
+assign ex_ccr_fwd_data  = exe_flags_c;
+
 // The (An)+/-(An) address update forwards from the SAME point as the primary
 // result: the instruction currently IN this stage, not the registered
 // exe_*2 outputs one cycle later. Wiring it to the registered outputs made
@@ -666,7 +684,7 @@ always @(posedge clk) begin
 		exe_writes_reg2  <= eaf_writes_an;
 		exe_writes_reg   <= writes_reg_resolved;
 		exe_writes_ccr   <= eaf_writes_ccr;
-		exe_result_flags <= eaf_is_div ? div_flags : alu_flags;
+		exe_result_flags <= exe_flags_c;
 		exe_writes_sr    <= exe_writes_sr_c;
 		exe_sr_data      <= exe_sr_data_c;
 		exe_writes_creg  <= exe_writes_creg_c;

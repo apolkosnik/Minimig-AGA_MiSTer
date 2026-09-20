@@ -208,7 +208,7 @@ wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
-wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk, id_ea_indexed, id_ea_pcrel, id_is_pea, id_is_immsr, id_immsr_to_sr, id_is_chk;
+wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk, id_ea_indexed, id_ea_pcrel, id_is_pea, id_is_immsr, id_immsr_to_sr, id_is_chk, id_is_trapcc;
 wire        id_is_movem, id_movem_dir, id_movem_word, id_movem_down, id_movem_wb, id_movem_pcrel, id_movem_abs;
 wire [15:0] id_movem_mask, eac_movem_mask;
 wire        id_is_div, id_div_signed;
@@ -225,7 +225,8 @@ wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
-wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr, eac_is_chk;
+wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr, eac_is_chk, eac_is_trapcc;
+wire        eaf_is_trapcc;
 wire        eaf_is_chk;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
 wire        eaf_is_pea;
@@ -392,9 +393,22 @@ assign dbg_sr  = sr;
 // `ccr_in` port there, unchanged); ap040_ea_fetch.v's exception-frame push
 // and privilege check need the FULL 16 bits, hence sr_resolved staying the
 // whole register, not just CCR.
-wire [15:0] sr_resolved = ex_sr_fwd_valid ? ex_sr_fwd_data :
-                          commit_sr       ? exe_sr_data :
-                          commit_ccr      ? {sr[15:5], exe_result_flags} : sr;
+// Youngest first. EX's whole-SR write beats everything; then EX's CCR result
+// (milestone 74 -- the flags an ALU op in EX will register this cycle, which
+// the frame push and TRAPcc in EA-fetch could not previously see); then WB's
+// commits; then the register.
+wire        ex_ccr_fwd_valid;
+wire  [4:0] ex_ccr_fwd_data;
+wire [15:0] sr_base     = commit_sr  ? exe_sr_data :
+                          commit_ccr ? {sr[15:5], exe_result_flags} : sr;
+// Two views, on purpose. EX must NOT see its own in-flight flags: with the
+// CCR forward folded into the view EX reads, alu_flags fed ccr_in fed the
+// ALU fed alu_flags -- a combinational loop that broke ADDX, the one op
+// whose result depends on an input flag. So EX keeps the pre-forward view,
+// and only EA-fetch, one stage upstream, gets the forwarded one.
+wire [15:0] sr_resolved    = ex_sr_fwd_valid  ? ex_sr_fwd_data : sr_base;
+wire [15:0] sr_resolved_ea = ex_sr_fwd_valid  ? ex_sr_fwd_data :
+                             ex_ccr_fwd_valid ? {sr_base[15:5], ex_ccr_fwd_data} : sr_base;
 
 //---------------------------------------------------------------------------
 // Supervisor control registers (milestone 15, new): VBR/SFC/DFC/CACR, the
@@ -643,6 +657,7 @@ ap040_decode u_id
 	.id_ea_pcrel     (id_ea_pcrel),
 	.id_is_rmw       (id_is_rmw),
 	.id_is_chk       (id_is_chk),
+	.id_is_trapcc    (id_is_trapcc),
 	.id_is_immsr     (id_is_immsr),
 	.id_immsr_to_sr  (id_immsr_to_sr),
 	.id_is_pea       (id_is_pea),
@@ -704,6 +719,7 @@ ap040_ea_calc u_eac
 	.id_ea_pcrel      (id_ea_pcrel),
 	.id_is_rmw        (id_is_rmw),
 	.id_is_chk        (id_is_chk),
+	.id_is_trapcc     (id_is_trapcc),
 	.id_is_immsr      (id_is_immsr),
 	.id_immsr_to_sr   (id_immsr_to_sr),
 	.id_is_pea        (id_is_pea),
@@ -758,6 +774,7 @@ ap040_ea_calc u_eac
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
 	.eac_is_chk       (eac_is_chk),
+	.eac_is_trapcc    (eac_is_trapcc),
 	.eac_is_immsr     (eac_is_immsr),
 	.eac_immsr_to_sr  (eac_immsr_to_sr),
 	.eac_is_pea       (eac_is_pea),
@@ -822,6 +839,7 @@ ap040_ea_fetch #(
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
 	.eac_is_chk       (eac_is_chk),
+	.eac_is_trapcc    (eac_is_trapcc),
 	.eac_is_immsr     (eac_is_immsr),
 	.eac_immsr_to_sr  (eac_immsr_to_sr),
 	.eac_is_pea       (eac_is_pea),
@@ -845,6 +863,7 @@ ap040_ea_fetch #(
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
+	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
@@ -860,7 +879,7 @@ ap040_ea_fetch #(
 	.eac_is_rte       (eac_is_rte),
 	.eac_cond         (eac_cond),
 
-	.sr_in            (sr_resolved),
+	.sr_in            (sr_resolved_ea),
 	.isp_in           (isp_q),
 	.msp_in           (msp_q),
 
@@ -979,12 +998,15 @@ ap040_execute u_ex
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
+	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),
 	.eaf_div_signed   (eaf_div_signed),
 	.eaf_ea_target    (eaf_ea_target),
 	.l1_wr_busy       (l1_wr_busy),
+	.ex_ccr_fwd_valid (ex_ccr_fwd_valid),
+	.ex_ccr_fwd_data  (ex_ccr_fwd_data),
 	.ex_st_req        (ex_st_req),
 	.ex_st_addr       (ex_st_addr),
 	.ex_st_data       (ex_st_data),
