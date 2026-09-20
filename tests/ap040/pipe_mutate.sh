@@ -39,7 +39,7 @@ if c != 1:
 p.write_text(t.replace(o, n, 1))
 PY
 echo "mutation applied to $f"
-python3 tests/ap040/run_pipe_verilator.py $PIPE_HARNESS_ARGS --work "$work" --only "$4" >/dev/null 2>&1 || true
+python3 tests/ap040/run_pipe_verilator.py ${PIPE_HARNESS_ARGS:-} --work "$work" --only "$4" >/dev/null 2>&1 || true
 for b in ${4//,/ }; do
 	echo "--- $b ---"
 	if [ -f "$work/$b.log" ]; then grep -E "FAIL|PASSED|FAILED|%Error" "$work/$b.log" | head -8

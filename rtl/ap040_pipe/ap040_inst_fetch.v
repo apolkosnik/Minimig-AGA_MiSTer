@@ -77,12 +77,13 @@ reg        if_pend;                  // a fetch has been requested and not yet h
 // register set at the request.
 assign if_valid  = if_pend && l1_rvalid_a;
 wire   can_issue = !if_pend || l1_rvalid_a;
-// A decode redirect is a one-cycle pulse and must issue in its cycle even
-// with a fetch in flight -- port A restarts on a new request -- or the
-// pulse is lost and fetch carries on down the not-taken path. The slow L1
-// build found that within its first seven benches; with a one-cycle L1 a
-// fetch was never in flight when the pulse came.
-assign l1_req_a  = ce && (flush || (!stall_in && (can_issue || redirect_valid)));
+// A decode redirect needs no special case here: decode redirects only on a
+// word it can see (if_valid), and if_valid implies rvalid_a implies
+// can_issue, so the redirected fetch always issues in the pulse's cycle. A
+// first draft added `|| redirect_valid` on a misdiagnosis of a decode bug;
+// the mutation that removed it passed the slow build, which is how the
+// misdiagnosis was found.
+assign l1_req_a  = ce && (flush || (!stall_in && can_issue));
 
 // The redirect must land on THIS fetch, not merely be scheduled for the
 // following one -- otherwise the word at the old (sequential) pc still

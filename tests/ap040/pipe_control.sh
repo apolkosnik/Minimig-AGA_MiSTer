@@ -34,7 +34,7 @@ restore() { git checkout -q HEAD -- rtl/ap040_pipe/; rm -rf "$work"; }
 trap restore EXIT
 git checkout -q "$rev" -- rtl/ap040_pipe/
 echo "control: rtl/ap040_pipe/ at $(git log --oneline -1 "$rev")"
-python3 tests/ap040/run_pipe_verilator.py $PIPE_HARNESS_ARGS --work "$work" --only "$2" >/dev/null 2>&1 || true
+python3 tests/ap040/run_pipe_verilator.py ${PIPE_HARNESS_ARGS:-} --work "$work" --only "$2" >/dev/null 2>&1 || true
 for b in ${2//,/ }; do
 	echo "--- $b ---"
 	if [ -f "$work/$b.log" ]; then grep -E "FAIL|PASSED|FAILED|%Error" "$work/$b.log" | head -8
