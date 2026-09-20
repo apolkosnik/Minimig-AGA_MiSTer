@@ -20,10 +20,12 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; rtl="$(cd "$here/../../../rtl/ap040_pipe" && pwd)"
 work="${1:-/home/adam/ap040-audit4/pipe-synth}"; rm -rf "$work"; mkdir -p "$work"
 sed "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" "$here/pipe.qsf" > "$work/pipe.qsf"
-cp "$here/pipe.sdc" "$here/pipe.qpf" "$work/"; cd "$work"
+cp "$here/pipe.sdc" "$here/pipe.qpf" "$here/paths40.tcl" "$work/"; cd "$work"
 Q=/opt/intelFPGA_lite/17.0/quartus/bin; echo "quartus pid $$ in $work"
 $Q/quartus_map pipe -c pipe > map.log 2>&1; $Q/quartus_fit pipe -c pipe > fit.log 2>&1; $Q/quartus_sta pipe -c pipe > sta.log 2>&1
 echo "ALMs needed (top): $(awk -F': ' '/^ALMs needed/{a=$2; sub(/ \(.*/,"",a); print a; exit}' output_files/pipe.fit.rpt)"
 echo "ALU ALMs:          $(awk -F': ' '/^Compilation Hierarchy Node/{n=$2} /^ALMs needed/{a=$2; sub(/ \(.*/,"",a); if (n ~ /ap040_pipe_alu/) {print a; exit}}' output_files/pipe.fit.rpt)"
 echo "Fmax (slow 100C):  $(awk '/Slow 1100mV 100C Model Fmax Summary/{f=1} f&&/^Fmax/{print $3, $4; exit}' output_files/pipe.sta.rpt)"
 echo "Setup slack @25ns: $(awk '/Slow 1100mV 100C Model Setup Summary/{f=1} f&&/^Slack/{print $3; exit}' output_files/pipe.sta.rpt)"
+$Q/quartus_sta -t paths40.tcl > paths40.log 2>&1 || true
+echo "Worst path delay:   $(awk -F': *' '/^Data Delay/{print $2; exit}' paths40.txt) ns  (40 worst paths in $work/paths40.txt)"

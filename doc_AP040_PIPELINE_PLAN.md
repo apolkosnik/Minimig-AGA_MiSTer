@@ -1688,6 +1688,115 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 81: the core on a bus
+
+   Second step of the bus axis, and the one that makes the CPU a component
+   rather than a thing wrapped around its own memory. Three changes, each
+   needed by the next.
+
+   **Byte addresses.** `ap040_inst_fetch.v` and `ap040_ea_fetch.v` used to
+   emit `(addr - PC_RESET) >> 1` -- an index into `ap040_pipe_l1.v`'s array
+   layout. Nothing else could ever have been attached to a port like that.
+   They now emit the 32-bit byte address and the L1 does its own mapping
+   from a `PC_RESET` parameter of its own, so the array's contents, and
+   every bench's `dut.u_l1.mem[N]`, are unchanged.
+
+   **The split.** `ap040_pipe_cpu.v` is the pipeline, with the L1 protocol
+   at its boundary. `ap040_pipe_core.v` is now a thin wrapper pairing it
+   with the array -- the same module name the 86 existing benches
+   instantiate, with `u_l1` still at the top of it, so only the paths into
+   the CPU's own state moved (`dut.u_regfile` -> `dut.u_cpu.u_regfile`,
+   and `sr`/`vbr`/`sfc`/`dfc`/`cacr` likewise; 213 references, mechanically
+   rewritten). `ap040_pipe_sys.v` is the other pairing: the same CPU with
+   `ap040_pipe_membus.v` under it and no array at all.
+
+   **The bridge.** `ap040_pipe_membus.v` turns the two CPU ports into one
+   transaction at a time on `rtl/ap040/ap040_core.v`'s own external port --
+   `mem_req` held until `mem_ack`, a single-cycle ack with `mem_rdata`
+   valid, `mem_size`/`mem_instr`/`mem_fc` alongside -- which is the port
+   `ap040_bus16_adapter.v` already converts to the 16-bit Minimig bus. So
+   the next step needs no reshaping on either side. Its rules:
+
+   - a posted write goes out before any waiting read, which is how the
+     bridge gets the array's write-buffer forwarding for free: drain first
+     and memory gives the same answer;
+   - a data read beats a fetch, because a fetch can be re-issued and a load
+     cannot;
+   - a fetch whose address changed while it was on the bus (a redirect) has
+     its result discarded and is re-issued, matching the array's port-A
+     restart;
+   - sizes come from the lane mask: `1111` Long, `1100` Word, `1000` Byte
+     at the even address, `0100` Byte at the odd one, which are the only
+     four patterns the CPU produces.
+
+   `tb_ap040_pipe_bus.v` runs a program through a memory model that answers
+   in 1 to 8 cycles: an immediate, a Long store, a Long load of the address
+   just stored (the ordering case -- the store is still posted when the
+   load issues), a TRAP with its frame push and vector fetch, and an RTE.
+   It checks the registers and memory, and also the bus itself: every fetch
+   a Word with a supervisor-program function code, every data access
+   supervisor-data, and exactly one Long write to $0800 -- a bridge that
+   split the store into bytes would leave the right memory contents and
+   fail here. Vector 33 sits at byte $84, its architectural address, rather
+   than the array benches' aliased word index 3650: a consequence of the
+   CPU emitting byte addresses that the array's wrapping had hidden.
+
+   **What the bus bench found.** 347 fetch transactions for a program that
+   issues 64. Once the fetcher has nothing left to fetch, `l1_req_a` kept
+   firing at the same address every cycle -- an array answers that for
+   free, a bus does not. The request is now gated on `have_more` while the
+   ADVANCE that clears `if_pend` is not, because that advance is what lets
+   the pipeline drain; separating the two took one wire. 64 transactions
+   for 64 fetches after it, and the bench asserts the bound.
+
+   | mutation | result |
+   |---|---|
+   | write no longer beats a waiting read | FAIL -- D1 = $DEADBEF0, the pre-store value plus one: the load overtook the store it should have seen, and the program never recovers |
+   | fetch request no longer gated on `have_more` | FAIL -- 347 fetches for a 64-word budget, the storm this milestone found |
+   | data reads issued as Word | FAIL -- D1 = $00001235: half the longword, and the RTE pops come back short (ISP $05F8) |
+   | every transaction carries the program function code | FAIL -- 7 transactions with the wrong code |
+   | a redirected fetch returns its stale word | FAIL -- D2, D3 zero: the TRAP handler never runs |
+   | L1 drops its PC_RESET mapping | FAIL -- integration3 and movem, on the array side: the mapping the CPU no longer does is live in the L1 |
+   | full suite, normal build | 87/87 |
+   | full suite, slow build | 87/87 |
+
+   The first row is the one worth keeping in mind. The array answers a read
+   from its write buffer, so ordering was never a question on that side;
+   the bridge has to make it one, and a bench that only checked memory
+   contents at the end would have passed both ways.
+
+   **The fit caught a real regression, and the path named it.** First fit
+   after the three changes: 5,272 ALMs, Fmax 39.12 MHz, setup slack at
+   25 ns **-0.562 ns** -- 1.05 ns worse than milestone 80's +0.488 and
+   outside the +0.34..+0.96 spread four previous fits had shown for
+   changes that did not touch the spine. This one did touch it: the spine
+   ends at the L1's address.
+
+   The worst path read `eaf_operand_b` -> the ALU -> `ex_fwd_data` ->
+   `an_base` -> the EA adder -> `ea_target` -> `mem_raw` -> `divzero_now`
+   -> `eac_is_divzero` -> `eac_is_fmt2` -> **`Add9`** -> `l1_addr_b` ->
+   `q_b`. `Add9` is `exc_sp_bank - exc_frame_size`, and
+   `exc_frame_size` is `eac_is_fmt2 ? 12 : 8` -- so the format select,
+   which since milestone 77 depends on the loaded divisor, was driving a
+   32-bit subtract at the very end of the longest path in the design.
+   Computing both `bank - 8` and `bank - 12` in parallel and letting the
+   format pick one leaves the subtracts off the path:
+
+   | | ms 80 | ms 81, first fit | ms 81, carry-select |
+   |---|---:|---:|---:|
+   | ALMs | 5,275 | 5,272 | 5,250 |
+   | Fmax, slow 1100 mV 100 C | 40.80 MHz | 39.12 MHz | 40.47 MHz |
+   | setup slack at 25 ns | +0.488 | **-0.562** | +0.288 |
+   | worst path data delay | 23.90 ns | 24.99 ns | 24.13 ns |
+
+   Two things worth keeping. A constant-offset subtract that a SELECT
+   feeds is a carry-select waiting to happen, and there are more of them in
+   `ap040_ea_fetch.v`'s address tail if the spine needs more room later.
+   And `tests/ap040/pipe_synth/` now carries `paths40.tcl` and run.sh runs
+   it, printing the worst path's delay and leaving the 40 worst in the
+   workdir -- this is the second time that script had to be rewritten from
+   memory after a workdir was cleaned up.
+
    ### Milestone 80: the pipeline waits for memory
 
    First step of the bus axis. Until now every L1 access completed in one

@@ -1006,8 +1006,15 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // this milestone introduces; everything else about the sequencer (which
 // stack, how M/S select it) is unchanged.
 wire [31:0] exc_sp_bank    = sr_in[12] ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
-wire [31:0] exc_frame_size = eac_is_fmt2 ? 32'd12 : 32'd8;
-wire [31:0] exc_new_sp     = exc_sp_bank - exc_frame_size;
+// Both sizes, subtracted in parallel, and the format picks one (milestone
+// 81). Written as `bank - (fmt2 ? 12 : 8)` the format select drives an
+// ADDER, and that adder is the last thing before the L1 address: the fit
+// after milestone 81 put the worst path through mem_raw -> divzero_now ->
+// eac_is_fmt2 -> this subtract -> l1_addr_b. Now it drives a mux, and the
+// two subtracts of a constant sit off the path.
+wire [31:0] exc_sp_fmt0    = exc_sp_bank - 32'd8;
+wire [31:0] exc_sp_fmt2    = exc_sp_bank - 32'd12;
+wire [31:0] exc_new_sp     = eac_is_fmt2 ? exc_sp_fmt2 : exc_sp_fmt0;
 wire [15:0] exc_sr_word    = (eac_is_chk_trap && !eac_is_trace)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}

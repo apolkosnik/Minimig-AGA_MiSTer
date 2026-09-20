@@ -207,9 +207,19 @@ module ap040_pipe_l1
 reg [DW-1:0] mem [0:(1<<AW)-1];
 
 // The window map. Truncation to AW bits is deliberate and is what the
-// callers' own `(addr - PC_RESET) >> 1` did before this milestone.
-wire [AW-1:0] ia = (address_a - PC_RESET) >> 1;
-wire [AW-1:0] ib = (address_b - PC_RESET) >> 1;
+// callers' own `(addr - PC_RESET) >> 1` did before milestone 81.
+//
+// Only the low AW+1 bits of the difference survive the shift and the
+// truncation, and a borrow only ever propagates upward, so this is a narrow
+// subtract and is written as one. Spelled `(address_b - PC_RESET) >> 1` it
+// is a 32-bit subtract, and it sits AFTER ap040_pipe_cpu.v's port-B mux --
+// where the same arithmetic used to sit on both of the mux's inputs, in
+// parallel with it. That cost 1.05 ns on the critical spine, which the fit
+// after milestone 81 caught: +0.488 ns of slack became -0.562.
+wire [AW:0] ia_full = address_a[AW:0] - PC_RESET[AW:0];
+wire [AW:0] ib_full = address_b[AW:0] - PC_RESET[AW:0];
+wire [AW-1:0] ia = ia_full[AW:1];
+wire [AW-1:0] ib = ib_full[AW:1];
 integer i;
 initial for (i = 0; i < (1<<AW); i = i + 1) mem[i] = `AP040_OP_NOP;
 
