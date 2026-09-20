@@ -233,10 +233,10 @@
 // into the SAME exception-entry sequencer instead; a supervisor RTE gets its own 2-                 //
 // beat READ sequencer (ret_ph/ret_pending/ret_dword0), the mirror image of the                       //
 // exception-entry sequencer's own WRITE beats, reading back the exact two dwords a                    //
-// format-$0 push wrote. Format $0 is assumed unconditionally once the pop completes --                 //
-// this pipeline has no mechanism that could ever have pushed anything else, so a real                   //
-// FMTERR fallback for an unrecognized frame format is deliberately deferred, not                         //
-// forgotten -- see AP040_IMPLEMENTATION_PLAN.md.                                                          //
+// format-$0 push wrote. The format nibble in dword1 decides the pop (milestone 76):     //
+// $0 is eight bytes, $2/$3 twelve, anything else is a FORMAT ERROR -- vector 14, a       //
+// format-$0 frame naming the RTE itself, A7 untouched -- raised from inside the pop     //
+// through the same exception-entry sequencer (fmterr_now/exc_pend_fmterr below).        //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -409,6 +409,7 @@ module ap040_ea_fetch
 	output reg [31:0] eaf_ea_target,
 	output reg        eaf_is_rts,
 	output reg        eaf_is_rte,
+	output reg        eaf_is_fmterr,   // RTE format error, vector 14 (milestone 76)
 	// RTE's popped SR (masked, format-$0-frame's word0 high half) --
 	// ap040_execute.v's new commit source for restoring it, same shape as
 	// eaf_sr_snapshot above but this one's a REAL architectural value
@@ -791,8 +792,16 @@ wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
+// RTE format error (milestone 76): the nibble arrives with the pop's second
+// dword, so it is judged where ret_done is (below) and latched like the other
+// data-derived faults -- the frame push it starts runs for several cycles and
+// l1_q_b moves on.
+wire fmterr_now;
+reg  exc_pend_fmterr;
+wire eac_is_fmterr = fmterr_now || exc_pend_fmterr;
+
 wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-                      eac_is_chk_trap || eac_is_trapcc_trap;
+                      eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr;
 wire exc_active    = eac_valid && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
@@ -817,11 +826,9 @@ wire exc_stall     = exc_active && !exc_vec_done;
 // at all: eac_is_priv already took priority via eac_is_exc above, so
 // eac_is_rte_active can safely assume supervisor.
 //
-// Format $0 is assumed UNCONDITIONALLY once the pop completes -- this
-// pipeline has no mechanism that could ever have pushed anything else
-// (format $2/$3/$4/$7 don't exist here yet), so a real FMTERR fallback
-// for a stack frame this core didn't push itself is deliberately
-// deferred, not overlooked -- see header.
+// The format nibble is judged when dword1 arrives (ret_fmt_* / fmterr_now,
+// below the sequencer's wires): $0 pops eight bytes, $2 and $3 twelve, and
+// anything else is a format error (milestone 76).
 wire eac_is_rte_active = eac_is_rte && !eac_is_priv;
 
 localparam RET_BEAT0 = 1'd0, RET_BEAT1 = 1'd1;
@@ -834,6 +841,25 @@ wire ret_issue    = ret_active && !ret_pending;
 wire ret_complete = ret_active && ret_pending;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
+
+// Format check (milestone 76). $0 is the four-word frame this core pushes
+// for everything but address error; $2 and $3 are the six-word frames ($3
+// is the FPU post-instruction frame, same shape -- ap040_core.v's S_RTE_FIN
+// accepts both, and so does this). Anything else is a format error: vector
+// 14, a format-$0 frame stacking the RTE's OWN address so the handler can
+// repair the frame and re-execute it, and A7 unchanged -- the pop never
+// commits. fmterr_now makes the ret_done cycle an exception entry instead:
+// exc_writing sits above ret_done in the output block's chain and wins the
+// L1 address mux, so beat 0 of the frame goes out in that same cycle.
+//
+// Deliberate deviations, deferred with the mechanisms they need: $1
+// (throwaway) needs the SR loaded and the pop restarted on the next frame;
+// $7 (access error) needs the BCU/MMU that would push it. Both land here
+// rather than being silently popped as $0.
+wire [3:0] ret_fmt      = l1_q_b[15:12];
+wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
+wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
+assign fmterr_now = ret_done && !ret_fmt_ok;
 
 assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken || mvm_stall;
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
@@ -927,12 +953,13 @@ wire [15:0] exc_sr_word    = eac_is_chk_trap
 //         protect if the call itself never completes.
 wire [31:0] exc_pc_field   = eac_is_jmp_odd ? (eac_pc + 32'd2) :
                               eac_is_jsr_odd ? ea_target :
-                              (eac_is_illegal || eac_is_priv) ? eac_pc : eac_next_pc;
+                              (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc : eac_next_pc;
 wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
                               eac_is_divzero ? 8'd5 :
                               eac_is_chk_trap ? 8'd6 :
-                              eac_is_trapcc_trap ? 8'd7 : eac_imm[7:0];
+                              eac_is_trapcc_trap ? 8'd7 :
+                              eac_is_fmterr ? 8'd14 : eac_imm[7:0];
 wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
 // Format $2's own extra "instruction address" longword -- the odd target
 // itself, LSB cleared (ap040_core.v's own convention for this field,
@@ -1049,6 +1076,7 @@ always @(posedge clk) begin
 		eaf_ea_target  <= 32'h0;
 		eaf_is_rts     <= 1'b0;
 		eaf_is_rte     <= 1'b0;
+		eaf_is_fmterr  <= 1'b0;
 		eaf_rte_sr_data<= 16'h0;
 		eaf_cond       <= 4'h0;
 		mem_pending    <= 1'b0;
@@ -1065,6 +1093,7 @@ always @(posedge clk) begin
 		exc_pend_chk     <= 1'b0;
 		exc_pend_chk_n   <= 1'b0;
 		exc_pend_trapcc  <= 1'b0;
+		exc_pend_fmterr  <= 1'b0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
@@ -1084,6 +1113,9 @@ always @(posedge clk) begin
 		if (exc_vec_done)     exc_pend_trapcc <= 1'b0;
 		else if (trapcc_now)  exc_pend_trapcc <= 1'b1;
 
+		if (exc_vec_done)     exc_pend_fmterr <= 1'b0;
+		else if (fmterr_now)  exc_pend_fmterr <= 1'b1;
+
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
@@ -1092,6 +1124,7 @@ always @(posedge clk) begin
 			exc_pend_divzero <= 1'b0;
 			exc_pend_chk     <= 1'b0;
 			exc_pend_trapcc  <= 1'b0;
+			exc_pend_fmterr  <= 1'b0;
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending
@@ -1158,6 +1191,7 @@ always @(posedge clk) begin
 				eaf_is_movec   <= 1'b0;
 				eaf_is_rts     <= eac_is_rts;
 				eaf_is_rte     <= 1'b0;
+				eaf_is_fmterr  <= 1'b0;
 				eaf_sr_snapshot<= sr_in;
 				eaf_cond       <= eac_cond;
 				mem_pending    <= 1'b0;
@@ -1284,7 +1318,7 @@ always @(posedge clk) begin
 				// register, and the exception's result -- the new supervisor
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-				                    eac_is_chk_trap || eac_is_trapcc_trap) ? 4'd15 : eac_dest_reg;
+				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -1348,6 +1382,7 @@ always @(posedge clk) begin
 				// on eac_is_rte_active).
 				eaf_is_rts     <= 1'b0;
 				eaf_is_rte     <= 1'b0;
+				eaf_is_fmterr  <= eac_is_fmterr;
 				// The value ap040_execute.v's exception-masking arithmetic
 				// needs -- captured HERE (this stage's own already-forwarded
 				// read), not re-read live one cycle later there, to avoid a
@@ -1357,6 +1392,12 @@ always @(posedge clk) begin
 				eaf_cond       <= eac_cond;
 				exc_ph          <= EXC_BEAT0;
 				exc_vec_pending <= 1'b0;
+				// A format error left the pop parked at beat 1 with its read
+				// still marked pending (ret_done's branch never ran); the next
+				// RTE must start at beat 0. Already there for every other
+				// exception.
+				ret_ph          <= RET_BEAT0;
+				ret_pending     <= 1'b0;
 			end else if (ret_issue) begin
 				// Posting this beat's read address (ret_addr, driven
 				// combinationally above) -- l1_q_b registers its data by
@@ -1390,20 +1431,16 @@ always @(posedge clk) begin
 				// extra longword is the faulting address, which this core
 				// has no use for on return.
 				//
-				// Still NOT implemented, and still deliberate: FMTERR.
-				// A format nibble that is neither $0 nor $2 is treated as
-				// $0 rather than raising vector 14. Raising it from inside
-				// this sequencer means starting an exception from a branch
-				// that is already mid-pop, which is a real piece of work
-				// and not one this core can currently provoke -- nothing
-				// here pushes any other format.
+				// A nibble that is neither $0 nor $2/$3 never reaches this
+				// branch: fmterr_now made this cycle an exception entry, and
+				// exc_writing sits above ret_done in this chain (milestone 76).
 				eaf_valid       <= eac_valid;
 				eaf_pc          <= eac_pc;
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
 				eaf_operand_b   <= operand_a +
-				                    ((l1_q_b[15:12] == 4'h2) ? 32'd12 : 32'd8);  // new A7: frame size by format
+				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
@@ -1444,6 +1481,7 @@ always @(posedge clk) begin
 				eaf_is_movec    <= 1'b0;
 				eaf_is_rts      <= 1'b0;
 				eaf_is_rte      <= 1'b1;
+				eaf_is_fmterr  <= 1'b0;
 				// Popped SR, masked -- ap040_execute.v's new commit source
 				// for restoring it (exe_writes_sr/exe_sr_data) -- see its
 				// header for why this needs its own field rather than
@@ -1532,6 +1570,7 @@ always @(posedge clk) begin
 				// discipline every other flag already follows.
 				eaf_is_rts     <= 1'b0;
 				eaf_is_rte     <= 1'b0;
+				eaf_is_fmterr  <= 1'b0;
 				eaf_sr_snapshot<= sr_in;
 				eaf_cond       <= eac_cond;
 			end
