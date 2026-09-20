@@ -1688,6 +1688,48 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 84: memory operands in the differential, and what they found
+
+   The generated programs now touch memory. A prologue points A0-A6 into a
+   16 KB scratch region seeded with random data, and seven forms join the
+   register-only set: `MOVE.L` both ways through `(An)` and `(An)+`,
+   `ADD.L` from and to `(An)` -- the read-modify-write path -- and
+   `CMP.L (An),Dn`. The comparison grew with them: 15 registers and all
+   8,192 scratch words. **16 programs x 96 slots, both cores agree on all
+   of it.**
+
+   Operands are Long and go through a pointer the prologue set, so `(An)+`
+   keeps them even and nothing reaches below $4000, where the program, the
+   vectors, the dump and the stack live.
+
+   **`MOVEA.L Dm,An` is deliberately not generated, and that is the
+   milestone's finding.** The first run with memory operands generated it,
+   which puts an arbitrary value in a pointer, and the two cores then
+   diverged by exactly one byte: $6FE3FEF0 on the pipelined core where the
+   FSM core had $8D6FE3FE, and a stored longword landing one byte apart in
+   the two memories. That is an UNALIGNED longword access. A 68040
+   performs one in hardware -- `ap040_bus16_adapter.v` even splits it into
+   byte/word/byte, which is why the FSM core gets it right through the same
+   adapter -- and this core silently accesses the aligned longword instead.
+
+   Not a decode gap: the instruction decodes and executes, and produces the
+   wrong value. It is the first outright WRONG behaviour the differential
+   has found, as opposed to a missing instruction, and it needs its own
+   milestone: port B does one aligned 32-bit access, and an access spanning
+   two of them changes EA-fetch's `mem_issue`/`mem_complete` sequencer, the
+   store path's lane mask, and `ap040_pipe_membus.v`'s sizing.
+
+   | mutation | result |
+   |---|---|
+   | a Long store writes only its high half | FAIL -- every round: the pipelined core never finishes, since the done flag is a Long store too |
+   | the read-modify-write operand crossover removed | FAIL -- round 0, four registers |
+   | full suite, normal build | 89/89 |
+   | full suite, slow build | 89/89 |
+
+   Still not covered: no displacement or absolute addressing in the
+   generator, no byte or word memory operands (they would make a pointer
+   odd, which is the gap above), no MOVEM, no traps, no supervisor state.
+
    ### Milestone 83: checked against the FSM core, not against me
 
    Every bench before this one compares the pipelined core to values I
