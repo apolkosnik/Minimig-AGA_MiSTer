@@ -1661,6 +1661,40 @@ real MMU or bus-error path arrives, which is the same boundary
    bench covers a memory source. A register-only or immediate-only bench
    does not test the operand routing at all.
 
+   ### Milestone 66: auditing every operand_a use
+
+   Three milestones in a row turned on one root cause, so it was worth
+   stating precisely and checking exhaustively rather than waiting to trip
+   over it again:
+
+   > In `ap040_ea_fetch.v`, `operand_a` is the ADDRESS for a memory source,
+   > not the data. Any logic there that treats it as a VALUE is wrong for
+   > every memory-mode form of its instruction.
+
+   All twenty-odd uses were classified. The result is that **only the two
+   already fixed were wrong** -- the divide's divisor and CHK's bound. Every
+   other use wants the address or belongs to an instruction that is not a
+   memory source:
+
+   - `an_base`, `ea_base`, `mvm_addr`, `ret_addr` and UNLK's `operand_a + 4`
+     all want the address, which is what they get.
+   - `st_dat` and LINK's pushed value belong to instructions with
+     `is_mem_src = 0`, so `operand_a` is a register value there. There is no
+     memory-to-memory MOVE to complicate it.
+   - MOVEM's use is under a `raddr_a` override, so it reads the register the
+     beat is storing.
+   - The plain branch's `sxt_w_of(operand_a)` is only reached by
+     non-memory-source instructions; the memory path sign-extends inside
+     `mem_lane` instead.
+
+   The audit raised one SUSPECTED deviation, which was then measured rather
+   than argued: does a trapping `CHK (A0)+` keep its postincrement? The
+   68040 completes the EA before the comparison, so it must. **It does** --
+   the second write port survives the exception path, `eaf_writes_an` being
+   set from `an_wr_any` in the exception branch as well as the ordinary
+   one. `tb_ap040_pipe_chkpi.v` keeps it as a regression check, because
+   nothing else in the suite pins that interaction down.
+
    ### Adding a gather kind: the lists it must join
 
    Milestone 62 needed two debug cycles, both from the same cause, and
