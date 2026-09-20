@@ -1688,6 +1688,81 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 87: shifts and rotates counted by a register
+
+   The first of the two decode gaps the differential found in milestone 83.
+   Bit 5 of `1110 ccc d ss i tt rrr` says where the count comes from, and
+   only the immediate form decoded; the register form was an illegal
+   instruction. `shift_shape` now accepts both, and decode points
+   `id_src_reg` at the count register, so the count reads through port A
+   and forwards from EX and WB like any other source operand -- no new
+   path, which is the whole datapath cost.
+
+   **Two cases come with it that the immediate encoding cannot express.** A
+   count of more than 32, which the closed-form barrel already handled --
+   it takes 1..63 and composes the one-bit steps. And a count of ZERO,
+   which it did not: 0 in the immediate field means EIGHT, so the barrel
+   had never been asked, and it computes a carry out of a shift that never
+   happened and writes it to X. `ap040_pipe_alu.v` special-cases it now:
+   the operand is unchanged, V and C are cleared, C takes X for ROXL/ROXR
+   rather than 0, and X is left alone.
+
+   `tb_ap040_pipe_shiftreg.v` checks a plain register count, a count of 33
+   taken modulo 32, and a zero-count ROXL whose `SCS` result says C took X
+   -- which makes that check as much about X as about C, since the wrong
+   answer writes the phantom carry to both.
+
+   | run | result |
+   |---|---|
+   | control: milestone-86 RTL | FAIL -- 3 of 4: the shifts are illegal instructions there, so nothing happens |
+   | full suite, normal build | 92/92 |
+   | full suite, slow build | 92/92 |
+
+   **Two fits, because the first one was a lesson.** With the zero-count
+   guard as first written -- `r = bm` forced alongside the flags -- the fit
+   came back at 5,780 ALMs, Fmax 37.40 MHz, slack **-1.736 ns**, worst
+   path 26.22 ns: a 32-bit mux had landed on the ALU's output path, on the
+   spine, for a result the closed forms already produce at n = 0. Every
+   form reduces to the identity there; only the four shifts' X and the two
+   plain rotates' C were wrong. Two flag bits, then:
+
+   | | ms 86 | ms 87, first | ms 87, two-bit guard |
+   |---|---:|---:|---:|
+   | ALMs | 5,598 | 5,780 | 5,763 |
+   | ALU ALMs | 1,642 | 1,802 | 1,793 |
+   | Fmax, slow 1100 mV 100 C | 40.38 MHz | 37.40 MHz | 39.85 MHz |
+   | setup slack at 25 ns | +0.235 | -1.736 | **-0.097** |
+   | worst path data delay | 24.59 ns | 26.22 ns | 24.46 ns |
+
+   Two things remain from that, and they are different in kind.
+
+   The +150 ALMs in the ALU are real and stay. Decode's immediate count
+   never exceeds 8, so `eaf_shcnt[5:4]` had been constant zero all the way
+   into the barrel and Quartus had folded two of its six levels away. A
+   register count makes all six bits live. That is the cost of counts 0..63
+   and there is no cheaper way to have them.
+
+   The -0.097 ns is not a longer path: the data delay is 24.46 ns against
+   24.59 ns on the SAME spine a milestone earlier, and the slack moved
+   0.33 ns with the endpoint's placement, inside the spread every fit
+   since milestone 75 has shown. What it says is that the spine has no
+   margin left at 25 ns, and the next milestone that touches it will need
+   to shorten it rather than hope. The path names where: from
+   `ex_fwd_data` at 18.4 ns to `l1_addr_b` at 24.1 ns is 5.7 ns of CHK
+   compare, `eac_is_chk_trap`, `exc_active` and the exception's claim on
+   the L1 address mux -- the frame's first beat goes out in the very cycle
+   the fault is detected, which was a choice (milestone 76), and it puts
+   the whole fault-detection cone on every LOAD's address path. Starting
+   the frame one cycle later takes it off. That is milestone 88.
+
+   The differential generates register-count shifts with whatever the count
+   register holds -- 0 to 63 after the modulo -- so the FSM core is the
+   oracle for the rest of the flag semantics, which is exactly the part I
+   would otherwise have had to derive from the manual by hand.
+
+   One gap left from milestone 83: the immediate-to-memory forms
+   (`ORI.B #x,(An)` and its family).
+
    ### Milestone 86: a sized data port, and Longwords at odd addresses
 
    The bytes of a Long at an odd address span THREE words. No lane select
