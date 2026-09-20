@@ -1683,6 +1683,71 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Fit after milestone 74: 5,190 ALMs, 37.5 MHz, and one path shape
+
+   The last standalone fit was at milestone 27 (section 5b). Forty-seven
+   milestones later, `tests/ap040/pipe_synth/run.sh` reproduces that flow
+   from the repo -- Cyclone V 5CSEBA6U23I7, Quartus 17.0, `L1_AW=4`, all
+   ports virtual, one 25 ns clock, which is the 40 MHz target (the Minimig
+   CPU clock is 35.234 ns) -- and prints the four numbers the plan tracks.
+   The fit was run twice, by hand and by the script, with identical
+   results.
+
+   | | ms 27 | ms 74 |
+   |---|---:|---:|
+   | ALMs | 3,391 | 5,190 |
+   | ALU ALUTs | 2,034 | 2,429 |
+   | combinational ALUTs, total | -- | 7,213 |
+   | registers | -- | 2,211 |
+   | DSP blocks | -- | 2 |
+   | Fmax, slow 1100 mV 100 C | -- | 37.48 MHz |
+   | setup slack at 25 ns | -- | -1.680 ns, TNS -84.0 |
+
+   Per entity, ALMs: execute 1,870 (the ALU 1,616 of it), EA-fetch 1,310,
+   L1 604, register file 459, decode 378, instruction fetch 81, EA-calc 52.
+   Every `AP040_ALU_*` code in the defs file is now selected somewhere in
+   `ap040_decode.v` (35, MULU/MULS included). The core grew by half while
+   the ALU grew by a fifth: the growth since milestone 27 is sequencers
+   and addressing, not operations.
+
+   **The 40 worst setup paths are one path.** `report_timing -npaths 40`
+   returns forty paths, and every one of them crosses, in order: an
+   EA-fetch output register (`eaf_size`, `eaf_operand_*`) -> the ALU's
+   shift/rotate logic, including the `lpm_divide` that
+   `nx = n % (nbits + 6'd1)` at `ap040_pipe_alu.v:308` infers -> the result
+   mux -> `ex_fwd_data` -> EA-fetch's forwarded-An base (`an_base`) -> the
+   EA adder (`Add2`) -> `l1_addr_b` -> the L1 read mux -> `q_b`. Twenty of
+   the forty also pass through the compare that feeds `eac_is_chk_trap`,
+   nine through `eac_is_chk_trap` -> `exc_vec_addr` on the way to the L1
+   address, fourteen through the write-buffer merge in the L1 read mux.
+   The worst is 26.56 ns of data delay against 25 ns, split roughly:
+   12.4 ns in the ALU (4.7 of it inside the divider cells), 10.5 ns from
+   `ex_fwd_data` to the L1 address, 3.4 ns in the L1 read.
+
+   So the shape is: EX's forwarding output is the ALU result, unregistered,
+   and EA-fetch consumes it in the same cycle -- as an address base, as a
+   CHK operand, and through the exception-vector select -- ahead of the L1
+   read that the address selects. Three stages of logic in one period. Two
+   things sit on it that need not:
+
+   1. The `%`. `nbits + 1` is 9, 17 or 33 and `n` is six bits, so the
+      reduction is a few constant compares, not a divider. The same line
+      is `rtl/ap040/ap040_alu.v:271` in the FSM core (the two files are
+      identical logic); it never showed there because that core's critical
+      path is the SDRAM clock, not the CPU's.
+   2. The forward itself. Forwarding EX's combinational result into
+      EA-fetch's address adder is what lets `ADDQ #4,A0` / `MOVE.L (A0),D0`
+      run back to back without a stall; the price is ALU + EA adder + L1
+      read in one cycle. Registering that forward, or taking it from WB
+      only the way `sr_resolved` takes the CCR, costs a cycle on every
+      An-after-ALU dependency and buys the whole ALU depth back.
+
+   Neither is done here. Item 1 is a local change whose test is the
+   existing suite plus a re-fit; item 2 changes CPI and is a decision, not
+   a fix. What the fit settles is the question it was run for: the core
+   does not close 40 MHz as it stands, by 1.7 ns, on a single path shape
+   with a named divider on it.
+
    ### Milestone 74: TRAPcc, and the CCR one stage too early
 
    TRAPcc traps to vector 7 if its condition holds; the `.W`/`.L` forms
