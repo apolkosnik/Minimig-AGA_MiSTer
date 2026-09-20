@@ -1688,6 +1688,53 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 85: Word accesses at odd addresses
+
+   Milestone 84's finding, fixed. A Word at an odd address is still inside
+   the longword port B returns -- bytes 1 and 2 of it -- so the load is a
+   lane select and the store a byte-enable pattern, with no extra access
+   either way. Taking the high half whatever the address said read the byte
+   BEFORE the one asked for.
+
+   Three sites had the same assumption, which is why the differential saw
+   it in loads, stores and read-modify-writes alike: `ap040_ea_fetch.v`'s
+   `mem_raw`, its `st_be`/`st_dat`, and `ap040_execute.v`'s
+   `ex_st_be`/`ex_st_data` for the RMW store. `ap040_pipe_membus.v` turns
+   the new `0110` mask into a Word transaction at the odd address, which
+   `ap040_bus16_adapter.v` already splits into two byte cycles -- so the
+   bus side needed nothing, again.
+
+   A Byte is never misaligned, and was always right. **A LONG at an odd
+   address is still not implemented**: it spans three words, so it needs
+   two accesses and a merge on the read side and two posted writes on the
+   store side, which is a sequencer change in EA-fetch rather than a lane
+   select. That is the next milestone, and the differential keeps A0-A4
+   even so the rest of it can run meanwhile.
+
+   `tb_ap040_pipe_unaligned.v` checks eight bytes the old code got wrong.
+   The control is exact: on milestone-84 RTL seven of the eight fail, each
+   by one byte -- $1122 for $2233, a store landing at $0900 instead of
+   $0901 -- and the eighth, A0 after a postincrement, passes, because the
+   pointer arithmetic was never what was wrong.
+
+   The differential now generates these deliberately: A5 starts ODD in the
+   prologue and is the pointer the new `MOVE.W`/`ADD.W`/`MOVE.B` forms use,
+   so every round contains unaligned Word accesses, through the bus path
+   where they become byte cycles. 16 programs x 96 slots still agree on 15
+   registers and 8,192 scratch words.
+
+   | run | result |
+   |---|---|
+   | control: milestone-84 RTL | FAIL -- 7 of 8, each one byte off |
+   | full suite, normal build | 90/90 |
+   | full suite, slow build | 90/90 |
+
+   **Fit, same flow:** 5,259 ALMs (5,250 after milestone 81), ALU 1,532,
+   Fmax 41.37 MHz (40.47), setup slack at 25 ns +0.825 ns (+0.288), worst
+   path 23.58 ns. Nine ALMs for the lane selects, and the spine did not
+   move -- the new muxes sit on the data return, not on the address path
+   that the worst paths run through.
+
    ### Milestone 84: memory operands in the differential, and what they found
 
    The generated programs now touch memory. A prologue points A0-A6 into a
