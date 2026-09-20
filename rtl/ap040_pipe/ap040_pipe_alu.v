@@ -385,16 +385,20 @@ always @* begin
 			endcase
 			// A REGISTER count can be zero and an immediate one cannot (0
 			// means 8), so this case only became reachable with milestone
-			// 87's register-count forms. The operand is unchanged, V and C
-			// are cleared -- except ROXL/ROXR, whose C takes X -- and X
-			// itself is untouched, which is the part the closed forms above
-			// get wrong: they compute a carry out of a shift that never
-			// happened and write it to X.
+			// 87's register-count forms. Every closed form above already
+			// reduces to the identity at n == 0 -- r is bm, ASL's V is 0,
+			// and ROX's C and X are the unchanged X -- so only two things
+			// are wrong: the four shifts write the phantom carry to X, and
+			// the two plain rotates report bit 0 (or the MSB) as C when
+			// nothing wrapped. Two flag bits, not a result mux: the first
+			// draft forced r as well and put a 32-bit mux on the ALU's
+			// output path for nothing.
 			if (n == 6'd0) begin
-				r  = bm;
-				vf = 1'b0;
-				x2 = f_x;
-				c  = (op == `AP040_ALU_ROXL1 || op == `AP040_ALU_ROXR1) ? f_x : 1'b0;
+				case (op)
+				`AP040_ALU_ASL1, `AP040_ALU_LSL1, `AP040_ALU_ASR1, `AP040_ALU_LSR1: x2 = f_x;
+				`AP040_ALU_ROL1, `AP040_ALU_ROR1:                                   c  = 1'b0;
+				default: ;
+				endcase
 			end
 			result = r;
 			flags_out = {x2, res_msb(r), res_zero(r), vf, c};

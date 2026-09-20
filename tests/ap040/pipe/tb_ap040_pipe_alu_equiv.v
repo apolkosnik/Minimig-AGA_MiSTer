@@ -12,8 +12,14 @@
 // are not compared.                                                        //
 //                                                                          //
 // Part A is exhaustive on the dimension milestone 75 changes: all 8 shift/  //
-// rotate operations x 3 sizes x every count 0..63 x both X-in values x 16   //
-// operand patterns. The ROX rotates take their count mod (size+1), and the  //
+// rotate operations x 3 sizes x every count 1..63 x both X-in values x 16   //
+// operand patterns. Count 0 is outside the reference's contract -- its      //
+// header says 1..63, and rtl/ap040/ap040_core.v never calls it with 0 --    //
+// and since milestone 87 the pipe copy defines it (a register count can be  //
+// 0), so at 0 the two copies differ by design. That case is checked by      //
+// tb_ap040_pipe_shiftreg.v and, against the FSM CORE rather than its ALU,   //
+// by tb_ap040_pipe_dual.v.                                                  //
+// The ROX rotates take their count mod (size+1), and the                    //
 // reduction is now three constant compares instead of a `%`. A wrong        //
 // threshold or an off-by-one shows up only at specific counts, so every     //
 // count is tried rather than sampled.                                       //
@@ -108,7 +114,7 @@ module tb_ap040_pipe_alu_equiv;
 		// Part A: every shift/rotate at every count
 		for (o = {26'd0, `AP040_ALU_ASL1}; o <= {26'd0, `AP040_ALU_ROXR1}; o = o + 1)
 			for (sz = 0; sz < 3; sz = sz + 1)
-				for (cnt = 0; cnt < 64; cnt = cnt + 1)
+				for (cnt = 1; cnt < 64; cnt = cnt + 1)   // 0 is outside the reference's range
 					for (x = 0; x < 2; x = x + 1)
 						for (pat = 0; pat < 16; pat = pat + 1) begin
 							rnd = xorshift32(rnd);
@@ -126,7 +132,7 @@ module tb_ap040_pipe_alu_equiv;
 					rnd = xorshift32(rnd); b = rnd;
 					rnd = xorshift32(rnd);
 					op = o[5:0]; size = sz[1:0];
-					shcnt = rnd[5:0]; flags_in = rnd[10:6];
+					shcnt = (rnd[5:0] == 6'd0) ? 6'd1 : rnd[5:0]; flags_in = rnd[10:6];
 					compare("random");
 				end
 
