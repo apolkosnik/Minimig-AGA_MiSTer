@@ -322,6 +322,7 @@ module ap040_decode
 	output reg        id_movem_wb,
 	output reg        id_movem_pcrel,
 	output reg        id_movem_abs,
+	output reg [15:0] id_movem_mask,
 	output reg        id_is_unlk,
 	output reg        id_is_bsr,
 	output reg        id_is_jsr,
@@ -691,13 +692,23 @@ wire movem_shape_ld = (if_opcode[15:7] == 9'b010011001);
 // address rather than just a length.
 wire movem_mode_pcd = (if_opcode[5:3] == 3'b111) && (if_opcode[2:0] == 3'b010);
 wire movem_mode_absw = (if_opcode[5:0] == 6'b111000);
+// $xxx.L (milestone 73): mask plus a 32-bit address is a THREE-word gather,
+// the first in this decoder. It costs less than it sounds. disp_acc shifts
+// every gathered word in, so after the mask and the high address word it
+// holds {mask, addr_hi} and the completing word is addr_lo -- gather_disp
+// is then the whole address for free, and the mask is disp_acc[31:16].
+// That is also why the mask now has its OWN field, id_movem_mask, for every
+// MOVEM mode: packing it into id_imm's high half (milestone 68) only worked
+// while nothing needed all 32 bits of id_imm for an address.
+wire movem_mode_absl = (if_opcode[5:0] == 6'b111001);
 wire movem_mode_ctl = (if_opcode[5:3] == 3'b010) || (if_opcode[5:3] == 3'b101) ||
-                      movem_mode_absw;
+                      movem_mode_absw || movem_mode_absl;
 wire is_movem_st = movem_shape_st && ((if_opcode[5:3] == 3'b100) || movem_mode_ctl);
 wire is_movem_ld = movem_shape_ld && ((if_opcode[5:3] == 3'b011) || movem_mode_ctl ||
                                       movem_mode_pcd);
 wire is_movem_pcrel = movem_shape_ld && movem_mode_pcd;
 wire is_movem_absw  = (movem_shape_st || movem_shape_ld) && movem_mode_absw;
+wire is_movem_absl  = (movem_shape_st || movem_shape_ld) && movem_mode_absl;
 wire is_movem_w  = (if_opcode[6] == 1'b0);
 // (d16,An) gathers a SECOND word after the mask, so it is a long gather --
 // and id_imm then carries {mask, displacement} rather than the mask alone.
@@ -1589,6 +1600,7 @@ reg         held_is_stabs;
 // cannot be read off if_opcode at the completing end -- it is held here.
 reg  [1:0]  held_mv_size;
 reg         held_is_long;
+reg         held_is_xlong;      // three extension words (MOVEM $xxx.L)
 reg         held_is_dbcc;
 reg         held_is_move_disp;
 // The eighth gather kind (milestone 40). held_alu_op is the first gather
@@ -1714,6 +1726,7 @@ always @(posedge clk) begin
 		id_movem_wb     <= 1'b0;
 		id_movem_pcrel  <= 1'b0;
 		id_movem_abs    <= 1'b0;
+		id_movem_mask   <= 16'h0;
 		id_is_unlk      <= 1'b0;
 		id_is_bsr       <= 1'b0;
 		id_is_jsr       <= 1'b0;
@@ -1741,6 +1754,7 @@ always @(posedge clk) begin
 		held_is_stabs    <= 1'b0;
 		held_mv_size     <= `AP040_SZ_L;
 		held_is_long    <= 1'b0;
+		held_is_xlong   <= 1'b0;
 		held_is_dbcc    <= 1'b0;
 		held_is_move_disp <= 1'b0;
 		held_is_alu_disp  <= 1'b0;
@@ -1797,7 +1811,8 @@ always @(posedge clk) begin
 					// out valid. id_is_illegal's own exception path reads
 					// id_pc (held_pc, already set above), not id_next_pc, for
 					// its stacked PC -- see ap040_ea_fetch.v's header.
-					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
+					id_next_pc      <= held_pc + 32'd2 + (held_is_xlong ? 32'd6 :
+					                                      held_is_long  ? 32'd4 : 32'd2);
 					id_dest_reg     <= (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
 					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
 					                    held_is_abs  ? {1'b0, held_dest_reg} :
@@ -1842,8 +1857,15 @@ always @(posedge clk) begin
 					// ap040_execute.v extract both from eac_imm[3:0] rather
 					// than needing two more dedicated ports threaded through
 					// every stage.
-					id_imm          <= held_is_movem ? (held_is_long ? gather_disp
-					                                                  : {if_opcode, 16'd0}) :
+					// MOVEM: the mask is the FIRST gathered word and the EA the rest.
+					// One word -- the mask is completing now, no EA. Two -- the mask
+					// was shifted in, the displacement is completing. Three -- the
+					// mask is two words back and the completing pair is the address.
+					id_movem_mask   <= held_is_xlong ? disp_acc[31:16] :
+					                   held_is_long  ? disp_acc[15:0]  : if_opcode;
+					id_imm          <= held_is_movem ? (held_is_xlong ? {disp_acc[15:0], if_opcode} :
+					                                    held_is_long  ? {{16{if_opcode[15]}}, if_opcode} :
+					                                                    32'h0) :
 					                   held_ea_indexed ? {16'd0, if_opcode} :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
@@ -2032,7 +2054,8 @@ always @(posedge clk) begin
 				held_movem_down<= is_movem_down;
 				held_movem_wb  <= is_movem_wb;
 				held_movem_pcrel<= is_movem_pcrel;
-				held_movem_abs <= is_movem_absw;
+				held_movem_abs <= is_movem_absw || is_movem_absl;
+				held_is_xlong  <= is_movem_absl;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
 				held_is_jsr   <= is_jsr_gather;
 				held_is_movec <= is_movec_opcode;
@@ -2041,7 +2064,8 @@ always @(posedge clk) begin
 				                                  // extension word -- see header.
 				held_reg      <= if_opcode[2:0];
 				held_dest_reg <= if_opcode[11:9];
-				ext_pending   <= (is_branch_long || is_bsr_long ||
+				ext_pending   <= is_movem_absl ? 2'd3 :
+				                 (is_branch_long || is_bsr_long ||
 				                  (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
@@ -2185,6 +2209,7 @@ always @(posedge clk) begin
 				id_movem_wb     <= 1'b0;
 				id_movem_pcrel  <= 1'b0;
 				id_movem_abs    <= 1'b0;
+				id_movem_mask   <= 16'h0;
 				id_is_unlk      <= if_valid && is_unlk;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;

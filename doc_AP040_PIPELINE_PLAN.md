@@ -1683,6 +1683,25 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 73: MOVEM $xxx.L -- the three-word gather, and MOVEM complete
+
+   Mask plus a 32-bit address is the first THREE-word gather in this
+   decoder. It cost less than expected: `disp_acc` shifts every gathered
+   word in, so after the mask and the high address word it holds
+   `{mask, addr_hi}`, the completing word is `addr_lo`, `gather_disp` is
+   the whole address for free and the mask is `disp_acc[31:16]`.
+   `ext_pending` was already two bits wide; 3 fits. `held_is_xlong` carries
+   the length for `id_next_pc`.
+
+   That is also why the mask now has its OWN field, `id_movem_mask`, for
+   every MOVEM mode -- one word: the completing word itself; two: the word
+   shifted in; three: two words back. Milestone 68's `{mask, displacement}`
+   packing in `id_imm` only worked while no mode needed all 32 bits of
+   `id_imm` for an address, and the five MOVEM benches guarded the change.
+
+   **MOVEM is now complete**: `.W` and `.L`; `-(An)`, `(An)+`, `(An)`,
+   `(d16,An)`, `(d16,PC)`, `$xxx.W`, `$xxx.L`.
+
    ### Milestone 72: MOVEM (d16,PC) and $xxx.W
 
    Both are control modes and both gather a second word after the mask, so
