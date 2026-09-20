@@ -90,7 +90,7 @@ endfunction
 // of the low 16: the first run of this bench generated $0017 where $7217
 // was meant, which is ORI.B #x,(A7) -- an instruction the FSM core has and
 // the pipelined core does not, so it looked exactly like a real finding.
-integer slot, kind, dn, dm, an, anw, q, cc, k, sh, imm, dir;
+integer slot, kind, dn, dm, an, anw, q, cc, k, sh, imm, dir, want_scc;
 integer pro;
 reg [15:0] w0, w1;
 
@@ -117,12 +117,27 @@ task gen_program;
 		end
 		slot_base = prog_words;
 
+		want_scc = 0;
 		for (slot = 0; slot < NSLOT; slot = slot + 1) begin
 			dn = rbits(3); dm = rbits(3);
 			an  = rbits(32) % 5;                         // A0-A4: even, Long-safe
 			anw = 5 + (rbits(32) % 2);                   // A5 (odd) or A6: Word/Byte
 			w1 = `AP040_OP_NOP;
-			kind = rbits(32) % 30;
+			// A compare's only product is the condition codes, and this
+			// bench compares REGISTERS and MEMORY -- so a compare whose
+			// operands are the wrong way round is invisible here unless a
+			// branch happens to land right behind it. The slot after every
+			// compare therefore captures the flags into a register, where
+			// the epilogue's MOVEM will dump them (milestone 89). The
+			// mutation that crossed CMPI's operands back over is what
+			// showed this was needed: it failed tb_ap040_pipe_immmem.v and
+			// passed sixteen differential programs.
+			if (want_scc) begin
+				cc = 2 + (rbits(32) % 14);
+				w0 = {4'b0101, cc[3:0], 2'b11, 3'b000, dn[2:0]};   // Scc Dn
+				want_scc = 0;
+			end else begin
+			kind = rbits(32) % 38;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -132,7 +147,8 @@ task gen_program;
 			4:  w0 = {4'b1100, dn[2:0], 6'b010_000, dm[2:0]};       // AND.L
 			5:  w0 = {4'b1000, dn[2:0], 6'b010_000, dm[2:0]};       // OR.L
 			6:  w0 = {4'b1011, dn[2:0], 6'b110_000, dm[2:0]};       // EOR.L Dn,Dm
-			7:  w0 = {4'b1011, dn[2:0], 6'b010_000, dm[2:0]};       // CMP.L
+			7:  begin w0 = {4'b1011, dn[2:0], 6'b010_000, dm[2:0]};  // CMP.L
+			    want_scc = 1; end
 			8:  begin q = rbits(3);
 			    w0 = {4'b0101, q[2:0], 6'b010_000, dn[2:0]}; end     // ADDQ.L
 			9:  begin q = rbits(3);
@@ -193,6 +209,31 @@ task gen_program;
 			26: w0 = {4'b0011, dn[2:0], 6'b000_011, anw[2:0]};       // MOVE.W (Aw)+,Dn
 			27: w0 = {4'b1101, dm[2:0], 6'b101_010, anw[2:0]};       // ADD.W Dm,(Aw)
 			28: w0 = {4'b0001, dn[2:0], 6'b000_010, anw[2:0]};       // MOVE.B (Aw),Dn
+			// ---- an immediate straight into memory (milestone 89), the
+			// last of the two decode gaps this bench found. One extension
+			// word fits a slot, so these are the Word and Byte forms; the
+			// Long ones need two and are covered by
+			// tb_ap040_pipe_immmem.v instead. Word through the Long-safe
+			// An keeps every access aligned, and the postincrement form
+			// steps by two, so the pointer discipline the header describes
+			// still holds.
+			29: begin imm = rbits(16);
+			    w0 = {10'b0000011001, 3'b010, an[2:0]}; w1 = imm[15:0]; end   // ADDI.W #x,(An)
+			30: begin imm = rbits(16);
+			    w0 = {10'b0000010001, 3'b010, an[2:0]}; w1 = imm[15:0]; end   // SUBI.W #x,(An)
+			31: begin imm = rbits(16);
+			    w0 = {10'b0000001001, 3'b010, an[2:0]}; w1 = imm[15:0]; end   // ANDI.W #x,(An)
+			32: begin imm = rbits(16);
+			    w0 = {10'b0000000001, 3'b010, an[2:0]}; w1 = imm[15:0]; end   // ORI.W  #x,(An)
+			33: begin imm = rbits(16);
+			    w0 = {10'b0000101001, 3'b010, an[2:0]}; w1 = imm[15:0]; end   // EORI.W #x,(An)
+			34: begin imm = rbits(16);
+			    w0 = {10'b0000110001, 3'b010, an[2:0]}; w1 = imm[15:0];
+			    want_scc = 1; end                                            // CMPI.W #x,(An)
+			35: begin imm = rbits(16);
+			    w0 = {10'b0000011001, 3'b011, an[2:0]}; w1 = imm[15:0]; end   // ADDI.W #x,(An)+
+			36: begin imm = rbits(8);
+			    w0 = {10'b0000001000, 3'b010, anw[2:0]}; w1 = {8'h00, imm[7:0]}; end // ANDI.B #x,(Aw)
 			// A shift counted by a REGISTER (milestone 87), so the count is
 			// whatever dm happens to hold: 0 to 63 after the modulo, which
 			// covers both cases the immediate form cannot express -- more
@@ -201,6 +242,7 @@ task gen_program;
 			    w0 = {4'b1110, dm[2:0], dir[0], 2'b10, 1'b1, sh[1:0], dn[2:0]};
 			    end
 			endcase
+			end
 			prog[slot_base + 2*slot]     = w0;
 			prog[slot_base + 2*slot + 1] = w1;
 		end

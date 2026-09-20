@@ -1688,6 +1688,96 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 89: an immediate straight into memory
+
+   The second of the two decode gaps the differential found at milestone
+   83, and the last one. ORI/ANDI/SUBI/ADDI/EORI/CMPI with a memory
+   destination, modes `(An)`, `(An)+` and `-(An)` -- the same three
+   `alu_dst_shape` already admits for the register-source direction.
+
+   No new datapath. The read-modify-write path is milestone 48's: load
+   through `mem_issue`/`mem_complete`, compute, store from EX through
+   `ex_st_req`. What is new is where the ALU's second operand comes from.
+   That path already crosses its operands over, because `SUB.L D0,(A0)` is
+   memory MINUS D0 and the ALU computes `b op a`, so the loaded value has
+   to be b. Here a is the gathered immediate rather than a register, which
+   is one more mux on a registered assignment.
+
+   **The field that collides is `eac_imm`.** For every other gathered form
+   it is a displacement EA-fetch ADDS to the base register; here it is the
+   operand. `id_immrmw` masks it at the adder's input -- `eac_imm &
+   {32{~eac_immrmw}}` rather than a fifth way on the address mux, because
+   this is the L1 address path and an AND folds into the LUT that already
+   feeds the carry chain where a mux way is another level after it. The
+   other half of the same collision is `id_src_a_is_imm`, which every
+   register-destination immediate form sets and this one must NOT: here
+   `operand_a` is the ADDRESS.
+
+   **What the fit says about that choice:** 5,802 ALMs (5,787 after
+   milestone 88), Fmax 42.79 MHz (42.78), slack at 25 ns **+1.632 ns**
+   (+1.622), worst path 23.12 ns (23.06). Neither `immrmw` nor `ea_disp`
+   appears on any of the forty worst paths. The 0.010 ns is inside the
+   0.6 ns placement band and means nothing on its own; what it does mean
+   is that the mask did not join the spine.
+
+   **A bug found in development, by the bench, before any claim was
+   written.** `ext_pending` keeps its own list of the two-extension-word
+   forms, separate from `held_is_long`, and the first version updated only
+   the second. The Long forms then gathered one word instead of two and
+   the whole instruction stream desynchronised behind them. Two lists that
+   have to agree, one of them updated: the same shape as milestone 87's
+   own near-miss.
+
+   **Two mutations passed, and both were coverage gaps rather than dead
+   code.**
+
+   The first was CMPI's operand crossover. Reverting it made the compare
+   read D0 instead of the loaded value, and both benches passed. The
+   differential's own blind spot is structural: it compares REGISTERS and
+   MEMORY, and a compare's only product is condition codes, so it can see
+   a reversed compare only when a branch happens to land right behind one.
+   `tb_ap040_pipe_dual.v` now emits an `Scc Dn` in the slot after every
+   compare, which puts the flags into a register the epilogue's MOVEM
+   dumps. With that, the mutation fails two of the sixteen rounds. The
+   dedicated bench had a matching flaw of its own: its poison was on the
+   branch's fall-through path and its marker after it, so the marker ran
+   whichever way the branch went. The poison value is now loaded BEFORE
+   the compare and the marker is reached by NOT branching. Equal operands
+   also cannot see a reversed compare, since a-b and b-a are both zero, so
+   a second comparison is off by one and reads the borrow.
+
+   The second was CMPI's `nowrite` flag. Clearing it makes CMPI request a
+   store, and memory did not change -- because the ALU returns the
+   DESTINATION unchanged for a compare, so the spurious store writes the
+   same bytes back. It is still a real bus write, and on the bus-attached
+   top it is a write cycle to an address the program only read. Memory
+   contents cannot see it; the write PORT can. The bench now counts the
+   posts the core makes to the L1's write buffer, which is exactly one per
+   store, and asserts the program's six.
+
+   | mutation | `immmem` | `dual` |
+   |---|---|---|
+   | the displacement mask removed | 7 checks | fails, round 0 |
+   | the crossover's immediate source removed | 7 checks | fails, round 0 |
+   | CMPI's loaded value not crossed over | 2 checks (both markers) | fails, rounds 3 and 5 -- only after the Scc capture |
+   | `id_src_a_is_imm` not cleared | 8 checks | fails, round 0 |
+   | `id_writes_reg` not suppressed | 1 check (D0) | fails, round 0 |
+   | CMPI not marked `nowrite` | 1 check (the write count) -- only after the counter | passes: the store is invisible in memory |
+   | the Long form's extension count | 7 checks | passes: a slot holds one extension word, so no Long immediate is generated |
+
+   | run | result |
+   |---|---|
+   | control, both benches on milestone 88's RTL | both fail; the differential names the opcodes ($0c53, $0215, $0651, $0a50, $0452, $0c50, $0251, $0c54) as vector 4 |
+   | `tb_ap040_pipe_immmem.v`, both builds | passes |
+   | full suite, normal build | 93/93 |
+   | full suite, slow build | 93/93 |
+   | standalone fit | +1.632 ns at 25 ns, 5,802 ALMs |
+
+   The rule this leaves: **a bench that reads only architectural state
+   cannot see an access that writes the value already there.** Where an
+   instruction's contract is that it does NOT touch memory, the check is
+   on the port, not on the contents.
+
    ### Milestone 88: the exception frame starts a cycle after the fault
 
    Milestone 87's fit left the spine with no margin and named where 5.7 ns
