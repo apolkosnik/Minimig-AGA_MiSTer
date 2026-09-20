@@ -1683,6 +1683,73 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 75: the ROX count without a divider
+
+   `nx = n % (nbits + 6'd1)` -- the ROX rotates take their count mod
+   size+1 -- became `mod_np1(n)`: at most three conditional subtracts of a
+   constant (36/18/9, 34/17, or 33), selected by size. Nothing else in the
+   ALU changed. It is the first divergence between `ap040_pipe_alu.v` and
+   the FSM core's `rtl/ap040/ap040_alu.v` beyond MULU/MULS; the FSM copy
+   keeps its `%`, because that core's critical path is the SDRAM clock and
+   a change there costs a Minimig fit and a cputest run to prove nothing.
+
+   **The bench is an equivalence check, so its control passes.**
+   `tb_ap040_pipe_alu_equiv.v` instantiates both ALUs and compares result
+   and all five flags: every shift/rotate op x 3 sizes x all 64 counts x
+   both X-in values x 16 operand patterns (49,152 checks), then 512 random
+   vectors for every shared op and size (67,584 more). The reference is the
+   copy that passes 3,797/3,801 cputest slices. On the previous commit the
+   two files are the same logic, so the bench passes there as well -- that
+   run shows the harness compares the right two modules rather than a
+   shared default. `run_pipe_verilator.py` gives this bench the two ALU
+   files and both include directories; the shared macros have identical
+   values in both defs files, so nothing is redefined.
+
+   | run | result |
+   |---|---|
+   | control: milestone-74 RTL | passes, 116,736 checks (identical ALUs) |
+   | byte: drop the `>= 36` step | FAIL, first at ROXL.B count 37 |
+   | word: `>= 17` -> `> 17` | **passes** -- an equivalent mutant, see below |
+   | long: `n & 31` for `n mod 33` | FAIL, first at ROXL.L count 32 |
+   | full suite on milestone-75 RTL | 81/81 |
+
+   The word mutation leaves `nx = 17` where the reference has 0, and the
+   bench is right to accept it: rotating a (size+1)-bit container by
+   size+1 is the identity, so the two counts give the same result and the
+   same flags. The same identity is why the byte mutation first fails at
+   count 37, not 36 -- 36 reduces to 9 under the mutant, and a 9-bit
+   rotate by 9 is a no-op. A mutation that changes a value without
+   changing behaviour is not a bench blind spot; it is a fact about the
+   operation, and recorded as one.
+
+   **The fit, same flow as below:**
+
+   | | ms 74 | ms 75 |
+   |---|---:|---:|
+   | ALMs | 5,190 | 5,185 |
+   | ALU ALUTs | 2,429 | 2,256 |
+   | combinational ALUTs, total | 7,213 | 7,064 |
+   | `lpm_divide` entities | 1 | 0 |
+   | Fmax, slow 1100 mV 100 C | 37.48 MHz | 40.68 MHz |
+   | setup slack at 25 ns | -1.680 ns, TNS -84.0 | +0.417 ns, TNS 0 |
+
+   The 40 worst paths are still one shape, the same one minus the divider:
+   `eaf_shcnt`/`eaf_size` -> the ALU's count arithmetic and barrel -> the
+   result mux -> `ex_fwd_data` -> `an_base` -> `Add2` -> `ea_target` -> the
+   compare that feeds `eac_is_exc` -> `l1_addr_b` -> `wbuf_hits_read` ->
+   `q_b`. 36 of the 40 cross the EX->EA-fetch forward and 39 the
+   write-buffer merge. Worst data delay 23.956 ns against 26.56 before; the
+   ALU segment is 8.9 ns where it was 12.4.
+
+   So the standalone core closes 40 MHz with 0.4 ns to spare, on this die,
+   with virtual pins and the L1 as flops at `L1_AW=4`. That is not the
+   Minimig fit -- the CPU clock there is 35.234 ns, so the margin that
+   matters is ten times larger -- and it is not the shape the L1 would
+   have integrated. What the milestone settles is narrower: the divider was
+   the whole shortfall, and the forward into address generation (item 2
+   below) is now the critical shape with about 0.4 ns of headroom at
+   25 ns. Any further ALU or EA-fetch depth lands on it first.
+
    ### Fit after milestone 74: 5,190 ALMs, 37.5 MHz, and one path shape
 
    The last standalone fit was at milestone 27 (section 5b). Forty-seven
