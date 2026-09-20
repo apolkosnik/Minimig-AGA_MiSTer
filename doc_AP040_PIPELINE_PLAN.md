@@ -1635,6 +1635,32 @@ real MMU or bus-error path arrives, which is the same boundary
    and the first where the coinciding value came from a neighbouring
    instruction rather than from an unused register field.
 
+   ### Milestone 65: covering the mode, not just the instruction
+
+   Milestone 64's CHK bench used only `#imm`. That is precisely the gap
+   that let milestone 52's memory-source divide by zero survive eleven
+   milestones -- a bench written for the INSTRUCTION rather than for the
+   addressing modes it supports -- so `tb_ap040_pipe_chkmem.v` exercises
+   the path the latch was actually built for.
+
+   The result is worth recording as evidence rather than assertion. Two
+   mutations were tried:
+
+   - remove the `exc_pend_chk` latch
+   - read `operand_a` unconditionally instead of `mem_lane`, which is
+     milestone 52's defect exactly
+
+   **Each breaks the memory-source bench and leaves the immediate one
+   passing.** The immediate-only bench would have shipped both.
+
+   The bound word is 10 with `$FFFF` in the half-word below it, so a Long
+   read would see a low word of -1 and reject every value -- the in-range
+   case therefore doubles as a check that the bound is read Word-sized.
+
+   **Standing rule:** when an instruction supports memory sources, the
+   bench covers a memory source. A register-only or immediate-only bench
+   does not test the operand routing at all.
+
    ### Adding a gather kind: the lists it must join
 
    Milestone 62 needed two debug cycles, both from the same cause, and
