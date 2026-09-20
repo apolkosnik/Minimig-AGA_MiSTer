@@ -312,6 +312,8 @@ module ap040_decode
 	// The RMW's second operand is the gathered immediate, not a register,
 	// and eac_imm is therefore NOT a displacement (milestone 89).
 	output reg        id_immrmw,
+	// A store whose address carries a displacement (milestone 91).
+	output reg        id_st_disp,
 	output reg        id_is_trapcc,
 	output reg        id_is_chk,
 	output reg        id_is_immsr,
@@ -1466,6 +1468,31 @@ wire is_move_st_pd = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) 
                      (if_opcode[8:6] == 3'b100) && (if_opcode[5:3] == 3'b000);
 wire is_move_st = is_move_st_an || is_move_st_pi || is_move_st_pd;
 
+// ... and the same store to (d16,An) (milestone 91). Every compiled
+// function writes its locals this way, and destination mode 101 was the
+// last one the MOVE family could not reach: loads have had it since
+// milestone 10 and the ALU family since milestone 40.
+//
+// It is the ELEVENTH gather kind and needs no new operand plumbing. A
+// store already takes its data from operand_a (the Dn at ir[2:0], through
+// eac_src_reg) and its address from operand_b (the An at ir[11:9], through
+// eac_dest_reg) -- read from opposite ends of the opcode, as
+// is_move_st_pi's comment above explains. All that is new is the offset on
+// the address, and ap040_ea_fetch.v's store branch was already adding one
+// for the predecrement mode, so id_st_disp selects a third value there
+// rather than putting a second adder on the L1 address path.
+//
+// Source mode 000 only, matching the three store modes above: MOVE.L
+// An,(d16,A6) and memory-to-memory MOVE have no path in this decoder for
+// ANY destination mode, so this one does not invent one.
+//
+// It gathers and does NOT branch, which is the trap recorded against
+// milestone 40: redirect_from_gather fires for every gather kind that is
+// not on its exclusion list, and a store that forgot to join it would
+// jump to held_pc + 2 + the displacement.
+wire is_move_st_disp = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                       (if_opcode[8:6] == 3'b101) && (if_opcode[5:3] == 3'b000);
+
 // MOVEA.L (milestone 33): destination mode 001, so the destination is an
 // ADDRESS register. Two source forms, the two that matter most here --
 // MOVEA.L Dn,An and MOVEA.L #imm,An. The immediate form is what finally
@@ -1649,7 +1676,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
-                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
+                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an &&
@@ -1698,6 +1725,7 @@ reg         held_abs_rmw;       // ...and writes its result back to that address
 reg         held_is_abs;
 reg         held_imm_areg;
 reg         held_is_stabs;
+reg         held_st_disp;
 // (d16,An) and absolute loads gather, so unlike (An)/(An)+/-(An) their size
 // cannot be read off if_opcode at the completing end -- it is held here.
 reg  [1:0]  held_mv_size;
@@ -1775,7 +1803,7 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
                              !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
-                             !held_is_abs && !held_is_stabs && !held_is_immsr &&
+                             !held_is_abs && !held_is_stabs && !held_is_immsr && !held_st_disp &&
                              !held_is_trapcc;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
@@ -1820,6 +1848,7 @@ always @(posedge clk) begin
 		id_ea_pcrel     <= 1'b0;
 		id_is_rmw       <= 1'b0;
 		id_immrmw       <= 1'b0;
+		id_st_disp      <= 1'b0;
 		id_is_trapcc    <= 1'b0;
 		id_is_chk       <= 1'b0;
 		id_is_immsr     <= 1'b0;
@@ -1865,6 +1894,7 @@ always @(posedge clk) begin
 		held_is_abs      <= 1'b0;
 		held_imm_areg    <= 1'b0;
 		held_is_stabs    <= 1'b0;
+		held_st_disp     <= 1'b0;
 		held_mv_size     <= `AP040_SZ_L;
 		held_is_long    <= 1'b0;
 		held_is_xlong   <= 1'b0;
@@ -1927,7 +1957,11 @@ always @(posedge clk) begin
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_xlong ? 32'd6 :
 					                                      held_is_long  ? 32'd4 : 32'd2);
-					id_dest_reg     <= (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
+					// A store's address register is its DESTINATION, at
+					// ir[11:9] -- the opposite end of the opcode from a
+					// load's, which is why this sits above the rest.
+					id_dest_reg     <= held_st_disp ? {1'b1, held_dest_reg} :
+					                    (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
 					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
 					                    held_is_abs  ? {1'b0, held_dest_reg} :
 					                    (held_is_imm && held_imm_mem) ? 4'd0 :
@@ -1956,7 +1990,7 @@ always @(posedge clk) begin
 					// An immediate with a memory destination reads An as its
 					// address base, exactly like every other memory form --
 					// the immediate rides in id_imm instead of displacing it.
-					id_src_reg      <= held_is_stabs ? {1'b0, held_reg} :
+					id_src_reg      <= (held_is_stabs || held_st_disp) ? {1'b0, held_reg} :
 					                    held_imm_mem ? {1'b1, held_reg} :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
@@ -1988,7 +2022,7 @@ always @(posedge clk) begin
 					                   held_ea_indexed ? {16'd0, if_opcode} :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
-					                    held_is_imm || held_is_abs || held_is_stabs ||
+					                    held_is_imm || held_is_abs || held_is_stabs || held_st_disp ||
 					                    held_is_immsr) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_immsr    ? held_imm_op :
@@ -1996,7 +2030,8 @@ always @(posedge clk) begin
 					                   (held_is_alu_disp || held_abs_alu) ? held_alu_op :
 					                                                        `AP040_ALU_MOVE;
 					id_size         <= held_is_imm ? held_imm_size :
-					                   (held_is_move_disp || held_is_alu_disp || held_is_abs) ? held_mv_size :
+					                   (held_is_move_disp || held_is_alu_disp || held_is_abs ||
+					                    held_st_disp) ? held_mv_size :
 					                                                        `AP040_SZ_L;
 					id_shcnt        <= 6'd1;
 					id_shift_reg    <= 1'b0;
@@ -2023,12 +2058,12 @@ always @(posedge clk) begin
 					// MOVEA sets no condition codes.
 					id_writes_ccr   <= held_is_move_disp || (held_is_alu_disp && held_alu_ccr) ||
 					                    (held_is_abs && !held_abs_lea && !held_abs_push &&
-					                     !held_abs_jmp && !held_abs_jsr) || held_is_stabs ||
+					                     !held_abs_jmp && !held_abs_jsr) || held_is_stabs || held_st_disp ||
 					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
-					                    !held_is_imm && !held_is_abs && !held_is_stabs &&
+					                    !held_is_imm && !held_is_abs && !held_is_stabs && !held_st_disp &&
 					                    !held_is_immsr && !held_is_trapcc;
 					id_is_scc       <= 1'b0;
 					id_is_dbcc      <= held_is_dbcc;
@@ -2038,7 +2073,7 @@ always @(posedge clk) begin
 					                   (held_is_abs && !held_abs_lea && !held_abs_push &&
 					                    !held_abs_jmp && !held_abs_jsr);
 					id_is_abs       <= held_is_abs || held_is_stabs;
-					id_is_store     <= held_is_stabs;
+					id_is_store     <= held_is_stabs || held_st_disp;
 					// The autoincrement modes of the immediate-to-memory family
 					// (milestone 89); every other gathered form addresses with a
 					// displacement, an index or an absolute, none of which steps An.
@@ -2047,6 +2082,7 @@ always @(posedge clk) begin
 					id_is_jmp       <= held_is_jmp || (held_is_abs && held_abs_jmp);
 					id_is_lea       <= (held_is_lea && !held_lea_push) || (held_is_abs && held_abs_lea);
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
+					id_st_disp      <= held_st_disp;
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw ||
 					                    (held_imm_mem && !held_imm_nowrite);
 					id_immrmw       <= held_imm_mem;
@@ -2086,7 +2122,7 @@ always @(posedge clk) begin
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
 			              is_imm_alu || is_immmem || is_move_imm || is_move_abs || is_movea_imm ||
-			              is_st_abs || is_alu_disp || is_lea_disp || is_adda_imm ||
+			              is_st_abs || is_move_st_disp || is_alu_disp || is_lea_disp || is_adda_imm ||
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
@@ -2149,6 +2185,7 @@ always @(posedge clk) begin
 				// destination is a register, not the address.
 				held_abs_rmw     <= is_unary_abs && !is_tst_abs;
 				held_is_stabs    <= is_st_abs;
+				held_st_disp     <= is_move_st_disp;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
 				held_mv_size     <= is_abs_alu    ? add_op_size :
@@ -2336,6 +2373,7 @@ always @(posedge clk) begin
 				id_sxt_w        <= if_valid && (is_adda_w || is_mul || is_div || is_chk);
 				id_is_rmw       <= if_valid && (is_alu_dst || is_unary_rmw || quick_mem_shape);
 				id_immrmw       <= if_valid && quick_mem_shape;
+				id_st_disp      <= 1'b0;
 				id_ea_indexed   <= 1'b0;
 				id_ea_pcrel     <= 1'b0;
 				id_is_link      <= 1'b0;

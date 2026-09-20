@@ -100,6 +100,7 @@ module ap040_ea_calc
 	input             id_ea_pcrel,
 	input             id_is_rmw,
 	input             id_immrmw,
+	input             id_st_disp,
 	input             id_is_div,
 	input             id_div_signed,
 	input             id_is_movem,
@@ -158,6 +159,7 @@ module ap040_ea_calc
 	output reg        eac_ea_pcrel,
 	output reg        eac_is_rmw,
 	output reg        eac_immrmw,
+	output reg        eac_st_disp,
 	output reg        eac_is_div,
 	output reg        eac_div_signed,
 	output reg        eac_is_movem,
@@ -219,6 +221,7 @@ always @(posedge clk) begin
 		eac_ea_pcrel     <= 1'b0;
 		eac_is_rmw       <= 1'b0;
 		eac_immrmw       <= 1'b0;
+		eac_st_disp      <= 1'b0;
 		eac_is_div       <= 1'b0;
 		eac_div_signed   <= 1'b0;
 		eac_is_movem     <= 1'b0;
@@ -278,6 +281,7 @@ always @(posedge clk) begin
 			eac_ea_pcrel     <= id_ea_pcrel;
 			eac_is_rmw       <= id_is_rmw;
 			eac_immrmw       <= id_immrmw;
+			eac_st_disp      <= id_st_disp;
 			eac_is_div       <= id_is_div;
 			eac_div_signed   <= id_div_signed;
 			eac_is_movem     <= id_is_movem;
