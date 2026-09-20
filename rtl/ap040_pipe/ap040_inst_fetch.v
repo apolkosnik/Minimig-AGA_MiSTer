@@ -40,6 +40,15 @@ module ap040_inst_fetch
 	input             nreset,
 	input             ce,
 	input             stall_in,     // ID cannot accept a new word this cycle
+	// A mispredict recovery arrives with this asserted (milestone 69). It is
+	// a ONE-cycle redirect, and it must land in pc even if this stage is
+	// stalled that cycle -- because the stall is coming from an instruction
+	// on the path being flushed. Found by tb_ap040_pipe_integration2.v: a
+	// not-taken loop-closing BNE whose speculatively fetched successor was a
+	// memory load. The load's mem_issue stalled the front end for exactly
+	// the cycle the recovery fired; l1_addr_a saw the recovery address but
+	// pc did not, and the branch re-executed from stale state forever.
+	input             flush,
 
 	input             redirect_valid,
 	input      [31:0] redirect_pc,
@@ -81,7 +90,12 @@ always @(posedge clk) begin
 		issued    <= 32'd0;
 		if_valid  <= 1'b0;
 		if_pc     <= PC_RESET;
-	end else if (ce && !stall_in) begin
+	// A flush overrides the stall: nothing downstream will consume what IF
+	// was holding, so there is nothing to hold it for, and the redirect it
+	// carries would otherwise be lost. Decode's own speculative redirect does
+	// NOT get this treatment -- it arrives without a flush, and while decode
+	// is stalled its branch has not been consumed, so it will fire again.
+	end else if (ce && (!stall_in || flush)) begin
 		if_valid <= have_more;
 		if (have_more) begin
 			if_pc     <= fetch_pc;

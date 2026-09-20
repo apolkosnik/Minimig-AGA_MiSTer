@@ -166,7 +166,8 @@ module ap040_pipe_core
 	// existing testbench's sake; this is the ONLY way a test can observe
 	// S/M/T1/T0/IPL without a real MOVE-from-SR instruction (deliberately
 	// not built this milestone -- see ap040_decode.v's header).
-	output [15:0] dbg_sr
+	output [15:0] dbg_sr,
+	output [31:0] dbg_commits
 );
 
 wire        if_valid;  wire [31:0] if_pc;  wire [15:0] if_opcode;
@@ -317,12 +318,38 @@ wire [15:0] ex_sr_fwd_data;
 // The instruction committing this cycle. Four separate gates, not one --
 // see this file's header comment on commit_reg vs commit_ccr, and the new
 // milestone-15 note on commit_sr/commit_creg.
-wire commit_reg  = exe_valid && exe_writes_reg;
+// Commit ONCE per instruction (milestone 69). EX's output registers hold
+// while EX is stalled -- correctly, since milestone 52 gated them on
+// ex_stall -- but WB has no view of that stall and would otherwise commit
+// the held instruction on every cycle of it. tb_ap040_pipe_integration2.v's
+// trace showed one MOVE retiring five times behind a divide.
+//
+// It was harmless: every commit here writes a value REGISTERED in EX, and
+// writing the same registered value again changes nothing. It is gated
+// anyway, because that idempotence is a property of what happens to be
+// committed today, not of the commit path, and the first non-idempotent
+// commit added later would silently multiply. exe_fresh is high exactly in
+// the cycle after EX wrote its outputs.
+reg exe_fresh;
+always @(posedge clk) begin
+	if (!nreset) exe_fresh <= 1'b0;
+	else         exe_fresh <= ce && !ex_stall;
+end
+wire commit_reg  = exe_valid && exe_fresh && exe_writes_reg;
 // The second commit: an (An)+/-(An) address update riding alongside the
 // ordinary result, gated by its own exe_writes_reg2.
-wire commit_reg2 = exe_valid && exe_writes_reg2;
-wire commit_ccr  = exe_valid && exe_writes_ccr;
-wire commit_sr   = exe_valid && exe_writes_sr;
+wire commit_reg2 = exe_valid && exe_fresh && exe_writes_reg2;
+wire commit_ccr  = exe_valid && exe_fresh && exe_writes_ccr;
+wire commit_sr   = exe_valid && exe_fresh && exe_writes_sr;
+
+// Debug-only: how many register commits have happened. Idempotence hides a
+// multiple commit from every value check, so a bench that cares counts.
+reg [31:0] dbg_commit_count;
+always @(posedge clk) begin
+	if (!nreset)          dbg_commit_count <= 32'd0;
+	else if (ce && commit_reg) dbg_commit_count <= dbg_commit_count + 32'd1;
+end
+assign dbg_commits = dbg_commit_count;
 wire commit_creg = exe_valid && exe_writes_creg;
 
 // Architectural SR (milestone 15: widened from a bare 5-bit CCR to the real
@@ -530,7 +557,13 @@ ap040_pipe_l1 #(
 	// -- see ap040_pipe_l1.v's header (milestone 10 fix: without this, a
 	// stall lets q_a free-run past the word if_opcode is supposed to keep
 	// presenting).
-	.en_a      (ce && !id_stall),
+	// Port A's read register must advance exactly when IF does, or if_pc and
+	// if_opcode skew apart. IF now advances on a flushing redirect even while
+	// stalled (milestone 69), so this enable has to say the same thing --
+	// with the old condition, the recovery landed in pc while q_a still held
+	// the mispredicted branch's own opcode, and decode saw that opcode at
+	// the recovery PC.
+	.en_a      (ce && (!id_stall || flush)),
 	.q_a       (l1_rdata_a),
 
 	.address_b (l1_addr_b),
@@ -552,6 +585,7 @@ ap040_inst_fetch #(
 	.ce        (ce),
 	.stall_in  (id_stall),
 
+	.flush          (flush),
 	.redirect_valid (final_redirect_valid),
 	.redirect_pc    (final_redirect_pc),
 

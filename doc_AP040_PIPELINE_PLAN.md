@@ -1661,6 +1661,48 @@ real MMU or bus-error path arrives, which is the same boundary
    bench covers a memory source. A register-only or immediate-only bench
    does not test the operand routing at all.
 
+   ### Milestone 69: an integration bench, and the two things it found
+
+   `tb_ap040_pipe_integration2.v` runs a whole subroutine the way compiled
+   code would -- BSR, LINK, MOVEM save, a SUBQ/BNE loop over `(A0)+`, DIVU,
+   MOVEM restore, UNLK, RTS -- with sentinels carried across the call. The
+   first integration bench dated from milestone 33; thirty milestones had
+   gone in since, each proved in isolation. On its first run this one failed,
+   and neither cause was visible from any unit bench.
+
+   **A lost redirect in IF.** EX's mispredict recovery is a ONE-cycle
+   redirect, and IF only advanced `pc` when not stalled. A not-taken
+   loop-closing BNE had a memory load as its speculatively-fetched
+   successor; that load's `mem_issue` stalled the front end for exactly the
+   recovery cycle. `l1_addr_a` saw the recovery address, `pc` did not, and
+   the branch re-executed from stale state forever. IF now advances on a
+   flushing redirect regardless of stall -- and the L1's port-A enable had
+   to follow, or `if_pc` and `if_opcode` skew apart: the first attempt had
+   decode seeing the BNE's own opcode at the recovery PC.
+
+   **WB re-committing during an EX stall.** The trace showed one MOVE
+   retiring five times behind the divide. `commit_reg` was `exe_valid &&
+   exe_writes_reg`, ungated: EX's outputs hold correctly while EX stalls,
+   but WB committed them every cycle. It was HARMLESS, because every commit
+   writes a value already registered in EX and rewriting it changes nothing
+   -- which is also why no value check could ever have seen it. It is gated
+   anyway (`exe_fresh`, high the cycle after EX writes), because that
+   idempotence belongs to what is committed today, not to the commit path.
+
+   Verifying the gate needed a COUNT, so the core grew `dbg_commits`. With
+   the gate removed `tb_ap040_pipe_divstall.v` reports 38 commits for 5
+   register-writing instructions, and `integration2` still passes -- the
+   two together being the evidence. The stash-based control for that bench
+   is vacuous (`PINNOTFOUND`: the port did not exist before), which is why
+   the gate was controlled by mutation on the current RTL instead.
+
+   **Bench layout rule, twice over:** `PROG_WORDS` is an issue budget, not
+   an address bound. With the subroutine adjacent to main, trailing NOPs
+   walked into a second LINK; with the array adjacent, they EXECUTED it --
+   `0000 000A` is `ORI.B #$0A,D0`, and four data words OR'd `$3F` into D0.
+   Anything a program does not jump over goes where a program cannot walk
+   into it.
+
    ### Milestone 68: MOVEM's control modes
 
    `(An)` and `(d16,An)`, both directions. They differ from the
