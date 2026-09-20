@@ -887,15 +887,34 @@ wire eac_is_exc    = eac_is_trace ||
                      (own_exc && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
                                   eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr));
 wire exc_active    = live && eac_is_exc;
-wire exc_writing   = exc_active && !exc_vec_pending &&
+// The frame starts one cycle AFTER the fault is detected (milestone 88).
+// exc_active is the fault cone: the CHK compare on a forwarded ALU result,
+// the divisor test on loaded data, the privilege check on a forwarded S
+// bit, the odd-target test on the EA adder. Until this milestone the
+// frame's first beat went out in the detection cycle itself, so that whole
+// cone sat on the L1 address mux -- and therefore on EVERY load's address
+// path, exception or not: 5.7 ns of the 24.5 ns spine, measured at
+// milestone 87. exc_go is the cone, registered. The sequencer's own
+// signals key off it, so the address, size, write-enable and read strobe
+// the L1 sees are all a register's worth away from the cone. The stall
+// (exc_stall) and the retirement block (mem_complete) still use exc_active
+// directly: the faulting instruction has to be held and not retired in the
+// cycle it faults, and those two are not on the L1's path.
+//
+// The cost is one cycle per exception entry, spent in the wait branch
+// below. The faulting instruction's eac_* are frozen by exc_stall and the
+// data-derived faults are latched (exc_pend_*), so the verdict exc_go was
+// set from is still standing when the beats go out.
+reg  exc_go;
+wire exc_writing   = exc_go && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && eac_is_fmt2));
 // ...and not accepted at all if ap040_execute.v took the port this cycle:
 // the core's mux drops this stage's wren_b, so the beat never reached the
 // L1 and must be retried rather than counted.
 wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
-wire exc_vec_issue = exc_active && !exc_vec_pending && (exc_ph == EXC_VECRD);
-wire exc_vec_done  = exc_active && exc_vec_pending && l1_rvalid_b;
+wire exc_vec_issue = exc_go && !exc_vec_pending && (exc_ph == EXC_VECRD);
+wire exc_vec_done  = exc_go && exc_vec_pending && l1_rvalid_b;
 wire exc_stall     = exc_active && !exc_vec_done;
 
 // RTE (milestone 16, new): a genuinely supervisor RTE (eac_is_priv already
@@ -1204,9 +1223,18 @@ always @(posedge clk) begin
 		trace_pc         <= 32'h0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
+		exc_go          <= 1'b0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 	end else if (ce) begin
+		// The registered fault verdict (milestone 88). It clears with the
+		// departure it belongs to -- exc_vec_done under the same !stall_in
+		// the output chain runs under, so a stalled departure does not
+		// lose it -- or with a flush, which kills the instruction it was
+		// set for.
+		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
+		else if (exc_active)                       exc_go <= 1'b1;
+
 		// Held from the cycle the divisor was seen until the exception has
 		// fetched its vector; see the latch's own comment above.
 		if (exc_vec_done)      exc_pend_divzero <= 1'b0;
@@ -1330,6 +1358,13 @@ always @(posedge clk) begin
 				// and DEPARTED the instruction with no data. A faulting
 				// memory-source load keeps mem_pending set through its own
 				// exception entry, so exc_active must get past this.
+				eaf_valid      <= 1'b0;
+			end else if (exc_active && !exc_go) begin
+				// The fault cycle (milestone 88): the verdict is being
+				// registered and the frame starts next cycle. Nothing below
+				// may run for this instruction now -- in particular not
+				// ret_done, which would let an RTE with a bad format word
+				// complete its pop in the cycle fmterr_now says otherwise.
 				eaf_valid      <= 1'b0;
 			end else if (wr_stall) begin
 				// Waiting for l1_wr_busy to clear -- see header. eac_* stays
