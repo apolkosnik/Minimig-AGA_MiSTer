@@ -31,6 +31,7 @@
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
+`include "ap040_pipe_defs.svh"
 
 module tb_ap040_pipe_l1_wbuf;
 
@@ -79,9 +80,9 @@ ap040_pipe_l1 #(.AW(AW), .DW(16), .PC_RESET(32'd0)) dut
 	.address_b (address_b),
 	.data_b    (data_b),
 	.wren_b    (wren_b),
-	// Byte enables (milestone 38). All four: this bench predates sized
-	// stores and exercises the Long path, which is what 4'b1111 means.
-	.be_b      (4'b1111),
+	// Port B is sized since milestone 86; this bench exercises the Long
+	// path throughout, so the size is constant here.
+	.size_b    (`AP040_SZ_L),
 	.rd_b      (rd_b),
 	.wr_busy   (wr_busy),
 	.q_b       (q_b),
@@ -235,7 +236,14 @@ initial begin
 	read_a(8'h31);
 	check32({16'h0, q_a}, {16'h0, 16'h4444}, "case B: second write's low word wrong/missing");
 
-	// -------------------- Case C: read-after-write forwarding -----------
+	// -------------------- Case C: a read never overtakes a write --------
+	// Until milestone 86 this checked a FORWARD: the buffered value was
+	// merged into the read. The port is sized now and an overlap is no
+	// longer a comparison of addresses, so the read waits for the drain
+	// instead -- the same ordering ap040_pipe_membus.v has always had on
+	// the bus side. What the caller sees is unchanged, and that is what is
+	// checked: the value written one cycle earlier, from a read issued
+	// while wr_busy is still high.
 	address_b = ba(8'h40); data_b = 32'hDEAD_BEEF; wren_b = 1;
 	@(posedge clk); #1;
 	wren_b = 0;
@@ -250,7 +258,7 @@ initial begin
 		while (!rvalid_b && n < 8) begin @(posedge clk); #1; n = n + 1; end
 	end
 	check1(rvalid_b, 1'b1, "case C: the read never returned");
-	check32(q_b, 32'hDEAD_BEEF, "case C: read did not forward the buffered (undrained) write");
+	check32(q_b, 32'hDEAD_BEEF, "case C: a read issued while the write was still buffered did not see it");
 
 	if (errors == 0)
 		$display("ALL TESTS PASSED");

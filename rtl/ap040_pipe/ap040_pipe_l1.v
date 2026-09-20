@@ -16,7 +16,15 @@
 // interface is meant to be 32-bit-native (the original plan's section 1: a  //
 // clean 32-bit request/response internally, with any 16-bit-bus splitting   //
 // left to a future host adapter, not built into the core itself).           //
-// address_b addresses the HIGH word of a longword; the low word is          //
+// PORT B IS SIZED (milestone 86): it carries a byte address and a size,     //
+// and this module does every bit of placement -- right-aligned on the way   //
+// out, placed from the address on the way in, at any alignment. Until then  //
+// it returned "the 32 bits containing the address" and the CPU picked lanes //
+// out of that, which cannot express a Long at an odd address: those bytes   //
+// span THREE words, and no single 32-bit window holds them.                 //
+//                                                                          //
+// The old shape, for the record:                                            //
+// address_b addressed the HIGH word of a longword; the low word was         //
 // implicitly address_b+1, big-endian/high-word-first, the same word order   //
 // ap040_decode.v's Bcc.L gather and rtl_old's bus16 adapter both already     //
 // use. wren_b/data_b are wired for a future store instruction (MOVE.L       //
@@ -178,58 +186,54 @@ module ap040_pipe_l1
 	parameter DW = 16,   // word width
 	// Both ports take a 32-bit BYTE address (milestone 81); this module maps
 	// it to its own storage, which is a window of 2**AW words starting at
-	// PC_RESET. The conversion used to live in ap040_inst_fetch.v and
-	// ap040_ea_fetch.v, which meant the CPU emitted an index into THIS
-	// array's layout -- nothing else could ever have been attached to it.
+	// PC_RESET.
 	parameter [31:0] PC_RESET = 32'h0000_0400
 )
 (
 	input                clock,
 	input                nreset,   // see header -- resets wbuf_valid only
-	// port A: instruction fetch, 16-bit reads
-	input      [31:0]    address_a,   // byte address
+	// port A: instruction fetch, 16-bit reads, always even
+	input      [31:0]    address_a,
 	input      [DW-1:0]  data_a,
 	input                wren_a,
 	input                en_a,      // request; the requester holds address_a until rvalid_a
 	output reg [DW-1:0]  q_a,
-	output reg           rvalid_a,  // q_a is the word for the last request; holds until the next
-	// port B: data, 32-bit reads through the write buffer's forward, sized writes
-	input      [31:0]    address_b,   // byte address of the HIGH word
-	input       [31:0]   data_b,
+	output reg           rvalid_a,
+	// port B: sized data accesses at any alignment (milestone 86)
+	input      [31:0]    address_b,
+	input      [31:0]    data_b,    // right-aligned by size_b
 	input                wren_b,
-	input       [3:0]    be_b,
-	input                rd_b,      // read request; one in flight at a time
-	output               wr_busy,   // see header -- hold wren_b/address_b/data_b while high
-	output reg  [31:0]   q_b,
-	output reg           rvalid_b   // q_b is the longword for the last rd_b; holds until the next
+	input       [1:0]    size_b,    // AP040_SZ_B/W/L
+	input                rd_b,
+	output               wr_busy,
+	output reg  [31:0]   q_b,       // right-aligned by size_b
+	output reg           rvalid_b
 );
 
 reg [DW-1:0] mem [0:(1<<AW)-1];
+integer i;
+initial for (i = 0; i < (1<<AW); i = i + 1) mem[i] = `AP040_OP_NOP;
 
-// The window map. Truncation to AW bits is deliberate and is what the
-// callers' own `(addr - PC_RESET) >> 1` did before milestone 81.
-//
-// Only the low AW+1 bits of the difference survive the shift and the
-// truncation, and a borrow only ever propagates upward, so this is a narrow
-// subtract and is written as one. Spelled `(address_b - PC_RESET) >> 1` it
-// is a 32-bit subtract, and it sits AFTER ap040_pipe_cpu.v's port-B mux --
-// where the same arithmetic used to sit on both of the mux's inputs, in
-// parallel with it. That cost 1.05 ns on the critical spine, which the fit
-// after milestone 81 caught: +0.488 ns of slack became -0.562.
+// The window map. Only the low AW+1 bits of the difference survive the shift
+// and the truncation, and a borrow only ever propagates upward, so this is a
+// narrow subtract and is written as one -- spelled as a 32-bit subtract it
+// sits after ap040_pipe_cpu.v's port-B mux and costs a nanosecond on the
+// critical spine (the fit after milestone 81 measured it).
 wire [AW:0] ia_full = address_a[AW:0] - PC_RESET[AW:0];
 wire [AW:0] ib_full = address_b[AW:0] - PC_RESET[AW:0];
 wire [AW-1:0] ia = ia_full[AW:1];
 wire [AW-1:0] ib = ib_full[AW:1];
-integer i;
-initial for (i = 0; i < (1<<AW); i = i + 1) mem[i] = `AP040_OP_NOP;
+// PC_RESET is even, so the byte within the word is the address's own bit 0.
+wire          ob = address_b[0];
 
-// One-entry write buffer (see header).
+// One-entry write buffer (see header), now holding a sized value rather than
+// a lane mask.
 reg              wbuf_valid;
 reg [AW-1:0]     wbuf_addr;
+reg              wbuf_odd;
+reg  [1:0]       wbuf_size;
 reg [31:0]       wbuf_data;
-reg [3:0]        wbuf_be;
 reg [1:0]        wbuf_hold;    // extra drain cycles left (slow model only)
-wire [AW-1:0] wbuf_addr_lo = wbuf_addr + {{(AW-1){1'b0}}, 1'b1};
 assign wr_busy = wbuf_valid;
 
 // Latency model. In the normal build every extra count is zero and the
@@ -251,20 +255,37 @@ reg          a_busy;
 reg [1:0]    a_cnt;
 reg [AW-1:0] a_addr;
 
-// Port B: one request in flight; its return merges the write buffer as it
-// stands THEN, at the latched address -- the requester holds its address, but
-// EX may take the port for a store while the read is waiting.
+// Port B: one request in flight. A read never overtakes a buffered write --
+// it waits for the drain instead of forwarding round it (milestone 86). The
+// forward could only ever answer an exactly-matching access, and with sizes
+// and alignment in play "matching" stops being a comparison; draining first
+// gives the same answer for every overlap, and is what ap040_pipe_membus.v
+// does on the bus side, so the two memories now order accesses alike.
 reg          b_busy;
 reg [1:0]    b_cnt;
 reg [AW-1:0] b_addr;
-wire [AW-1:0] b_addr_lo = b_addr + {{(AW-1){1'b0}}, 1'b1};
-wire b_hits_wbuf = wbuf_valid && (wbuf_addr == b_addr);
-wire [31:0] b_merged = {
-    (b_hits_wbuf && wbuf_be[3]) ? wbuf_data[31:24] : mem[b_addr][15:8],
-    (b_hits_wbuf && wbuf_be[2]) ? wbuf_data[23:16] : mem[b_addr][7:0],
-    (b_hits_wbuf && wbuf_be[1]) ? wbuf_data[15:8]  : mem[b_addr_lo][15:8],
-    (b_hits_wbuf && wbuf_be[0]) ? wbuf_data[7:0]   : mem[b_addr_lo][7:0]
-};
+reg          b_odd;
+reg  [1:0]   b_size;
+
+function [31:0] read_at;
+	input [AW-1:0] a;
+	input          odd;
+	input   [1:0]  sz;
+	begin
+		case (sz)
+		`AP040_SZ_B: read_at = {24'd0, odd ? mem[a][7:0] : mem[a][15:8]};
+		`AP040_SZ_W: read_at = odd ? {16'd0, mem[a][7:0], mem[a + {{(AW-1){1'b0}}, 1'b1}][15:8]}
+		                           : {16'd0, mem[a]};
+		default:     read_at = odd ? {mem[a][7:0],
+		                              mem[a + {{(AW-1){1'b0}}, 1'b1}],
+		                              mem[a + {{(AW-2){1'b0}}, 2'b10}][15:8]}
+		                           : {mem[a], mem[a + {{(AW-1){1'b0}}, 1'b1}]};
+		endcase
+	end
+endfunction
+
+wire [AW-1:0] wb1 = wbuf_addr + {{(AW-1){1'b0}}, 1'b1};
+wire [AW-1:0] wb2 = wbuf_addr + {{(AW-2){1'b0}}, 2'b10};
 
 always @(posedge clock) begin
 `ifdef AP040_PIPE_L1_SLOW
@@ -287,8 +308,6 @@ always @(posedge clock) begin
 		end else
 			a_cnt <= a_cnt - 2'd1;
 	end
-	// A zero-extra request returns the cycle after it was made: the busy
-	// branch above is skipped in the request cycle, so resolve it here.
 	if (en_a && extra_a == 2'd0) begin
 		q_a      <= mem[ia];
 		rvalid_a <= 1'b1;
@@ -301,26 +320,21 @@ always @(posedge clock) begin
 		if (b_busy) $display("ERROR: ap040_pipe_l1 port B read issued while one is in flight");
 `endif
 		b_addr   <= ib;
+		b_odd    <= ob;
+		b_size   <= size_b;
 		b_cnt    <= extra_b;
 		b_busy   <= 1'b1;
 		rvalid_b <= 1'b0;
-	end else if (b_busy) begin
+	end else if (b_busy && !wbuf_valid) begin
 		if (b_cnt == 2'd0) begin
-			q_b      <= b_merged;
+			q_b      <= read_at(b_addr, b_odd, b_size);
 			rvalid_b <= 1'b1;
 			b_busy   <= 1'b0;
 		end else
 			b_cnt <= b_cnt - 2'd1;
 	end
-	if (rd_b && extra_b == 2'd0) begin
-		// same cycle-after return as before this milestone, merged at the
-		// request address
-		q_b <= {
-		    (wbuf_valid && wbuf_addr == ib && wbuf_be[3]) ? wbuf_data[31:24] : mem[ib][15:8],
-		    (wbuf_valid && wbuf_addr == ib && wbuf_be[2]) ? wbuf_data[23:16] : mem[ib][7:0],
-		    (wbuf_valid && wbuf_addr == ib && wbuf_be[1]) ? wbuf_data[15:8]  : mem[ib + {{(AW-1){1'b0}}, 1'b1}][15:8],
-		    (wbuf_valid && wbuf_addr == ib && wbuf_be[0]) ? wbuf_data[7:0]   : mem[ib + {{(AW-1){1'b0}}, 1'b1}][7:0]
-		};
+	if (rd_b && extra_b == 2'd0 && !wbuf_valid) begin
+		q_b      <= read_at(ib, ob, size_b);
 		rvalid_b <= 1'b1;
 		b_busy   <= 1'b0;
 	end
@@ -332,18 +346,38 @@ always @(posedge clock) begin
 	end else begin
 		if (wbuf_valid) begin
 			if (wbuf_hold == 2'd0) begin
-				if (wbuf_be[3]) mem[wbuf_addr][15:8]    <= wbuf_data[31:24];
-				if (wbuf_be[2]) mem[wbuf_addr][7:0]     <= wbuf_data[23:16];
-				if (wbuf_be[1]) mem[wbuf_addr_lo][15:8] <= wbuf_data[15:8];
-				if (wbuf_be[0]) mem[wbuf_addr_lo][7:0]  <= wbuf_data[7:0];
+				case (wbuf_size)
+				`AP040_SZ_B: begin
+					if (wbuf_odd) mem[wbuf_addr][7:0]  <= wbuf_data[7:0];
+					else          mem[wbuf_addr][15:8] <= wbuf_data[7:0];
+				end
+				`AP040_SZ_W: begin
+					if (wbuf_odd) begin
+						mem[wbuf_addr][7:0] <= wbuf_data[15:8];
+						mem[wb1][15:8]      <= wbuf_data[7:0];
+					end else
+						mem[wbuf_addr] <= wbuf_data[15:0];
+				end
+				default: begin
+					if (wbuf_odd) begin
+						mem[wbuf_addr][7:0] <= wbuf_data[31:24];
+						mem[wb1]            <= wbuf_data[23:8];
+						mem[wb2][15:8]      <= wbuf_data[7:0];
+					end else begin
+						mem[wbuf_addr] <= wbuf_data[31:16];
+						mem[wb1]       <= wbuf_data[15:0];
+					end
+				end
+				endcase
 				wbuf_valid <= 1'b0;
 			end else
 				wbuf_hold <= wbuf_hold - 2'd1;
 		end else if (wren_b) begin
 			wbuf_valid <= 1'b1;
 			wbuf_addr  <= ib;
+			wbuf_odd   <= ob;
+			wbuf_size  <= size_b;
 			wbuf_data  <= data_b;
-			wbuf_be    <= be_b;
 			wbuf_hold  <= extra_w;
 		end
 	end

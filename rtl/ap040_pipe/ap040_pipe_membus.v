@@ -28,11 +28,9 @@
 // the new address re-issued -- the CPU never sees the stale word, which is //
 // the same guarantee ap040_pipe_l1.v gives by restarting its port A.       //
 //                                                                          //
-// Transaction sizes: a fetch is a Word, a data read is always a Longword   //
-// (port B's contract), and a write is sized from be_b -- 1111 Long, 1100   //
-// Word, 0110 Word at an odd address, 1000 Byte at the even address, 0100   //
-// Byte at the odd one. Those five are the only patterns                    //
-// ap040_ea_fetch.v's st_be and ap040_execute.v's ex_st_be produce.         //
+// Transaction sizes: a fetch is a Word; data accesses carry the CPU's own  //
+// size and address, at whatever alignment, and the adapter below splits    //
+// them (milestone 86).                                                     //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -49,9 +47,9 @@ module ap040_pipe_membus
 	output reg        rvalid_a,
 
 	input      [31:0] address_b,
-	input      [31:0] data_b,
+	input      [31:0] data_b,      // right-aligned by size_b
 	input             wren_b,
-	input       [3:0] be_b,
+	input       [1:0] size_b,
 	input             rd_b,
 	output            wr_busy,
 	output reg [31:0] q_b,
@@ -82,6 +80,7 @@ reg        a_pend;      // a fetch is wanted and has not been returned
 reg [31:0] a_addr;
 reg        b_pend;      // a data read is wanted and has not been returned
 reg [31:0] b_addr;
+reg  [1:0] b_size;
 reg        w_pend;      // a write has been accepted and has not been sent
 reg [31:0] w_addr, w_data;
 reg  [1:0] w_size;
@@ -90,21 +89,8 @@ reg  [1:0] w_size;
 // one-entry buffer, the write is accepted the cycle wr_busy is low.
 assign wr_busy = w_pend;
 
-// A write's true byte address and right-aligned data, from the lane mask.
-wire [31:0] addr_b_even = {address_b[31:1], 1'b0};
-// 0110 is a Word at an ODD address (milestone 85), which goes out as a Word
-// transaction there: ap040_bus16_adapter.v splits an odd word into two byte
-// cycles, so nothing below has to know.
-wire [31:0] wr_addr = (be_b == 4'b0100 || be_b == 4'b0110) ? (addr_b_even + 32'd1)
-                                                           : addr_b_even;
-wire  [1:0] wr_size = (be_b == 4'b1111) ? `AP040_SZ_L :
-                      (be_b == 4'b1100 || be_b == 4'b0110) ? `AP040_SZ_W : `AP040_SZ_B;
-wire [31:0] wr_data = (be_b == 4'b1111) ? data_b :
-                      (be_b == 4'b1100) ? {16'd0, data_b[31:16]} :
-                      (be_b == 4'b0110) ? {16'd0, data_b[23:8]}  :
-                      (be_b == 4'b1000) ? {24'd0, data_b[31:24]}
-                                        : {24'd0, data_b[23:16]};
-
+// Port B is sized (milestone 86), so address, size and data go out as they
+// arrive: ap040_bus16_adapter.v splits whatever alignment they have.
 function [2:0] fc_of;
 	input is_instr;
 	begin
@@ -117,7 +103,7 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		busy <= 1'b0; who <= WHO_A; cur_addr_a <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
-		a_addr <= 32'd0; b_addr <= 32'd0;
+		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
 		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
 		rvalid_a <= 1'b0; rvalid_b <= 1'b0;
 		q_a <= 16'd0; q_b <= 32'd0;
@@ -132,14 +118,15 @@ always @(posedge clk) begin
 			rvalid_a <= 1'b0;
 		end
 		if (rd_b) begin
-			b_addr   <= addr_b_even;
+			b_addr   <= address_b;
+			b_size   <= size_b;
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
 		end
 		if (wren_b && !w_pend) begin
-			w_addr <= wr_addr;
-			w_data <= wr_data;
-			w_size <= wr_size;
+			w_addr <= address_b;
+			w_data <= data_b;
+			w_size <= size_b;
 			w_pend <= 1'b1;
 		end
 
@@ -175,7 +162,7 @@ always @(posedge clk) begin
 		end else if (b_pend) begin
 			busy      <= 1'b1;  who <= WHO_BR;
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
-			mem_size  <= `AP040_SZ_L; mem_addr <= b_addr;
+			mem_size  <= b_size; mem_addr <= b_addr;
 			mem_fc    <= fc_of(1'b0);
 		end else if (a_pend) begin
 			busy       <= 1'b1;  who <= WHO_A;

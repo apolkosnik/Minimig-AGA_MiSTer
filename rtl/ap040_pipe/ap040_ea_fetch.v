@@ -356,7 +356,7 @@ module ap040_ea_fetch
 	input               l1_rvalid_b,   // l1_q_b is the return for the last l1_rd_b (milestone 80)
 	output              l1_rd_b,       // port-B read request: one in flight at a time
 	output              l1_wren_b,
-	output        [3:0] l1_be_b,
+	output        [1:0] l1_size_b,
 	output       [31:0] l1_data_b,
 	input               l1_wr_busy,
 
@@ -614,7 +614,7 @@ assign rf3_addr = mvm_rd_reg;
 // A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
 // preserve the upper half, it replaces it with the sign. That is the one
 // behaviour separating MOVEM.W's load from a pair of half-width writes.
-assign rf3_data = mvm_word ? {{16{l1_q_b[31]}}, l1_q_b[31:16]} : l1_q_b;
+assign rf3_data = mvm_word ? {{16{l1_q_b[15]}}, l1_q_b[15:0]} : l1_q_b;
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -744,20 +744,13 @@ wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
 //
 // A word takes the high half of the pair, which is the word the address
 // names. A byte takes one half of that word, chosen by address bit 0.
-// A Word at an ODD address (milestone 85) is still inside the longword the
-// port returns -- bytes 1 and 2 of it -- so it costs a lane select and no
-// extra access. Taking the high half regardless, as this did until
-// milestone 85, reads the byte BEFORE the one asked for: the differential
-// found it as a one-byte shift, $6FE3FEF0 where the FSM core had
-// $8D6FE3FE. A Byte is never misaligned. A LONG at an odd address spans
-// three words and does not fit in one access; that is the next milestone,
-// and eac_is_unaligned_long below is where it will start.
-wire [31:0] mem_raw =
-    (eff_size == `AP040_SZ_L) ? l1_q_b :
-    (eff_size == `AP040_SZ_W) ? (ea_target[0] ? {16'd0, l1_q_b[23:8]}
-                                              : {16'd0, l1_q_b[31:16]}) :
-                                {24'd0, (ea_target[0] ? l1_q_b[23:16]
-                                                      : l1_q_b[31:24])};
+// The port is sized and returns its value right-aligned at any alignment
+// (milestone 86), so there is nothing left to select here. Every lane
+// expression this stage used to carry -- and the assumption inside them
+// that the bytes wanted were somewhere in one aligned longword, which a
+// Long at an odd address disproves -- lives in ap040_pipe_l1.v and
+// ap040_pipe_membus.v now.
+wire [31:0] mem_raw = l1_q_b;
 
 // The sign extension itself. Zero-extending a Word source instead is a
 // silently wrong answer for every negative offset -- which is most of what
@@ -1111,30 +1104,27 @@ wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                                                                   ea_target;
 assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 assign l1_wren_b = (live && (eac_is_push || store_now)) || exc_writing || mvm_st_want;
-// A sized store places its data in the lane the address names and enables
-// only that lane. Lane 3 is the longword's first byte, matching
-// ap040_pipe_l1.v's be_b. Everything that is not a sized store -- pushes,
-// exception frames, Long stores -- asserts all four and is unaffected.
-wire [1:0]  st_off = l1_addr_word[1:0];
-wire [3:0]  st_be  = (!store_now)             ? 4'b1111 :
-                     (eac_size == `AP040_SZ_L)   ? 4'b1111 :
-                     (eac_size == `AP040_SZ_W)   ? (st_off[0] ? 4'b0110 : 4'b1100) :
-                     st_off[0]                   ? 4'b0100 : 4'b1000;
-wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !store_now) ? operand_a :
-                     (eac_size == `AP040_SZ_W) ? (st_off[0] ? {8'd0, operand_a[15:0], 8'd0}
-                                                            : {operand_a[15:0], 16'd0}) :
-                     st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
-                               : {operand_a[7:0], 24'd0};
-
-assign l1_be_b   = mvm_active ? (mvm_word ? 4'b1100 : 4'b1111) : st_be;
+// The size of whatever access l1_addr_word above selected, in the same
+// priority order (milestone 86). Everything that is not a sized store or a
+// sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
+// -- is a Longword.
+assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
+                   store_now    ? eac_size :
+                   eac_is_push  ? `AP040_SZ_L :
+                   exc_writing  ? `AP040_SZ_L :
+                   (exc_vec_issue || exc_vec_pending) ? `AP040_SZ_L :
+                   ret_active   ? `AP040_SZ_L :
+                                  eff_size;
 // operand_a is port A, which mvm_st_want has pointed at the register this
 // beat stores -- so the same wire that carries a LINK's pushed An carries
 // each MOVEM register in turn.
 // Three different things ride the same push: BSR pushes a return address,
 // LINK pushes the old An, and PEA pushes the effective address itself.
-assign l1_data_b = mvm_st_want  ? (mvm_word ? {operand_a[15:0], 16'd0} : operand_a) :
+// Right-aligned, by size -- so a MOVEM word beat and a sized store are the
+// same expression now.
+assign l1_data_b = mvm_st_want  ? operand_a :
                    exc_writing  ? exc_wdata :
-                   store_now ? st_dat  :
+                   store_now    ? operand_a :
                    eac_is_pea   ? ea_target :
                    eac_is_link  ? operand_a : eac_next_pc;
 

@@ -202,7 +202,7 @@ module ap040_execute
 	output            ex_st_req,
 	output     [31:0] ex_st_addr,   // BYTE address; the core converts
 	output     [31:0] ex_st_data,
-	output      [3:0] ex_st_be,
+	output      [1:0] ex_st_size,
 
 	output            ex_stall,
 
@@ -520,22 +520,13 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 // eac_dest_reg), and the ALU returns a sized result in the low bits with the
 // upper ones zero, so the merge is a straight splice. Forwarding gets it for
 // free: ex_fwd_data is combined_result, not alu_result.
-// The store's lane placement, mirroring ap040_ea_fetch.v's st_be/st_dat
-// exactly -- lane 3 is the longword's first byte, a Word always takes the
-// half the address names, and a Byte is picked by address bit 0. The raw
-// alu_result is used rather than alu_sized: the byte enables already
-// restrict what lands, and alu_sized would splice in eaf_operand_b, which
+// The store is sized and right-aligned (milestone 86); the memory places it.
+// The raw alu_result is used rather than alu_sized: the size already
+// restricts what lands, and alu_sized would splice in eaf_operand_b, which
 // for an RMW is the value just read from that same memory.
 assign ex_st_addr = eaf_ea_target;
-wire [1:0] rmw_off = eaf_ea_target[1:0];
-assign ex_st_be   = (eaf_size == `AP040_SZ_L) ? 4'b1111 :
-                    (eaf_size == `AP040_SZ_W) ? (rmw_off[0] ? 4'b0110 : 4'b1100) :
-                    rmw_off[0]                ? 4'b0100 : 4'b1000;
-assign ex_st_data = (eaf_size == `AP040_SZ_L) ? alu_result :
-                    (eaf_size == `AP040_SZ_W) ? (rmw_off[0] ? {8'd0, alu_result[15:0], 8'd0}
-                                                            : {alu_result[15:0], 16'd0}) :
-                    rmw_off[0] ? {8'd0, alu_result[7:0], 16'd0}
-                               : {alu_result[7:0], 24'd0};
+assign ex_st_size = eaf_size;
+assign ex_st_data = alu_result;
 
 wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_result[7:0]}  :
                         (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :

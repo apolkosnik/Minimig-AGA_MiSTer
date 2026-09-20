@@ -105,13 +105,14 @@ task gen_program;
 		for (pro = 0; pro < 7; pro = pro + 1) begin
 			prog[prog_words + 0] = {4'b0010, pro[2:0], 6'b001_111, 3'b100};  // MOVEA.L #imm,An
 			prog[prog_words + 1] = 16'h0000;
-			// A5 starts ODD on purpose (milestone 85): it is the pointer the
-			// Word and Byte forms below use, so every run exercises
-			// unaligned Word accesses. Word steps keep it odd. A0-A4 stay
-			// even and are the only pointers the Long forms use, because a
-			// Long at an odd address is not implemented yet.
+			// A4 and A5 start ODD on purpose. A5 is the pointer the Word and
+			// Byte forms use (milestone 85) and A4 is one of the five the
+			// Long forms use (milestone 86), so every run exercises
+			// unaligned accesses of both sizes -- and through the bus,
+			// where ap040_bus16_adapter.v splits them into byte/word/byte.
+			// Long and Word steps both preserve parity, so they stay odd.
 			prog[prog_words + 2] = SCRATCH[15:0] + pro[15:0] * 16'h0100
-			                       + ((pro == 5) ? 16'd1 : 16'd0);
+			                       + ((pro == 4 || pro == 5) ? 16'd1 : 16'd0);
 			prog_words = prog_words + 3;
 		end
 		slot_base = prog_words;

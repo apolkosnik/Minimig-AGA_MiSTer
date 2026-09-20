@@ -172,7 +172,7 @@ module ap040_pipe_cpu
 	output [31:0] l1_addr_b,
 	output        l1_rd_b,
 	output        l1_wren_b,
-	output  [3:0] l1_be_b,
+	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
 	input         l1_wr_busy,
 	input  [31:0] l1_q_b,
@@ -215,11 +215,11 @@ wire        eac_is_store;
 // instruction -- and port_taken tells EA-fetch to behave as if it had never
 // been fetched that cycle.
 wire        eaf_l1_wren_b;
-wire  [3:0] eaf_l1_be_b;
+wire  [1:0] eaf_l1_size_b;
 wire [31:0] eaf_l1_data_b;
 wire        ex_st_req;
 wire [31:0] ex_st_addr, ex_st_data;
-wire  [3:0] ex_st_be;
+wire  [1:0] ex_st_size;
 wire        eac_is_abs;
 wire        eac_is_postinc, eac_is_predec;
 wire        eaf_writes_an;
@@ -574,7 +574,7 @@ wire      [31:0] eaf_l1_addr_b;
 // port_taken).
 assign l1_addr_b = ex_st_req ? ex_st_addr : eaf_l1_addr_b;
 assign l1_wren_b = ex_st_req ? 1'b1       : eaf_l1_wren_b;
-assign l1_be_b   = ex_st_req ? ex_st_be   : eaf_l1_be_b;
+assign l1_size_b   = ex_st_req ? ex_st_size : eaf_l1_size_b;
 assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 
 
@@ -899,7 +899,7 @@ ap040_ea_fetch #(
 	.l1_rvalid_b      (l1_rvalid_b),
 	.l1_rd_b          (l1_rd_b),
 	.l1_wren_b        (eaf_l1_wren_b),
-	.l1_be_b          (eaf_l1_be_b),
+	.l1_size_b          (eaf_l1_size_b),
 	.l1_data_b        (eaf_l1_data_b),
 	.l1_wr_busy       (l1_wr_busy),
 
@@ -1013,7 +1013,7 @@ ap040_execute u_ex
 	.ex_st_req        (ex_st_req),
 	.ex_st_addr       (ex_st_addr),
 	.ex_st_data       (ex_st_data),
-	.ex_st_be         (ex_st_be),
+	.ex_st_size       (ex_st_size),
 	.ex_stall         (ex_stall),
 
 	.ex_fwd_valid     (ex_fwd_valid),

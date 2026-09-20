@@ -57,7 +57,7 @@ module ap040_pipe_sys
 
 wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a;
-wire  [3:0] l1_be_b;
+wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 
 ap040_pipe_cpu #(
@@ -71,7 +71,7 @@ ap040_pipe_cpu #(
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
 
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
-	.l1_be_b   (l1_be_b),   .l1_data_b(l1_data_b),
+	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
@@ -93,7 +93,7 @@ ap040_pipe_membus u_bus
 	.q_a      (l1_rdata_a), .rvalid_a(l1_rvalid_a),
 
 	.address_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
-	.be_b     (l1_be_b),   .rd_b  (l1_rd_b),
+	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),
 	.wr_busy  (l1_wr_busy), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
 
 	.sup      (dbg_sr[13]),
