@@ -1606,6 +1606,35 @@ real MMU or bus-error path arrives, which is the same boundary
    condition in a multi-cycle sequence.** Any future memory-sourced
    exception (CHK is next) needs the same latch.
 
+   ### Milestone 64: CHK
+
+   Bounds checking, vector 6, for `Dn`, `(An)`, `(An)+`, `-(An)` and
+   `#imm`. Its operand shape is the one that exposed milestone 63's defect,
+   so the latch was built in from the start rather than discovered.
+
+   N is defined on the two trapping paths only -- SET when the value is
+   negative, CLEARED when it merely exceeds the bound -- and is written into
+   the STACKED SR, which is what a handler reads and what RTE restores. The
+   non-trapping case leaves N, Z, V and C unchanged; the 68040 calls them
+   undefined, so that is one legal reading and the decoder says so.
+
+   Two bench corrections, both instructive:
+
+   - The immediate form read the WRONG REGISTER. `held_imm_dest9` selects
+     `ir[11:9]`, and without it the destination falls back to `ir[2:0]`,
+     which for mode 111/100 is the constant 4 -- so `CHK #10,D0` checked D4,
+     found zero, and never trapped.
+   - **The N checks did not discriminate.** Each CHK is preceded by a MOVE
+     that loads Dn, and that MOVE sets the live N from the very value CHK is
+     about to judge -- so stacking the UNMODIFIED SR gives the right N by
+     coincidence, and the bench passed against RTL that never wrote N into
+     the frame. A `MOVEQ` before each CHK now sets the live N to the
+     OPPOSITE of what CHK must stack.
+
+   That is the fourth time the "poison the wrong path" rule has been needed,
+   and the first where the coinciding value came from a neighbouring
+   instruction rather than from an unused register field.
+
    ### Adding a gather kind: the lists it must join
 
    Milestone 62 needed two debug cycles, both from the same cause, and

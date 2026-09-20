@@ -283,6 +283,7 @@ module ap040_ea_fetch
 	input             eac_div_signed,
 	input             eac_is_movem,
 	input             eac_movem_dir,
+	input             eac_is_chk,
 	input             eac_is_immsr,
 	input             eac_immsr_to_sr,
 	input             eac_is_pea,
@@ -392,6 +393,7 @@ module ap040_ea_fetch
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
 	output reg        eaf_div_signed,
+	output reg        eaf_is_chk,
 	output reg        eaf_is_immsr,
 	output reg        eaf_immsr_to_sr,
 	output reg        eaf_is_pea,
@@ -622,6 +624,27 @@ wire divzero_now = eac_valid && eac_is_div &&
 reg exc_pend_divzero;
 wire eac_is_divzero = divzero_now || exc_pend_divzero;
 
+// CHK (milestone 64). Same operand shape as the divide, so the same care:
+// the BOUND is the <ea> side, which for a memory source is mem_lane and
+// only while mem_pending holds it. And the same latch, for the same reason
+// -- the frame push this exception starts overwrites l1_q_b.
+//
+// N is DEFINED on the two trapping paths and nowhere else: set when the
+// value is negative, cleared when it merely exceeds the bound. It goes into
+// the STACKED SR, which is what the handler reads and what RTE restores, so
+// it must be latched alongside the fault itself.
+wire signed [15:0] chk_value = operand_b[15:0];
+wire [31:0]        chk_src   = eac_is_mem_src ? mem_lane : operand_a;
+wire signed [15:0] chk_bound = chk_src[15:0];
+wire chk_negative = chk_value < 16'sd0;
+wire chk_over     = chk_value > chk_bound;
+wire chk_now = eac_valid && eac_is_chk &&
+               (eac_is_mem_src ? mem_pending : 1'b1) &&
+               (chk_negative || chk_over);
+reg exc_pend_chk;
+reg exc_pend_chk_n;
+wire eac_is_chk_trap = chk_now || exc_pend_chk;
+
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
 
@@ -696,7 +719,8 @@ wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
-wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero;
+wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero ||
+                      eac_is_chk_trap;
 wire exc_active    = eac_valid && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
@@ -803,7 +827,10 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 wire [31:0] exc_sp_bank    = sr_in[12] ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
 wire [31:0] exc_frame_size = eac_is_fmt2 ? 32'd12 : 32'd8;
 wire [31:0] exc_new_sp     = exc_sp_bank - exc_frame_size;
-wire [15:0] exc_sr_word    = sr_in;
+wire [15:0] exc_sr_word    = eac_is_chk_trap
+                              ? {sr_in[15:4],
+                                 (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}
+                              : sr_in;
 // Illegal and privilege violation both stack the FAULTING instruction's OWN
 // address (go_illegal's/go_priv's shared pc_i convention -- you can't
 // "return past" either kind of fault); TRAP stacks the FOLLOWING
@@ -831,7 +858,8 @@ wire [31:0] exc_pc_field   = eac_is_jmp_odd ? (eac_pc + 32'd2) :
                               (eac_is_illegal || eac_is_priv) ? eac_pc : eac_next_pc;
 wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
-                              eac_is_divzero ? 8'd5 : eac_imm[7:0];
+                              eac_is_divzero ? 8'd5 :
+                              eac_is_chk_trap ? 8'd6 : eac_imm[7:0];
 wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
 // Format $2's own extra "instruction address" longword -- the odd target
 // itself, LSB cleared (ap040_core.v's own convention for this field,
@@ -939,6 +967,7 @@ always @(posedge clk) begin
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
+		eaf_is_chk     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
 		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
@@ -956,6 +985,8 @@ always @(posedge clk) begin
 		mvm_rd_pend    <= 1'b0;
 		mvm_rd_reg     <= 4'h0;
 		exc_pend_divzero <= 1'b0;
+		exc_pend_chk     <= 1'b0;
+		exc_pend_chk_n   <= 1'b0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
@@ -966,12 +997,19 @@ always @(posedge clk) begin
 		if (exc_vec_done)      exc_pend_divzero <= 1'b0;
 		else if (divzero_now)  exc_pend_divzero <= 1'b1;
 
+		if (exc_vec_done)  exc_pend_chk <= 1'b0;
+		else if (chk_now) begin
+			exc_pend_chk   <= 1'b1;
+			exc_pend_chk_n <= chk_negative;
+		end
+
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
 			mvm_active      <= 1'b0;
 			mvm_rd_pend     <= 1'b0;
 			exc_pend_divzero <= 1'b0;
+			exc_pend_chk     <= 1'b0;
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending
@@ -1147,7 +1185,8 @@ always @(posedge clk) begin
 				// so eac_dest_reg still names the divide's own destination
 				// register, and the exception's result -- the new supervisor
 				// SP -- would commit THERE instead of to A7.
-				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero) ? 4'd15 : eac_dest_reg;
+				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
+				                    eac_is_chk_trap) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -1182,6 +1221,7 @@ always @(posedge clk) begin
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
+				eaf_is_chk     <= eac_is_chk_trap;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
@@ -1290,6 +1330,7 @@ always @(posedge clk) begin
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
+				eaf_is_chk      <= 1'b0;
 				eaf_is_div      <= 1'b0;
 				eaf_div_signed  <= 1'b0;
 				eaf_is_bsr      <= 1'b0;
@@ -1344,6 +1385,7 @@ always @(posedge clk) begin
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
+				eaf_is_chk     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;

@@ -207,7 +207,7 @@ wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
-wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk, id_ea_indexed, id_ea_pcrel, id_is_pea, id_is_immsr, id_immsr_to_sr;
+wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk, id_ea_indexed, id_ea_pcrel, id_is_pea, id_is_immsr, id_immsr_to_sr, id_is_chk;
 wire        id_is_movem, id_movem_dir, id_is_div, id_div_signed;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
@@ -222,7 +222,8 @@ wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
-wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr;
+wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr, eac_is_chk;
+wire        eaf_is_chk;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
 wire        eaf_is_pea;
 wire        eac_is_movem, eac_movem_dir, eac_is_div, eac_div_signed;
@@ -605,6 +606,7 @@ ap040_decode u_id
 	.id_ea_indexed   (id_ea_indexed),
 	.id_ea_pcrel     (id_ea_pcrel),
 	.id_is_rmw       (id_is_rmw),
+	.id_is_chk       (id_is_chk),
 	.id_is_immsr     (id_is_immsr),
 	.id_immsr_to_sr  (id_immsr_to_sr),
 	.id_is_pea       (id_is_pea),
@@ -659,6 +661,7 @@ ap040_ea_calc u_eac
 	.id_ea_indexed    (id_ea_indexed),
 	.id_ea_pcrel      (id_ea_pcrel),
 	.id_is_rmw        (id_is_rmw),
+	.id_is_chk        (id_is_chk),
 	.id_is_immsr      (id_is_immsr),
 	.id_immsr_to_sr   (id_immsr_to_sr),
 	.id_is_pea        (id_is_pea),
@@ -706,6 +709,7 @@ ap040_ea_calc u_eac
 	.eac_is_rmw       (eac_is_rmw),
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
+	.eac_is_chk       (eac_is_chk),
 	.eac_is_immsr     (eac_is_immsr),
 	.eac_immsr_to_sr  (eac_immsr_to_sr),
 	.eac_is_pea       (eac_is_pea),
@@ -763,6 +767,7 @@ ap040_ea_fetch #(
 	.eac_is_rmw       (eac_is_rmw),
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
+	.eac_is_chk       (eac_is_chk),
 	.eac_is_immsr     (eac_is_immsr),
 	.eac_immsr_to_sr  (eac_immsr_to_sr),
 	.eac_is_pea       (eac_is_pea),
@@ -779,6 +784,7 @@ ap040_ea_fetch #(
 	.rf3_data         (rf3_data),
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
+	.eaf_is_chk       (eaf_is_chk),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
@@ -912,6 +918,7 @@ ap040_execute u_ex
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
+	.eaf_is_chk       (eaf_is_chk),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),
