@@ -105,6 +105,8 @@ module ap040_ea_calc
 	input             id_movem_word,
 	input             id_movem_down,
 	input             id_movem_wb,
+	input             id_movem_pcrel,
+	input             id_movem_abs,
 	input             id_is_chk,
 	input             id_is_immsr,
 	input             id_immsr_to_sr,
@@ -156,6 +158,8 @@ module ap040_ea_calc
 	output reg        eac_movem_word,
 	output reg        eac_movem_down,
 	output reg        eac_movem_wb,
+	output reg        eac_movem_pcrel,
+	output reg        eac_movem_abs,
 	output reg        eac_is_chk,
 	output reg        eac_is_immsr,
 	output reg        eac_immsr_to_sr,
@@ -210,6 +214,8 @@ always @(posedge clk) begin
 		eac_movem_word   <= 1'b0;
 		eac_movem_down   <= 1'b0;
 		eac_movem_wb     <= 1'b0;
+		eac_movem_pcrel  <= 1'b0;
+		eac_movem_abs    <= 1'b0;
 		eac_is_chk       <= 1'b0;
 		eac_is_immsr     <= 1'b0;
 		eac_immsr_to_sr  <= 1'b0;
@@ -262,6 +268,8 @@ always @(posedge clk) begin
 			eac_movem_word   <= id_movem_word;
 			eac_movem_down   <= id_movem_down;
 			eac_movem_wb     <= id_movem_wb;
+			eac_movem_pcrel  <= id_movem_pcrel;
+			eac_movem_abs    <= id_movem_abs;
 			eac_is_chk       <= id_is_chk;
 			eac_is_immsr     <= id_is_immsr;
 			eac_immsr_to_sr  <= id_immsr_to_sr;

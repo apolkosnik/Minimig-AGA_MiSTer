@@ -1683,6 +1683,25 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 72: MOVEM (d16,PC) and $xxx.W
+
+   Both are control modes and both gather a second word after the mask, so
+   they ride milestone 68's two-word MOVEM gather with two more carried
+   properties, `held_movem_pcrel` and `held_movem_abs`. Decode plus a
+   three-way base select at the sequencer's start.
+
+   **The PC-relative base is PC+4, not PC+2.** Every other PC-relative mode
+   takes the address of its extension word, PC+2. For MOVEM the mask word
+   sits between the opcode and the displacement, so the displacement word
+   -- and the base -- is at PC+4. It is the one place MOVEM's extra word
+   changes an ADDRESS rather than just a gather length, and the bench puts
+   the table where a PC+2 base reads one word early and gives `4E711111`.
+
+   **`MOVEM $xxx.L` is not reached**: mask plus a 32-bit address is a
+   THREE-word gather, and `ext_pending` is two bits wide with two as its
+   maximum. It is the last MOVEM mode missing, and the only one that needs
+   the gather machinery itself to grow.
+
    ### Milestone 71: JMP/JSR with indexed, PC-relative and absolute targets
 
    `JSR (d16,PC)`, `JSR $xxx.L`, `JMP (d8,PC,Xn)` and their counterparts.

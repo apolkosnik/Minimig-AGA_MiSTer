@@ -209,7 +209,7 @@ wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
 wire        id_is_branch, id_is_scc, id_is_dbcc, id_is_mem_src, id_is_jmp;
 wire        id_is_lea, id_sxt_w, id_is_rmw, id_is_link, id_is_unlk, id_ea_indexed, id_ea_pcrel, id_is_pea, id_is_immsr, id_immsr_to_sr, id_is_chk;
-wire        id_is_movem, id_movem_dir, id_movem_word, id_movem_down, id_movem_wb, id_is_div, id_div_signed;
+wire        id_is_movem, id_movem_dir, id_movem_word, id_movem_down, id_movem_wb, id_movem_pcrel, id_movem_abs, id_is_div, id_div_signed;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
 wire        id_is_rts, id_is_rte;
@@ -227,7 +227,7 @@ wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_
 wire        eaf_is_chk;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
 wire        eaf_is_pea;
-wire        eac_is_movem, eac_movem_dir, eac_movem_word, eac_movem_down, eac_movem_wb, eac_is_div, eac_div_signed;
+wire        eac_is_movem, eac_movem_dir, eac_movem_word, eac_movem_down, eac_movem_wb, eac_movem_pcrel, eac_movem_abs, eac_is_div, eac_div_signed;
 wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
 wire        rf3_we;
 wire  [3:0] rf3_addr;
@@ -652,6 +652,8 @@ ap040_decode u_id
 	.id_movem_word   (id_movem_word),
 	.id_movem_down   (id_movem_down),
 	.id_movem_wb     (id_movem_wb),
+	.id_movem_pcrel  (id_movem_pcrel),
+	.id_movem_abs    (id_movem_abs),
 	.id_is_unlk      (id_is_unlk),
 	.id_is_bsr       (id_is_bsr),
 	.id_is_jsr       (id_is_jsr),
@@ -710,6 +712,8 @@ ap040_ea_calc u_eac
 	.id_movem_word    (id_movem_word),
 	.id_movem_down    (id_movem_down),
 	.id_movem_wb      (id_movem_wb),
+	.id_movem_pcrel   (id_movem_pcrel),
+	.id_movem_abs     (id_movem_abs),
 	.id_is_unlk       (id_is_unlk),
 	.id_is_bsr        (id_is_bsr),
 	.id_is_jsr        (id_is_jsr),
@@ -760,6 +764,8 @@ ap040_ea_calc u_eac
 	.eac_movem_word   (eac_movem_word),
 	.eac_movem_down   (eac_movem_down),
 	.eac_movem_wb     (eac_movem_wb),
+	.eac_movem_pcrel  (eac_movem_pcrel),
+	.eac_movem_abs    (eac_movem_abs),
 	.eac_is_div       (eac_is_div),
 	.eac_div_signed   (eac_div_signed),
 	.eac_is_bsr       (eac_is_bsr),
@@ -821,6 +827,8 @@ ap040_ea_fetch #(
 	.eac_movem_word   (eac_movem_word),
 	.eac_movem_down   (eac_movem_down),
 	.eac_movem_wb     (eac_movem_wb),
+	.eac_movem_pcrel  (eac_movem_pcrel),
+	.eac_movem_abs    (eac_movem_abs),
 	.eac_is_div       (eac_is_div),
 	.eac_div_signed   (eac_div_signed),
 	.eaf_is_div       (eaf_is_div),

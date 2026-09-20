@@ -286,6 +286,8 @@ module ap040_ea_fetch
 	input             eac_movem_word,
 	input             eac_movem_down,
 	input             eac_movem_wb,
+	input             eac_movem_pcrel,
+	input             eac_movem_abs,
 	input             eac_is_chk,
 	input             eac_is_immsr,
 	input             eac_immsr_to_sr,
@@ -1141,7 +1143,15 @@ always @(posedge clk) begin
 					// The mask is the HIGH half of eac_imm and the low half is a
 					// displacement, zero for every mode that has none.
 					mvm_mask    <= eac_imm[31:16];
-					mvm_addr    <= operand_a + {{16{eac_imm[15]}}, eac_imm[15:0]};
+					// Three bases. $xxx.W is the sign-extended low half alone.
+					// (d16,PC)'s base is the address of the DISPLACEMENT word,
+					// which for MOVEM is PC+4 -- the mask word sits between the
+					// opcode and the displacement, unlike every other
+					// PC-relative mode, where the base is PC+2. Getting this
+					// wrong reads the table one word early.
+					mvm_addr    <= eac_movem_abs   ? {{16{eac_imm[15]}}, eac_imm[15:0]} :
+					               eac_movem_pcrel ? (eac_pc + 32'd4 + {{16{eac_imm[15]}}, eac_imm[15:0]}) :
+					                                 (operand_a + {{16{eac_imm[15]}}, eac_imm[15:0]});
 					mvm_rd_pend <= 1'b0;
 					mvm_rd_reg  <= 4'h0;
 				end else if (mvm_ld_go) begin
