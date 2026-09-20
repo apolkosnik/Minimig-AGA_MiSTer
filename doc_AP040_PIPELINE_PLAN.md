@@ -1688,6 +1688,89 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 90: the quick forms' other two destinations
+
+   `0101 qqq d SS mmm rrr` has reached only `mmm=000` since milestone 27.
+   Both destinations it lacked are ones compiled code leans on: `SUBQ.L
+   #8,A7` is how a small stack frame opens, and `ADDQ.L #1,(A0)` is a
+   counter that lives in memory.
+
+   **They are not one feature, and the decode says so.** The memory forms
+   are milestone 89's read-modify-write with the immediate coming out of
+   the opcode instead of a gathered extension word: `id_immrmw`, condition
+   codes written, no register written. The An form writes a register,
+   writes no condition codes, and is 32 bits wide whatever the size field
+   says -- the ADDA/SUBA rule from milestone 44 -- so `id_size` is forced
+   Long and Byte is excluded from the shape, because `ADDQ.B #n,An` does
+   not exist. A decode that treats the two alike is wrong in both
+   directions, and the bench is built to say which.
+
+   **Fit:** 5,812 ALMs (5,802 after milestone 89), Fmax 42.56 MHz (42.79),
+   slack **+1.502 ns** (+1.632), worst path 23.20 ns (23.12). No `quick`
+   term appears on any of the forty worst paths. The 0.13 ns is inside the
+   0.6 ns placement band. Two fits were run and agree to the picosecond,
+   for the reason below.
+
+   **A false regression, and what caused it.** The first full-suite run
+   reported 34 failures across both builds, including
+   `tb_ap040_pipe_nop.v` -- a bench that cannot fail for a decode reason.
+   They were not simulation failures. They were `g++` exiting with
+   `Error 1` and no diagnostic, because `/home` was at 100% with 64 KB
+   free. The suite marks a bench failed when its log lacks a pass line,
+   which a build failure also produces, so a full disk reads as a
+   suite-wide RTL regression.
+
+   The cause was this harness. Every bench leaves a Verilator build
+   directory holding two precompiled headers of about 100 MB each; a full
+   suite leaves roughly 10 GB, and ninety milestones of suite runs had
+   accumulated **197 GB across 2,099 of them**, against 52 MB of logs --
+   which are the actual evidence. `run_pipe_verilator.py` now deletes a
+   bench's build directory as soon as that bench PASSES, and keeps it when
+   the bench fails, which is when the binary is worth having. `--keep-obj`
+   restores the old behaviour. Verified all three ways: a passing bench
+   leaves 20 KB where it left 200 MB, a bench failed on purpose keeps its
+   directory, and `--keep-obj` keeps it too.
+
+   The rule: **a build failure and a test failure are not distinguishable
+   from the pass line alone.** When a bench that has no way to fail fails,
+   check the machine before the RTL.
+
+   | mutation | `quickdst` | `dual` |
+   |---|---|---|
+   | the An form's width not forced Long | 2 checks (A1 and A2) | passes, as the bench's own comment predicts |
+   | the An form writing condition codes | 1 check (D6) | fails, round 1 |
+   | the memory form not writing condition codes | 1 check (D7) | fails, round 2 |
+   | the memory form's register write leaked | 1 check (D0) | fails, rounds 0 and 1 |
+   | `id_immrmw` not set for the memory form | 5 checks | fails, round 0 |
+   | `id_src_a_is_imm` set for the memory form | 5 checks | fails, round 0 |
+   | the memory form not marked an RMW | 5 checks | fails, round 0 |
+   | Byte not excluded from the An destination | `ansrc_illegal`: 3 traps not 4, A0 = $AB | -- |
+
+   The differential cannot see the width mutation, and that is by
+   construction rather than by oversight. Every address register in the
+   generator is a pointer the rest of the program dereferences, so an An
+   destination left to drift would walk out of its scratch lane and
+   eventually into the program. The add and its matching subtract
+   therefore go in one slot and the pointer ends where it started -- which
+   proves the form decodes in both cores, writes the register the opcode
+   names, and (through the Scc capture milestone 89 added) does not write
+   condition codes, but cancels a symmetric width bug. That is the
+   dedicated bench's A1 and A2, and the two benches are complementary here
+   rather than redundant.
+
+   The Byte restriction went to `tb_ap040_pipe_ansrc_illegal.v`, which
+   exists for exactly this and now runs four excluded forms rather than
+   three. Its own rule still holds: it passes on RTL predating the
+   feature, so it is validated by breaking the decoder rather than by a
+   control run.
+
+   | run | result |
+   |---|---|
+   | control, both benches on milestone 89's RTL | both fail; the differential reports vector 4 on `568c 578c` |
+   | full suite, normal build | 94/94 |
+   | full suite, slow build | 94/94 |
+   | standalone fit, twice | +1.502 ns at 25 ns, 5,812 ALMs, identical both times |
+
    ### Milestone 89: an immediate straight into memory
 
    The second of the two decode gaps the differential found at milestone

@@ -137,7 +137,7 @@ task gen_program;
 				w0 = {4'b0101, cc[3:0], 2'b11, 3'b000, dn[2:0]};   // Scc Dn
 				want_scc = 0;
 			end else begin
-			kind = rbits(32) % 38;
+			kind = rbits(32) % 42;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -234,6 +234,32 @@ task gen_program;
 			    w0 = {10'b0000011001, 3'b011, an[2:0]}; w1 = imm[15:0]; end   // ADDI.W #x,(An)+
 			36: begin imm = rbits(8);
 			    w0 = {10'b0000001000, 3'b010, anw[2:0]}; w1 = {8'h00, imm[7:0]}; end // ANDI.B #x,(Aw)
+			// ---- the quick forms' other two destinations (milestone 90).
+			// The memory ones are ordinary read-modify-writes and step An
+			// exactly like the kinds above.
+			37: begin q = rbits(3);
+			    w0 = {4'b0101, q[2:0], 6'b010_010, an[2:0]}; end      // ADDQ.L #q,(An)
+			38: begin q = rbits(3);
+			    w0 = {4'b0101, q[2:0], 6'b101_010, an[2:0]}; end      // SUBQ.W #q,(An)
+			39: begin q = rbits(3);
+			    w0 = {4'b0101, q[2:0], 6'b010_011, an[2:0]}; end      // ADDQ.L #q,(An)+
+			// The An destination has to come in a BALANCED PAIR, because
+			// every address register here is a pointer the rest of the
+			// program dereferences: left to drift, one would walk out of
+			// its scratch lane and eventually into the program. A slot
+			// holds two words, so the add and its matching subtract go in
+			// together and the pointer ends where it started.
+			//
+			// What that can see: whether the form decodes at all (a core
+			// that rejects it traps to vector 4), whether it writes the
+			// register the opcode names, and -- through the Scc capture and
+			// the Bcc kind -- whether it wrongly writes condition codes.
+			// What it CANNOT see is a symmetric width bug, since a pair
+			// that wraps one way wraps back the other. That is
+			// tb_ap040_pipe_quickdst.v's A1 and A2.
+			40: begin q = rbits(3);
+			    w0 = {4'b0101, q[2:0], 6'b010_001, an[2:0]};          // ADDQ.L #q,An
+			    w1 = {4'b0101, q[2:0], 6'b110_001, an[2:0]}; end      // SUBQ.L #q,An
 			// A shift counted by a REGISTER (milestone 87), so the count is
 			// whatever dm happens to hold: 0 to 63 after the modulo, which
 			// covers both cases the immediate form cannot express -- more

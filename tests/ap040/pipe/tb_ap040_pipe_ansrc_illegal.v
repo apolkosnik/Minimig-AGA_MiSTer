@@ -1,7 +1,8 @@
 //--------------------------------------------------------------------------//
 // AP040_PIPE - MC68040-style pipelined core (milestone 43: An as a source) //
 //                                                                          //
-// tb_ap040_pipe_ansrc_illegal.v - the An-source forms that must NOT decode //
+// tb_ap040_pipe_ansrc_illegal.v - the address-register forms that must NOT //
+// decode                                                                   //
 //                                                                          //
 // Reaching source mode 001 is easy to OVERreach. The 68k restricts it and   //
 // so must this decoder:                                                    //
@@ -12,6 +13,10 @@
 //     ALU family at ir[7:6]==00.                                           //
 //   - AND and OR do not take an address register at any size. Only ADD,     //
 //     SUB and CMP do.                                                      //
+//   - ADDQ.B and SUBQ.B have no address-register destination either        //
+//     (milestone 90), which is a third place the same "Byte is never       //
+//     allowed" rule has to be written: the quick forms encode size at      //
+//     ir[7:6] like the ALU family, but they are a separate shape.          //
 //                                                                          //
 // A decoder that simply widened the mode field would accept all three of    //
 // these and pass tb_ap040_pipe_ansrc.v -- which is why that bench alone is  //
@@ -23,6 +28,7 @@
 //   MOVE.B A0,D0    would leave D0 = 000000AA                              //
 //   ADD.B  A0,D1    would leave D1 = 000000FF                              //
 //   AND.L  A0,D1    would leave D1 = $AA & whatever D1 then held           //
+//   ADDQ.B #1,A0    would leave A0 = 000000AB                              //
 //                                                                          //
 // Every operand differs from every other, so no wrong decode can land on    //
 // the right answer by coincidence. They do CHAIN, though, if more than one  //
@@ -47,14 +53,14 @@
 // VBR = $2000, so vector 4 lands at word index 3592 -- the same arithmetic  //
 // tb_ap040_pipe_exc.v documents.                                           //
 //                                                                          //
-// On a decoder that admits all three, D2 counts 0.                         //
+// On a decoder that admits all four, D2 counts 0.                          //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
 
 module tb_ap040_pipe_ansrc_illegal;
 
-localparam PROG_WORDS      = 72;
+localparam PROG_WORDS      = 84;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -117,8 +123,14 @@ initial begin
 	dut.u_l1.mem[34] = 16'h0460;
 	dut.u_l1.mem[35] = 16'hC288;   // AND.L A0,D1    -- AND never takes an An
 
-	// Resume 3 @ word idx 48 (byte $460): nothing left to do but drain.
-	dut.u_l1.mem[48] = 16'h4E71;   // NOP
+	// Resume 3 @ word idx 48 (byte $460): the fourth case.
+	dut.u_l1.mem[48] = 16'h247C;   // MOVEA.L #$00000480,A2  (resume 4)
+	dut.u_l1.mem[49] = 16'h0000;
+	dut.u_l1.mem[50] = 16'h0480;
+	dut.u_l1.mem[51] = 16'h5208;   // ADDQ.B #1,A0  -- Byte with an An DESTINATION
+
+	// Resume 4 @ word idx 64 (byte $480): nothing left to do but drain.
+	dut.u_l1.mem[64] = 16'h4E71;   // NOP
 
 	// Illegal handler @ word idx 512 (byte $800). Deliberately far past the
 	// mainline: word index 48 is followed by NOP fill, and PROG_WORDS is an
@@ -141,7 +153,7 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	// Three exception frames are pushed and never popped (the handler
+	// Four exception frames are pushed and never popped (the handler
 	// returns with JMP, not RTE), so A7 must point somewhere real and
 	// clear of the program. See tb_ap040_pipe_move_mem.v's header for why
 	// the poke has to land past the reset edge's own NBA region.
@@ -149,9 +161,9 @@ initial begin
 
 	repeat ((PROG_WORDS + 160) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dbg_d2 !== 32'h0000_0003) begin
+	if (dbg_d2 !== 32'h0000_0004) begin
 		errors = errors + 1;
-		$display("FAIL: trap count D2 = %h, expected 00000003 (all three excluded forms must be illegal)",
+		$display("FAIL: trap count D2 = %h, expected 00000004 (all four excluded forms must be illegal)",
 		         dbg_d2);
 	end
 	if (dbg_d0 !== 32'h0000_0011) begin
@@ -163,6 +175,12 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D1 = %h, expected 00000055 (ADD.B A0,D1 would leave 000000ff, AND.L A0,D1 would leave 0)",
 		         dbg_d1);
+	end
+
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_00AA) begin
+		errors = errors + 1;
+		$display("FAIL: A0 = %h, expected 000000aa (ADDQ.B #1,A0 must not decode; it would leave 000000ab)",
+		         dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
