@@ -1688,6 +1688,70 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 86: a sized data port, and Longwords at odd addresses
+
+   The bytes of a Long at an odd address span THREE words. No lane select
+   out of one aligned longword can reach them, which is why milestone 85
+   fixed Words and stopped. The answer was not a wider mux but the port.
+
+   **Port B carries a size now**, and the memory does all placement:
+   right-aligned on the way out, placed from the address on the way in, at
+   any alignment. That moved logic OUT of the CPU, which is the sign it was
+   in the wrong place: `ap040_ea_fetch.v`'s `mem_raw` is now just
+   `l1_q_b`, its `st_be`/`st_dat` are gone, and a MOVEM word beat and a
+   sized store became the same expression; `ap040_execute.v`'s
+   `ex_st_be`/`ex_st_data` became `ex_st_size` and `alu_result`.
+   `ap040_pipe_l1.v` assembles a read across as many words as the size and
+   alignment need, and `ap040_pipe_membus.v` hands size and address
+   straight to the bus, where `ap040_bus16_adapter.v` already split any
+   alignment -- for the third milestone running, the bus side needed
+   nothing.
+
+   The feature then fell out of the refactor: `tb_ap040_pipe_unaligned_long.v`
+   passed the first time it was run.
+
+   **One behaviour changed with it.** The L1's write buffer no longer
+   forwards into a read; it drains first. A forward can only answer an
+   exactly-matching access, and once size and alignment are in play
+   "matching" stops being a comparison -- an overlap can be partial at
+   either end. Draining gives the same answer for every overlap, and is the
+   ordering `ap040_pipe_membus.v` has always had, so the array and the bus
+   now order accesses alike. `tb_ap040_pipe_l1_wbuf`'s case C checks the
+   same outcome by the new route, and says so.
+
+   | run | result |
+   |---|---|
+   | control: milestone-85 RTL | FAIL -- 6 of 9: the load returns the ALIGNED longword ($12345678 for $3456789A) and the stores land a byte early |
+   | full suite, normal build | 91/91 |
+   | full suite, slow build | 91/91 |
+
+   **Fit, and it is the most expensive milestone so far:** 5,598 ALMs
+   (5,259 after milestone 85), Fmax 40.38 MHz (41.37), setup slack at
+   25 ns +0.235 ns (+0.825), worst path 24.59 ns and ending, as ever, at
+   `q_b`.
+
+   Where it went is the point. `ap040_pipe_l1.v` went 572 -> 930 ALMs,
+   `ap040_ea_fetch.v` 1,422 -> 1,349, and `ap040_pipe_cpu.v` as a whole
+   4,432 -> 4,412 -- slightly SMALLER. The +339 is all memory-side: the
+   read assembler and the write placer, which now mux bytes out of and
+   into three words at four alignments. Two things to keep in view. The
+   L1 is a stand-in for a cache, and a real cache needs that datapath
+   anyway -- it is not overhead the design can avoid by leaving unaligned
+   access unimplemented, only overhead it can MOVE. And the assembly sits
+   at the tail of the critical spine, which is where the 0.6 ns went; if
+   the spine needs room later, registering the assembly one cycle deeper
+   is the obvious trade, at a cycle per load.
+
+   The differential now starts A4 odd as well as A5, so every round
+   exercises unaligned Longs and Words, through the bus, where they become
+   byte/word/byte cycles. Both cores still agree on 15 registers and 8,192
+   scratch words.
+
+   With this the core's data path is alignment-agnostic for every size,
+   which is what the 68040 promises software. The gaps the differential
+   found are down to two, both decode reach rather than wrong behaviour:
+   register-count shifts and the immediate-to-memory forms.
+
    ### Milestone 85: Word accesses at odd addresses
 
    Milestone 84's finding, fixed. A Word at an odd address is still inside
