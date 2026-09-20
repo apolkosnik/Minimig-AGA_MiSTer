@@ -1688,6 +1688,110 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 88: the exception frame starts a cycle after the fault
+
+   Milestone 87's fit left the spine with no margin and named where 5.7 ns
+   of it was: the CHK compare on a forwarded ALU result, `eac_is_chk_trap`,
+   `exc_active`, and the exception's claim on the L1 address mux. The
+   frame's first beat went out in the very cycle the fault was detected --
+   a choice made at milestone 76, when the question was correctness -- and
+   that put the whole fault-detection cone (the CHK compare, the divisor
+   test on loaded data, the privilege check on a forwarded S bit, the
+   odd-target test on the EA adder) on EVERY load's address path, exception
+   or not.
+
+   `exc_go` is the cone, registered. The sequencer's own signals -- the
+   beats, the vector read, the completion -- key off it, so the address,
+   size, write enable and read strobe the L1 sees are a register away from
+   the cone. The stall and the retirement block still use the cone
+   directly: the faulting instruction has to be held and not retired in the
+   cycle it faults, and neither of those is on the L1's path. A wait branch
+   covers the fault cycle so nothing lower in the chain runs for the
+   instruction -- in particular not `ret_done`, which would otherwise let an
+   RTE with a bad format word complete its pop in the cycle `fmterr_now`
+   says otherwise. One cycle per exception entry; no bench changed.
+
+   **First fit:** 5,787 ALMs (5,763), Fmax 41.85 MHz (39.85), setup slack
+   at 25 ns **+1.107 ns** (-0.097), worst path 23.68 ns (24.46). The CHK
+   cone is off the spine -- `chk` and `exc_` appear on none of the 40
+   worst paths, where they were on all of them.
+
+   **And the new worst path is the same problem's last trace.** ALU Z flag
+   -> the milestone-74 CCR forward (`sr_resolved_ea[2]`) -> `trapcc_now` ->
+   `eac_is_fmt2` -> the 8-vs-12 frame-size select -> `exc_beat_addr` ->
+   `l1_addr_b`. The address mux's SELECT had left the cone; the frame's
+   ADDRESS still depended on the fault type through the format nibble.
+   One more register -- `exc_fmt2_r`, latched with `exc_go` -- and the
+   frame shape is fixed at the same moment the verdict is.
+
+   **Second fit, and it went backwards:** 5,802 ALMs, Fmax 39.97 MHz,
+   slack **-0.021 ns**, worst path 24.38 ns. The path: Z flag -> the CCR
+   forward -> `eac_is_trapcc_trap` -> `l1_addr_b`. Not through the frame
+   size this time -- through the VECTOR. The vector fetch's address is
+   `{exc_vec_num, 2'b00}`, and `exc_vec_num` is the fault-priority mux over
+   the whole cone. I had latched the frame's shape and left its vector
+   live: the same select-versus-data mistake, one mux to the right, and the
+   fitter's placement happened to expose it as the worst path this time
+   where the first fit had hidden it under the CHK cone. The stack-bank
+   select is the last such term -- `sr_in[12]`, the M bit, is a forward
+   from EX. Both are now captured with `exc_go`: `exc_vec_r` and `exc_m_r`.
+   The frame's address is then `bank(exc_m_r) - (exc_fmt2_r ? 12 : 8) +
+   phase`, and the vector's is `{exc_vec_r, 00}`: registers, constants, and
+   muxes selected by registers, which is the rule stated below.
+
+   **Third fit:** 5,787 ALMs, Fmax 42.78 MHz, slack **+1.622 ns**, worst
+   path 23.06 ns. Seven of the forty worst paths still end at the L1's
+   `q_b`, and they are the spine proper: a forwarded operand, the EA adder,
+   `l1_addr_b`. The other thirty-three end at `eaf_operand_b`, and that
+   path is the cone's new home: ALU -> `ex_fwd_data` -> `operand_a` -> the
+   CHK compare -> `exc_active` -> the priority select of the stage's own
+   next-value chain (the fault branch sits above the load and store
+   branches, so every register the chain writes has the cone in its
+   select). It is a register-to-register path inside the stage, with 1.6 ns
+   to spare, and it is where the cone belongs: off the array, on a flop.
+   The fitter packed that flop into the multiplier's input register, which
+   is why the endpoint reads as `Mult1~mac|ax`.
+
+   **The gap the mutations found.** Three registers were added and each
+   was mutated to a constant before the claims below were written. The
+   second one exposed a hole eighteen milestones old: `exc_m_r` forced to
+   zero passed every exception bench, because no bench in the suite had
+   ever taken an exception with M set. Every frame since milestone 15 had
+   gone to ISP, so a sequencer that ignored M entirely was
+   indistinguishable from one that honoured it. `tb_ap040_pipe_sup.v` --
+   the bench that owns ISP/MSP/USP -- gains a fifth phase inside its
+   privilege handler: `MOVE #$3000,SR` sets M, `TRAP #1` has to land its
+   frame at MSP-8 with ISP untouched, the frame's SR word has to read
+   `$3000`, and the handler's live SR has to keep M (only interrupts clear
+   it). The third register's mutation found a smaller version of the same
+   thing: `exc_fmt2_r` forced to zero passes `rte_fmt2`, `chkmem` AND
+   `trapcc`, none of which looks at its own frame's shape -- a format-$0
+   frame plus a format-$0 RTE is self-consistent. `addrerr`, `trace` and
+   `integration4` do look, and fail it. The TRAPcc bench's blind spot
+   stands as recorded: it proves the trap is taken, not that the frame is
+   six words.
+
+   | mutation | benches | result |
+   |---|---|---|
+   | `exc_vec_r` latched as constant 4 | trapcc, exc, sup | all three fail: handlers not reached, frame vector word `$0010` |
+   | `exc_m_r` latched as 0 | sup, exc, trapcc | sup fails (MSP stays `$60`, frame words never written at `$58`); exc and trapcc pass, as neither sets M |
+   | `exc_fmt2_r` latched as 0 | rte_fmt2, chkmem, trapcc | **all three pass** -- none checks the frame's shape |
+   | `exc_fmt2_r` latched as 0, again | addrerr, trace, integration4, trapcc | addrerr fails (no word2, ISP -8 not -12), trace fails (fmt/vec `$0024` not `$2024`), integration4 fails; trapcc passes |
+   | the fault-cycle wait branch removed | fmterr, exc, rte_fmt2 | all three fail (5, 6 and 2 checks) |
+
+   | run | result |
+   |---|---|
+   | exception benches, after each of the three changes | 10/10 after `exc_go`, 10/10 after `exc_fmt2_r`, 11/11 (sup included) after `exc_vec_r`/`exc_m_r` |
+   | extended sup bench, both builds | passes on the final RTL |
+   | full suite, normal build | 92/92 after `exc_go`, 92/92 after `exc_fmt2_r`, 92/92 on the final RTL |
+   | full suite, slow build | 92/92, 92/92, 92/92, same three points |
+
+   The rule this leaves: **nothing combinational from a fault, a forward or
+   a compare belongs on the L1 address path.** Every address the L1 sees
+   should be a register, a register plus a constant, or a mux of those
+   selected by a register. The fit reports enough to check it, and
+   `paths40.txt` says when it stops being true.
+
    ### Milestone 87: shifts and rotates counted by a register
 
    The first of the two decode gaps the differential found in milestone 83.
