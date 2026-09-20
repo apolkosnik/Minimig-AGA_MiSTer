@@ -332,6 +332,7 @@ module ap040_decode
 	output reg        id_is_movesr,
 	output reg        id_is_movec,
 	output reg        id_is_rts,
+	output reg        id_is_nop,       // T0 trace treats NOP as a change of flow (milestone 79)
 	output reg        id_is_rte,
 	output reg  [3:0] id_cond
 );
@@ -1755,6 +1756,7 @@ always @(posedge clk) begin
 		id_is_movesr    <= 1'b0;
 		id_is_movec     <= 1'b0;
 		id_is_rts       <= 1'b0;
+		id_is_nop       <= 1'b0;
 		id_is_rte       <= 1'b0;
 		id_cond         <= 4'h0;
 		ext_pending     <= 2'd0;
@@ -1971,6 +1973,7 @@ always @(posedge clk) begin
 					id_is_movesr    <= 1'b0;
 					id_is_movec     <= held_is_movec && !movec_illegal_gather;
 					id_is_rts       <= 1'b0;
+					id_is_nop       <= 1'b0;
 					id_is_rte       <= 1'b0;
 					id_cond         <= held_cond;
 					ext_pending     <= 2'd0;
@@ -2242,6 +2245,7 @@ always @(posedge clk) begin
 				id_is_movesr    <= if_valid && is_movesr;
 				id_is_movec     <= 1'b0;   // MOVEC never reaches this branch -- it always gathers
 				id_is_rts       <= if_valid && is_rts;
+				id_is_nop       <= if_valid && is_nop;
 				id_is_rte       <= if_valid && is_rte;
 				id_cond         <= if_opcode[11:8];
 			end

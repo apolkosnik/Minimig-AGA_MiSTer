@@ -216,6 +216,8 @@ module ap040_execute
 	// noticed, since they evaluate here in EX.
 	output            ex_ccr_fwd_valid,
 	output      [4:0] ex_ccr_fwd_data,
+	output            ex_br_resolve,   // a Bcc/DBcc is final this cycle...
+	output            ex_br_taken,     // ...and this is its verdict (T0 trace, milestone 79)
 
 	// "EX-forward" tap (combinational, live this cycle)
 	output            ex_fwd_valid,
@@ -644,6 +646,10 @@ assign ex_fwd_data  = combined_result;
 // register both read it, so they cannot disagree.
 wire [4:0] exe_flags_c = eaf_is_div ? div_flags : alu_flags;
 assign ex_ccr_fwd_valid = eaf_valid && eaf_writes_ccr && !ex_stall;   // final this cycle
+// The branch verdict, for EA-fetch's T0 trace arm: a conditional branch
+// arms provisionally when it leaves that stage and this settles it.
+assign ex_br_resolve = eaf_valid && (eaf_is_branch || eaf_is_dbcc) && !ex_stall;
+assign ex_br_taken   = eaf_is_branch ? cond_result : dbcc_branch_taken;
 assign ex_ccr_fwd_data  = exe_flags_c;
 
 // The (An)+/-(An) address update forwards from the SAME point as the primary

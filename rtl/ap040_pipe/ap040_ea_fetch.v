@@ -303,6 +303,8 @@ module ap040_ea_fetch
 	// backward as usual. See ap040_execute.v's header for why EX wins.
 	input             port_taken,
 	input             wb_busy,         // WB holds an instruction (the core's exe_valid) -- trace waits for it
+	input             ex_br_resolve,   // EX settles a Bcc/DBcc this cycle...
+	input             ex_br_taken,     // ...taken or not (T0 trace arm)
 	input             eac_is_bsr,
 	input             eac_is_jsr,
 	input             eac_is_trap,
@@ -311,6 +313,7 @@ module ap040_ea_fetch
 	input             eac_is_movec,
 	input             eac_is_rts,
 	input             eac_is_rte,
+	input             eac_is_nop,
 	input       [3:0] eac_cond,
 
 	// Architectural SR (milestone 15: widened from a 5-bit CCR-only port to
@@ -844,6 +847,25 @@ wire trace_hold   = eac_valid && trace_arm;
 wire trace_take   = trace_hold && !eaf_valid && !wb_busy && !stall_in;
 wire eac_is_trace = trace_take || exc_pend_trace;
 wire own_exc      = !trace_hold;   // the held instruction's own faults are not taken
+
+// T0, trace on change of flow (milestone 79). The arm is taken by the
+// instructions the 68040 defines as changes of flow: taken branches and
+// DBcc, BSR/JMP/JSR, RTS/RTE, every exception entry, and the non-branch
+// ones that resynchronise the pipeline -- MOVE to SR, ORI/ANDI/EORI to SR,
+// MOVEC to a control register, NOP (ap040_core.v's t0_special, which
+// cputest confirmed on hardware; MOVE An,USP and MOVES/CAS/CINV/CPUSH/FSAVE
+// are not decoded here). A conditional branch's taken-ness is only known in
+// EX, so it arms provisionally (trace_arm_cond) and EX's verdict confirms or
+// cancels the arm: EX resolves the cycle after the branch departs, and the
+// hold on the next instruction outlasts that. T1 traces everything and
+// T1T0 = 11 behaves as T1.
+wire t0_flow_static = eac_is_bsr || eac_is_jmp || eac_is_jsr || eac_is_rts || eac_is_rte ||
+                      eac_is_movesr || (eac_is_immsr && eac_immsr_to_sr) ||
+                      (eac_is_movec && eac_imm[3]) || eac_is_nop;
+wire t0_flow_cond   = eac_is_branch || eac_is_dbcc;
+wire traced_now     = sr_in[15] || (sr_in[14] && (t0_flow_static || t0_flow_cond));
+wire traced_cond    = !sr_in[15] && sr_in[14] && t0_flow_cond && !t0_flow_static;
+reg  trace_arm_cond;
 // A held store is not a store: it selects nothing -- address, byte enables,
 // data, stall, write enable -- while the trace entry's own beats go out.
 // eac_is_store outranks exc_writing in l1_addr_word and st_be assumes the
@@ -1156,6 +1178,7 @@ always @(posedge clk) begin
 		exc_pend_fmterr  <= 1'b0;
 		exc_pend_trace   <= 1'b0;
 		trace_arm        <= 1'b0;
+		trace_arm_cond   <= 1'b0;
 		trace_pc         <= 32'h0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
@@ -1181,6 +1204,14 @@ always @(posedge clk) begin
 
 		if (exc_vec_done)     exc_pend_trace <= 1'b0;
 		else if (trace_take)  exc_pend_trace <= 1'b1;
+
+		// A provisionally armed conditional branch: EX's verdict decides.
+		// Nothing departs this stage while the arm is up, so no departure
+		// write below can land in the same cycle as this one.
+		if (ex_br_resolve && trace_arm_cond) begin
+			trace_arm      <= ex_br_taken;
+			trace_arm_cond <= 1'b0;
+		end
 
 		if (flush) begin
 			eaf_valid       <= 1'b0;
@@ -1217,7 +1248,8 @@ always @(posedge clk) begin
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;
-				trace_arm      <= sr_in[15];   // traced if T1 was set when it ran
+				trace_arm      <= traced_now;   // T1: always; T0: if it changes flow
+				trace_arm_cond <= traced_cond;
 				trace_pc       <= eac_pc;
 				// A read-modify-write crosses its operands over here. The
 				// ALU computes b op a, and SUB.L D0,(A0) must be memory
@@ -1415,7 +1447,8 @@ always @(posedge clk) begin
 				// (a traced TRAP is traced on its handler's first
 				// instruction), except the trace entry itself: the SR it
 				// stacks still has T1, but the handler starts with it clear.
-				trace_arm      <= sr_in[15] && !eac_is_trace;
+				trace_arm      <= (sr_in[15] || sr_in[14]) && !eac_is_trace;   // an entry is a change of flow
+				trace_arm_cond <= 1'b0;
 				trace_pc       <= eac_pc;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
@@ -1531,7 +1564,8 @@ always @(posedge clk) begin
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
-				trace_arm       <= sr_in[15];   // traced if T1 was set BEFORE the RTE, whatever it restores
+				trace_arm       <= traced_now;   // judged on the SR BEFORE the RTE, whatever it restores
+				trace_arm_cond  <= 1'b0;         // (RTE is a change of flow, so T0 traces it too)
 				trace_pc        <= eac_pc;
 				eaf_operand_b   <= operand_a +
 				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
@@ -1596,8 +1630,9 @@ always @(posedge clk) begin
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
 				if (eac_valid) begin   // a bubble departing here must not drop a pending trace
-					trace_arm  <= sr_in[15];
-					trace_pc   <= eac_pc;
+					trace_arm      <= traced_now;
+					trace_arm_cond <= traced_cond;
+					trace_pc       <= eac_pc;
 				end
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;

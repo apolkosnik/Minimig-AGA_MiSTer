@@ -214,7 +214,7 @@ wire [15:0] id_movem_mask, eac_movem_mask;
 wire        id_is_div, id_div_signed;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire        id_is_movesr, id_is_movec;
-wire        id_is_rts, id_is_rte;
+wire        id_is_rts, id_is_rte, id_is_nop;
 wire  [3:0] id_cond;
 
 wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
@@ -239,7 +239,7 @@ wire        eaf_is_rmw, eaf_is_link;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
-wire        eac_is_rts, eac_is_rte;
+wire        eac_is_rts, eac_is_rte, eac_is_nop;
 wire  [3:0] eac_cond;
 
 wire        eaf_valid; wire [31:0] eaf_pc; wire [31:0] eaf_next_pc;
@@ -398,6 +398,7 @@ assign dbg_sr  = sr;
 // the frame push and TRAPcc in EA-fetch could not previously see); then WB's
 // commits; then the register.
 wire        ex_ccr_fwd_valid;
+wire        ex_br_resolve, ex_br_taken;
 wire  [4:0] ex_ccr_fwd_data;
 wire [15:0] sr_base     = commit_sr  ? exe_sr_data :
                           commit_ccr ? {sr[15:5], exe_result_flags} : sr;
@@ -680,6 +681,7 @@ ap040_decode u_id
 	.id_is_movesr    (id_is_movesr),
 	.id_is_movec     (id_is_movec),
 	.id_is_rts       (id_is_rts),
+	.id_is_nop       (id_is_nop),
 	.id_is_rte       (id_is_rte),
 	.id_cond         (id_cond)
 );
@@ -742,6 +744,7 @@ ap040_ea_calc u_eac
 	.id_is_movesr     (id_is_movesr),
 	.id_is_movec      (id_is_movec),
 	.id_is_rts        (id_is_rts),
+	.id_is_nop        (id_is_nop),
 	.id_is_rte        (id_is_rte),
 	.id_cond          (id_cond),
 
@@ -797,6 +800,7 @@ ap040_ea_calc u_eac
 	.eac_is_movesr    (eac_is_movesr),
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
+	.eac_is_nop       (eac_is_nop),
 	.eac_is_rte       (eac_is_rte),
 	.eac_cond         (eac_cond)
 );
@@ -870,6 +874,8 @@ ap040_ea_fetch #(
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
 	.wb_busy          (exe_valid),
+	.ex_br_resolve    (ex_br_resolve),
+	.ex_br_taken      (ex_br_taken),
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
@@ -879,6 +885,7 @@ ap040_ea_fetch #(
 	.eac_is_movesr    (eac_is_movesr),
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
+	.eac_is_nop       (eac_is_nop),
 	.eac_is_rte       (eac_is_rte),
 	.eac_cond         (eac_cond),
 
@@ -1011,6 +1018,8 @@ ap040_execute u_ex
 	.eaf_ea_target    (eaf_ea_target),
 	.l1_wr_busy       (l1_wr_busy),
 	.ex_ccr_fwd_valid (ex_ccr_fwd_valid),
+	.ex_br_resolve    (ex_br_resolve),
+	.ex_br_taken      (ex_br_taken),
 	.ex_ccr_fwd_data  (ex_ccr_fwd_data),
 	.ex_st_req        (ex_st_req),
 	.ex_st_addr       (ex_st_addr),
