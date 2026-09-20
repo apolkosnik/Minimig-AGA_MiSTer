@@ -30,9 +30,9 @@
 //                                                                          //
 // Transaction sizes: a fetch is a Word, a data read is always a Longword   //
 // (port B's contract), and a write is sized from be_b -- 1111 Long, 1100   //
-// Word, 1000 Byte at the even address, 0100 Byte at the odd one. Those     //
-// four are the only patterns ap040_ea_fetch.v's st_be and                  //
-// ap040_execute.v's ex_st_be produce.                                      //
+// Word, 0110 Word at an odd address, 1000 Byte at the even address, 0100   //
+// Byte at the odd one. Those five are the only patterns                    //
+// ap040_ea_fetch.v's st_be and ap040_execute.v's ex_st_be produce.         //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -92,11 +92,16 @@ assign wr_busy = w_pend;
 
 // A write's true byte address and right-aligned data, from the lane mask.
 wire [31:0] addr_b_even = {address_b[31:1], 1'b0};
-wire [31:0] wr_addr = (be_b == 4'b0100) ? (addr_b_even + 32'd1) : addr_b_even;
+// 0110 is a Word at an ODD address (milestone 85), which goes out as a Word
+// transaction there: ap040_bus16_adapter.v splits an odd word into two byte
+// cycles, so nothing below has to know.
+wire [31:0] wr_addr = (be_b == 4'b0100 || be_b == 4'b0110) ? (addr_b_even + 32'd1)
+                                                           : addr_b_even;
 wire  [1:0] wr_size = (be_b == 4'b1111) ? `AP040_SZ_L :
-                      (be_b == 4'b1100) ? `AP040_SZ_W : `AP040_SZ_B;
+                      (be_b == 4'b1100 || be_b == 4'b0110) ? `AP040_SZ_W : `AP040_SZ_B;
 wire [31:0] wr_data = (be_b == 4'b1111) ? data_b :
                       (be_b == 4'b1100) ? {16'd0, data_b[31:16]} :
+                      (be_b == 4'b0110) ? {16'd0, data_b[23:8]}  :
                       (be_b == 4'b1000) ? {24'd0, data_b[31:24]}
                                         : {24'd0, data_b[23:16]};
 

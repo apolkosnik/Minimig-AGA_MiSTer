@@ -744,9 +744,18 @@ wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
 //
 // A word takes the high half of the pair, which is the word the address
 // names. A byte takes one half of that word, chosen by address bit 0.
+// A Word at an ODD address (milestone 85) is still inside the longword the
+// port returns -- bytes 1 and 2 of it -- so it costs a lane select and no
+// extra access. Taking the high half regardless, as this did until
+// milestone 85, reads the byte BEFORE the one asked for: the differential
+// found it as a one-byte shift, $6FE3FEF0 where the FSM core had
+// $8D6FE3FE. A Byte is never misaligned. A LONG at an odd address spans
+// three words and does not fit in one access; that is the next milestone,
+// and eac_is_unaligned_long below is where it will start.
 wire [31:0] mem_raw =
     (eff_size == `AP040_SZ_L) ? l1_q_b :
-    (eff_size == `AP040_SZ_W) ? {16'd0, l1_q_b[31:16]} :
+    (eff_size == `AP040_SZ_W) ? (ea_target[0] ? {16'd0, l1_q_b[23:8]}
+                                              : {16'd0, l1_q_b[31:16]}) :
                                 {24'd0, (ea_target[0] ? l1_q_b[23:16]
                                                       : l1_q_b[31:24])};
 
@@ -1109,10 +1118,11 @@ assign l1_wren_b = (live && (eac_is_push || store_now)) || exc_writing || mvm_st
 wire [1:0]  st_off = l1_addr_word[1:0];
 wire [3:0]  st_be  = (!store_now)             ? 4'b1111 :
                      (eac_size == `AP040_SZ_L)   ? 4'b1111 :
-                     (eac_size == `AP040_SZ_W)   ? 4'b1100 :
+                     (eac_size == `AP040_SZ_W)   ? (st_off[0] ? 4'b0110 : 4'b1100) :
                      st_off[0]                   ? 4'b0100 : 4'b1000;
 wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !store_now) ? operand_a :
-                     (eac_size == `AP040_SZ_W) ? {operand_a[15:0], 16'd0} :
+                     (eac_size == `AP040_SZ_W) ? (st_off[0] ? {8'd0, operand_a[15:0], 8'd0}
+                                                            : {operand_a[15:0], 16'd0}) :
                      st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
                                : {operand_a[7:0], 24'd0};
 

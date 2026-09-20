@@ -529,10 +529,11 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 assign ex_st_addr = eaf_ea_target;
 wire [1:0] rmw_off = eaf_ea_target[1:0];
 assign ex_st_be   = (eaf_size == `AP040_SZ_L) ? 4'b1111 :
-                    (eaf_size == `AP040_SZ_W) ? 4'b1100 :
+                    (eaf_size == `AP040_SZ_W) ? (rmw_off[0] ? 4'b0110 : 4'b1100) :
                     rmw_off[0]                ? 4'b0100 : 4'b1000;
 assign ex_st_data = (eaf_size == `AP040_SZ_L) ? alu_result :
-                    (eaf_size == `AP040_SZ_W) ? {alu_result[15:0], 16'd0} :
+                    (eaf_size == `AP040_SZ_W) ? (rmw_off[0] ? {8'd0, alu_result[15:0], 8'd0}
+                                                            : {alu_result[15:0], 16'd0}) :
                     rmw_off[0] ? {8'd0, alu_result[7:0], 16'd0}
                                : {alu_result[7:0], 24'd0};
 
