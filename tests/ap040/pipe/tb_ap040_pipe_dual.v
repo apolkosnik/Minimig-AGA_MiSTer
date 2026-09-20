@@ -44,6 +44,13 @@ localparam [31:0] DUMP_BASE  = 32'h0000_1000; // MOVEM.L target: 15 longwords
 localparam [31:0] DONE_ADDR  = 32'h0000_1100;
 localparam [31:0] HANDLER    = 32'h0000_0300;
 localparam [31:0] STACK_TOP  = 32'h0000_3000;
+// Memory operands point here and nowhere else. A0-A6 start spread
+// across the middle of it, and a program of NSLOT slots can move a
+// pointer by at most 4*NSLOT bytes, so no access can reach the program,
+// the vectors, the dump or the stack below $4000.
+localparam [31:0] SCRATCH    = 32'h0000_5000;
+localparam [31:0] SCRATCH_LO = 32'h0000_4000;
+localparam [31:0] SCRATCH_HI = 32'h0000_7FFE;
 localparam integer MEM_WORDS = 32768;
 localparam integer TIMEOUT   = 400000;
 
@@ -57,6 +64,7 @@ always #5 clk = ~clk;
 
 reg [15:0] prog [0:4*NSLOT + 63];
 integer    prog_words;
+integer    slot_base;    // word index of the first generated slot
 
 reg [31:0] rnd;
 function [31:0] xorshift32;
@@ -83,17 +91,30 @@ endfunction
 // was meant, which is ORI.B #x,(A7) -- an instruction the FSM core has and
 // the pipelined core does not, so it looked exactly like a real finding.
 integer slot, kind, dn, dm, an, q, cc, k, sh, imm, dir;
+integer pro;
 reg [15:0] w0, w1;
 
 task gen_program;
 	input [31:0] seed;
 	begin
 		rnd = seed;
+		// A0-A6 <- SCRATCH + n*$100, so every memory operand lands in the
+		// scratch region. Branch displacements are relative, so it does not
+		// matter that this sits ahead of the slots.
+		prog_words = 0;
+		for (pro = 0; pro < 7; pro = pro + 1) begin
+			prog[prog_words + 0] = {4'b0010, pro[2:0], 6'b001_111, 3'b100};  // MOVEA.L #imm,An
+			prog[prog_words + 1] = 16'h0000;
+			prog[prog_words + 2] = SCRATCH[15:0] + pro[15:0] * 16'h0100;
+			prog_words = prog_words + 3;
+		end
+		slot_base = prog_words;
+
 		for (slot = 0; slot < NSLOT; slot = slot + 1) begin
 			dn = rbits(3); dm = rbits(3);
 			an = rbits(3); if (an == 7) an = 6;          // never A7
 			w1 = `AP040_OP_NOP;
-			kind = rbits(32) % 17;
+			kind = rbits(32) % 24;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -137,14 +158,34 @@ task gen_program;
 			    imm = (4*k - 2) & 32'hFF;
 			    w0 = {4'b0110, cc[3:0], imm[7:0]};
 			    end
-			default: w0 = {4'b0010, an[2:0], 6'b001_000, dm[2:0]};   // MOVEA.L Dm,An
+			// MOVEA.L Dm,An is deliberately NOT generated: it puts an
+			// arbitrary value in a pointer, and the first run with memory
+			// operands did exactly that. The two cores then diverged by one
+			// byte -- pipe $6FE3FEF0 where the FSM core had $8D6FE3FE -- an
+			// UNALIGNED longword access, which a 68040 performs and this
+			// core silently rounds down to the aligned one. That gap is
+			// recorded in the plan; keeping the pointers aligned is what
+			// lets the rest of the differential run.
+			16: w0 = {4'b0011, dn[2:0], 6'b000_000, dm[2:0]};        // MOVE.W Dm,Dn
+			// ---- memory operands, always Long and always through an An
+			// that the prologue pointed into the scratch region. Long keeps
+			// (An)+ and -(An) even, so nothing here is ever misaligned:
+			// unaligned data accesses are a separate question and this core
+			// has not been asked it yet.
+			17: w0 = {4'b0010, dn[2:0], 6'b000_010, an[2:0]};        // MOVE.L (An),Dn
+			18: w0 = {4'b0010, an[2:0], 6'b010_000, dm[2:0]};        // MOVE.L Dm,(An)
+			19: w0 = {4'b0010, dn[2:0], 6'b000_011, an[2:0]};        // MOVE.L (An)+,Dn
+			20: w0 = {4'b0010, an[2:0], 6'b011_000, dm[2:0]};        // MOVE.L Dm,(An)+
+			21: w0 = {4'b1101, dn[2:0], 6'b010_010, an[2:0]};        // ADD.L (An),Dn
+			22: w0 = {4'b1101, dm[2:0], 6'b110_010, an[2:0]};        // ADD.L Dm,(An)  (RMW)
+			default: w0 = {4'b1011, dn[2:0], 6'b010_010, an[2:0]};   // CMP.L (An),Dn
 			endcase
-			prog[2*slot]     = w0;
-			prog[2*slot + 1] = w1;
+			prog[slot_base + 2*slot]     = w0;
+			prog[slot_base + 2*slot + 1] = w1;
 		end
 
 		// Epilogue: dump D0-D7/A0-A6, then flag done.
-		prog_words = 2*NSLOT;
+		prog_words = slot_base + 2*NSLOT;
 		prog[prog_words + 0] = 16'h48F9;                  // MOVEM.L regs,$xxx.L
 		prog[prog_words + 1] = 16'h7FFF;                  // D0-D7/A0-A6
 		prog[prog_words + 2] = DUMP_BASE[31:16];
@@ -213,6 +254,13 @@ task build_memory;
 
 	for (i = 0; i < prog_words; i = i + 1)
 		put(PROG_BASE + 2*i, prog[i]);
+
+	// Something for the loads to find. NOPs everywhere would make every
+	// loaded value the same word.
+	for (i = SCRATCH_LO >> 1; i <= SCRATCH_HI >> 1; i = i + 1) begin
+		rnd = xorshift32(rnd);
+		memp[i] = rnd[15:0]; memf[i] = rnd[15:0];
+	end
 
 	put(DONE_ADDR + 0, 16'h0000);
 	put(DONE_ADDR + 2, 16'h0000);
@@ -401,9 +449,21 @@ initial begin
 					$display(" = %h on the pipelined core, %h on the FSM core", pv, fv);
 				end
 			end
+			// ...and every word the program may have stored.
+			for (i = SCRATCH_LO >> 1; i <= SCRATCH_HI >> 1; i = i + 1)
+				if (memp[i] !== memf[i]) begin
+					if (mism < 8) begin
+						errors = errors + 1;
+						$display("FAIL: round %0d (seed %h): [%h] = %h on the pipelined core, %h on the FSM core",
+						         round, seed, i << 1, memp[i], memf[i]);
+					end
+					mism = mism + 1;
+				end
 			if (mism == 0)
-				$display("  round %0d (seed %h): agreed on 15 registers after %0d slots, %0d cycles",
-				         round, seed, NSLOT, cyc);
+				$display("  round %0d (seed %h): agreed on 15 registers and %0d scratch words after %0d slots, %0d cycles",
+				         round, seed, ((SCRATCH_HI >> 1) - (SCRATCH_LO >> 1)) + 1, NSLOT, cyc);
+			else if (mism >= 8)
+				$display("      (%0d differing words in all)", mism);
 		end
 	end
 
