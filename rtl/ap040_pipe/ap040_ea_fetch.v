@@ -1395,7 +1395,10 @@ always @(posedge clk) begin
 				// A format error left the pop parked at beat 1 with its read
 				// still marked pending (ret_done's branch never ran); the next
 				// RTE must start at beat 0. Already there for every other
-				// exception.
+				// exception. Unobservable in tb_ap040_pipe_fmterr.v with this
+				// removed: the flush EX raises for every exception resets
+				// both a cycle later, before anything can consume them. Kept
+				// so the sequencer's own exit leaves it clean.
 				ret_ph          <= RET_BEAT0;
 				ret_pending     <= 1'b0;
 			end else if (ret_issue) begin

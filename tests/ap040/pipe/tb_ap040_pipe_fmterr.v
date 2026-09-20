@@ -40,9 +40,11 @@
 // above its own, i.e. the format error left A7 where it was. D1 and the      //
 // final SR show the repaired RTE completed. A7 = $0600 closes both frames.    //
 //                                                                          //
-// On milestone-75 RTL the nibble is ignored: the first RTE pops eight bytes  //
-// and lands at $0420 directly. D1, A7 and the final SR all look right;       //
-// D2..D6 stay zero. The second part passes there too.                        //
+// On milestone-75 RTL only $2 is recognised: the first RTE pops eight bytes  //
+// and lands at $0420 directly, so D1 and the final SR look right and D2..D6  //
+// stay zero; the format-$3 frame is popped as eight bytes too, so A7 ends    //
+// $05FC. (The control run said so; a first draft of this header claimed     //
+// part 2 would pass there.)                                                  //
 //                                                                          //
 // Vector 14 sits at word index 3612 (see tb_ap040_pipe_rte_fmt2.v for the    //
 // PC_RESET-relative aliasing that puts vector n at 3584 + 2n).               //

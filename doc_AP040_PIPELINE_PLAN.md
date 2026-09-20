@@ -1053,10 +1053,15 @@ real MMU or bus-error path arrives, which is the same boundary
    confirmed "we got back" would have passed against this for as long as it
    existed.
 
-   **FMTERR is still not implemented**, and now it is the only part left: a
-   format nibble that is neither $0 nor $2 is treated as $0. Raising vector
-   14 means starting an exception from a branch that is already mid-pop,
-   which is real work, and nothing in this core pushes any other format.
+   **FMTERR: DONE (milestone 76).** A format nibble that is neither $0 nor
+   $2/$3 raises vector 14 from inside the pop, stacking the RTE's own
+   address with A7 untouched; `tb_ap040_pipe_fmterr.v` repairs the frame
+   from the handler and re-executes the RTE. The note that stood here until
+   then, kept for the reasoning: raising it means starting an exception
+   from a branch that is already mid-pop, and nothing in this core pushes
+   any other format -- both still true; the first turned out to be one
+   wire (`fmterr_now`) because `exc_writing` already outranks `ret_done`
+   in EA-fetch's output chain.
 
    The original note, kept for the reasoning:
 
@@ -1682,6 +1687,51 @@ real MMU or bus-error path arrives, which is the same boundary
    The rule that follows: **a bench for a control-flow bug has to reproduce
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
+
+   ### Milestone 76: RTE format error
+
+   RTE judges the format nibble when the pop's second dword arrives: $0
+   pops eight bytes, $2 and $3 twelve (the FSM core's `S_RTE_FIN` accepts
+   both), and anything else is a format error -- vector 14, a format-$0
+   frame whose PC is the RTE INSTRUCTION ITSELF, stacked below the bad
+   frame with A7 otherwise untouched. That PC convention is the point of
+   the exception: the handler repairs the frame, returns, and the RTE runs
+   again. `fmterr_now` turns the `ret_done` cycle into an exception entry
+   -- `exc_writing` sits above `ret_done` in EA-fetch's output chain and
+   wins the L1 address mux, so beat 0 of the frame goes out in that same
+   cycle -- and is latched (`exc_pend_fmterr`) like the other data-derived
+   faults. `eaf_is_fmterr` joins execute's `exc_reaching_ex`.
+
+   Deliberate deviations, deferred with the mechanisms they need: $1
+   (throwaway: load the SR, restart the pop on the next frame) and $7
+   (access error: needs the BCU/MMU that would push it) take the format
+   error rather than being popped as $0. This closes the original ISA list;
+   what remains is the throwaway frame, trace, and the things that need
+   hardware this core does not have.
+
+   **The bench does the repair.** `tb_ap040_pipe_fmterr.v` builds a
+   format-$B frame by hand, takes the error, and the handler reads its own
+   frame and the bad one into D2..D6, patches the format word to $0 and
+   returns -- so the RTE runs a second time and lands. Then a twelve-byte
+   format-$3 frame is popped whole. Nine values are checked; the header
+   says what each one proves.
+
+   | run | result |
+   |---|---|
+   | control: milestone-75 RTL | FAIL -- D2..D6 zero, A7 $05FC: the $B frame popped as $0, and so did the $3 frame |
+   | stack `next_pc` instead of the RTE's own address | FAIL -- D3 = $0420, A7 = $05F8: the repaired frame was never re-popped |
+   | vector 14 -> 10 | FAIL -- D0..D6 and A7 ($05F0): handler never found |
+   | latch removed | FAIL -- D0..D6 and SR: the push dies once the L1 address moves off the frame and the nibble reads as $0 |
+   | $3 treated as short | FAIL -- D3 = $0442, D2 = $2700, A7 = $05FC: a second format error, from the format-$3 RTE |
+   | parked-pop reset in `exc_vec_done` removed | **passes** -- the flush EX raises for every exception resets `ret_ph`/`ret_pending` a cycle later, before anything can consume them; kept as the sequencer's own exit and noted as unobservable in the RTL |
+   | full suite on milestone-76 RTL | 82/82 |
+
+   **A claim in the bench header was wrong, and the control corrected it.**
+   The first draft said part 2 would pass on milestone-75 RTL. It does
+   not: that RTL knew $2 alone as the long frame, so the $3 frame popped as
+   eight bytes and A7 ended $05FC. The header now says so. Same lesson as
+   milestones 73 and 74: the control is written down after it is run, not
+   before.
 
    ### Milestone 75: the ROX count without a divider
 
