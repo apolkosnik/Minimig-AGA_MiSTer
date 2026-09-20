@@ -279,6 +279,7 @@ module ap040_ea_fetch
 	input             eac_ea_indexed,
 	input             eac_ea_pcrel,
 	input             eac_is_rmw,
+	input             eac_immrmw,
 	input             eac_is_div,
 	input             eac_div_signed,
 	input             eac_is_movem,
@@ -510,10 +511,18 @@ wire [31:0] idx_disp = {{24{eac_imm[7]}}, eac_imm[7:0]};
 // the mode field nominally names, and reading it is harmless.
 wire [31:0] ea_base = eac_ea_pcrel ? (eac_pc + 32'd2) : operand_a;
 
+// An immediate with a memory destination (milestone 89) carries its
+// OPERAND in eac_imm, not a displacement, so there is nothing to add to
+// the base. Masked at the adder's input rather than muxed at its output:
+// this is the L1 address path, and an AND folds into the LUT that already
+// feeds the carry chain where a fifth mux way would be another level after
+// it. eac_immrmw is a register, which is what the milestone-88 rule
+// requires of anything selecting on this path.
+wire [31:0] ea_disp   = eac_imm & {32{~eac_immrmw}};
 wire [31:0] ea_target = eac_is_abs     ? eac_imm            :
                         eac_is_predec  ? (an_base - an_step) :
                         eac_ea_indexed ? (ea_base + idx_val + idx_disp) :
-                                         (ea_base + eac_imm);
+                                         (ea_base + ea_disp);
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is
@@ -1337,7 +1346,13 @@ always @(posedge clk) begin
 				// operand_b is the data register Dn (decode pointed
 				// eac_dest_reg at it precisely so this read would be
 				// available), and operand_a was only ever the address base.
-				eaf_operand_a  <= eac_is_rmw ? operand_b : mem_lane;
+				// ...and an immediate-source RMW crosses over the same way,
+				// with eac_imm where the register source would be. operand_a
+				// is NOT available as the source here: it is the address
+				// base, which is exactly why id_src_a_is_imm stays clear for
+				// this form (milestone 89).
+				eaf_operand_a  <= eac_immrmw ? eac_imm   :
+				                  eac_is_rmw ? operand_b : mem_lane;
 				// The store half needs the address again a stage later, and
 				// eac_* will have moved on by then.
 				eaf_is_rmw     <= eac_is_rmw;
@@ -1352,7 +1367,7 @@ always @(posedge clk) begin
 				// (that instruction's operand_b is simply unused). See
 				// header.
 				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4) :
-				                  eac_is_rmw ? mem_lane            : operand_b;
+				                  (eac_is_rmw || eac_immrmw) ? mem_lane : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
