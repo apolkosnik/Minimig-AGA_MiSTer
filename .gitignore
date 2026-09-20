@@ -40,6 +40,16 @@ c5_pin_model_dump.txt
 
 # cputest corpora: multi-hundred-MB extracted data, fetched not versioned
 tests/ap040/build/cputest/
+# tests/ap040/build holds the assembled test images (.bin/.hex) and their
+# sources; everything else that lands there is a simulator's build output.
+# One commit on ap040-pipelined once swept 462 Verilator products in,
+# sixteen of them 100 MB precompiled headers, and GitHub refused the push.
+tests/ap040/build/*
+!tests/ap040/build/*.bin
+!tests/ap040/build/*.hex
+!tests/ap040/build/*.v
+!tests/ap040/build/*.s
+!tests/ap040/build/cputest/
 __pycache__/
 
 # ModelSim flows under rtl/sim: run artefacts, and the one generated source

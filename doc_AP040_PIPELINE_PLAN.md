@@ -1732,7 +1732,7 @@ real MMU or bus-error path arrives, which is the same boundary
       and the reason is a two-line argument: decode redirects only on a
       word it can see, `if_valid` implies `rvalid_a` implies `can_issue`,
       so the redirected fetch always issued. The term is gone
-      (`2e445fa8c`), and the comment where it stood says why.
+      (`60235da0b`), and the comment where it stood says why.
    3. Decode's gather consumed a word every unstalled cycle whether or not
       one had arrived: `MOVE.L #$64,D0` executed as `#$203C203C`, the held
       opcode taken twice as its own immediate. The whole decode step is now
@@ -1766,7 +1766,7 @@ real MMU or bus-error path arrives, which is the same boundary
    twice. The slow build stays; every later memory-side change runs the
    suite in both.
 
-   **Fit, same flow (of `fdb2537cc`):** 5,275 ALMs (5,220 after milestone
+   **Fit, same flow (of `094f97546`):** 5,275 ALMs (5,220 after milestone
    79), 7,197 combinational ALUTs (7,115), 2,250 registers (2,211), Fmax
    40.80 MHz (40.55), setup slack at 25 ns +0.488 ns (+0.342), TNS 0. The
    40 worst paths are the same spine; neither port's valid nor `if_pend`
