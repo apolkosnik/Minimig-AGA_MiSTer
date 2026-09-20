@@ -906,9 +906,15 @@ wire exc_active    = live && eac_is_exc;
 // data-derived faults are latched (exc_pend_*), so the verdict exc_go was
 // set from is still standing when the beats go out.
 reg  exc_go;
+// The frame's shape, latched with the verdict. The first fit after exc_go
+// found the format nibble still on the address path: a TRAPcc's condition
+// reads the CCR forwarded from EX, that decides eac_is_fmt2, and that
+// selects the frame size the beat address is computed from. The SELECT
+// of the address mux had left the cone; its DATA had not.
+reg  exc_fmt2_r;
 wire exc_writing   = exc_go && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
-                       (exc_ph == EXC_BEAT2 && eac_is_fmt2));
+                       (exc_ph == EXC_BEAT2 && exc_fmt2_r));
 // ...and not accepted at all if ap040_execute.v took the port this cycle:
 // the core's mux drops this stage's wren_b, so the beat never reached the
 // L1 and must be retried rather than counted.
@@ -1042,7 +1048,7 @@ wire [31:0] exc_sp_bank    = sr_in[12] ? msp_in : isp_in;   // M selects ISP vs 
 // two subtracts of a constant sit off the path.
 wire [31:0] exc_sp_fmt0    = exc_sp_bank - 32'd8;
 wire [31:0] exc_sp_fmt2    = exc_sp_bank - 32'd12;
-wire [31:0] exc_new_sp     = eac_is_fmt2 ? exc_sp_fmt2 : exc_sp_fmt0;
+wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 wire [15:0] exc_sr_word    = (eac_is_chk_trap && !eac_is_trace)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}
@@ -1080,7 +1086,7 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
-wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
+wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
 // Format $2's own extra "instruction address" longword. For an odd JMP/JSR
 // target it is the target itself, LSB cleared (ap040_core.v's own convention
 // for this field, identical for JMP and JSR despite their differing PC
@@ -1224,6 +1230,7 @@ always @(posedge clk) begin
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		exc_go          <= 1'b0;
+		exc_fmt2_r      <= 1'b0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 	end else if (ce) begin
@@ -1233,7 +1240,10 @@ always @(posedge clk) begin
 		// lose it -- or with a flush, which kills the instruction it was
 		// set for.
 		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
-		else if (exc_active)                       exc_go <= 1'b1;
+		else if (exc_active) begin
+			exc_go <= 1'b1;
+			if (!exc_go) exc_fmt2_r <= eac_is_fmt2;   // fixed at the verdict, not re-read per beat
+		end
 
 		// Held from the cycle the divisor was seen until the exception has
 		// fetched its vector; see the latch's own comment above.
@@ -1454,7 +1464,7 @@ always @(posedge clk) begin
 				if (exc_beat_ack) begin
 					case (exc_ph)
 						EXC_BEAT0: exc_ph <= EXC_BEAT1;
-						EXC_BEAT1: exc_ph <= eac_is_fmt2 ? EXC_BEAT2 : EXC_VECRD;
+						EXC_BEAT1: exc_ph <= exc_fmt2_r ? EXC_BEAT2 : EXC_VECRD;
 						default:   exc_ph <= EXC_VECRD;   // EXC_BEAT2 done
 					endcase
 				end
