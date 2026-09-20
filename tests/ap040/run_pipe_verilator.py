@@ -51,6 +51,16 @@ def main():
         src, inc = CORE, [RTL]
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
+        elif name.endswith("dual"):
+            # The differential bench instantiates the FSM core beside the
+            # pipelined one, so rtl/ap040's whole core comes too.
+            src = CORE + [RTL / "ap040_pipe_bus16.v"] + [
+                ROOT / "rtl/ap040" / n for n in (
+                    "ap040_tg68k_compat.v", "ap040_core.v", "ap040_bus16_adapter.v",
+                    "ap040_regfile.v", "ap040_alu.v", "ap040_muldiv.v",
+                    "ap040_mmu.v", "ap040_cache.v", "ap040_fpu.v")
+            ] + [HERE / "sim_dpram.v"]
+            inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("bus16"):
             # ap040_pipe_bus16.v instantiates the FSM core's own 16-bit
             # adapter, so that file and its include directory come too.
