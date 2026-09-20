@@ -22,6 +22,10 @@ work="${1:-/home/adam/ap040-audit4/pipe-synth}"; rm -rf "$work"; mkdir -p "$work
 sed "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" "$here/pipe.qsf" > "$work/pipe.qsf"
 cp "$here/pipe.sdc" "$here/pipe.qpf" "$here/paths40.tcl" "$work/"; cd "$work"
 Q=/opt/intelFPGA_lite/17.0/quartus/bin; echo "quartus pid $$ in $work"
+# Temporaries go in the work directory, not the shared tmpfs: a full one
+# fails tools with no diagnostic, which reads as a result rather than an
+# error. Same reason run_pipe_verilator.py does it.
+export TMPDIR="$work"
 $Q/quartus_map pipe -c pipe > map.log 2>&1; $Q/quartus_fit pipe -c pipe > fit.log 2>&1; $Q/quartus_sta pipe -c pipe > sta.log 2>&1
 echo "ALMs needed (top): $(awk -F': ' '/^ALMs needed/{a=$2; sub(/ \(.*/,"",a); print a; exit}' output_files/pipe.fit.rpt)"
 echo "ALU ALMs:          $(awk -F': ' '/^Compilation Hierarchy Node/{n=$2} /^ALMs needed/{a=$2; sub(/ \(.*/,"",a); if (n ~ /ap040_pipe_alu/) {print a; exit}}' output_files/pipe.fit.rpt)"
