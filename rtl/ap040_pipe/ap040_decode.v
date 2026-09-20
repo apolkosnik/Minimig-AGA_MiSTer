@@ -291,6 +291,7 @@ module ap040_decode
 	output reg  [5:0] id_alu_op,
 	output reg  [1:0] id_size,
 	output reg  [5:0] id_shcnt,
+	output reg        id_shift_reg,   // the count is in the register id_src_reg names
 	output reg        id_src_a_is_imm,
 	output reg        id_writes_reg,
 	output reg        id_writes_ccr,
@@ -1068,8 +1069,11 @@ wire [5:0] bitop_op = (if_opcode[7:6] == 2'b00) ? `AP040_ALU_BTST :
                       (if_opcode[7:6] == 2'b10) ? `AP040_ALU_BCLR :
                                                   `AP040_ALU_BSET;
 
-wire shift_shape = (if_opcode[15:12] == 4'b1110) &&
-                   (if_opcode[7:6] != 2'b11) && (if_opcode[5] == 1'b0);
+// 1110 ccc d ss i tt rrr. Bit 5 is the count SOURCE: 0 an immediate in
+// ccc, 1 the register ccc names (milestone 87). Size 11 is the
+// one-bit-at-a-time memory form and is still not decoded.
+wire shift_shape    = (if_opcode[15:12] == 4'b1110) && (if_opcode[7:6] != 2'b11);
+wire shift_reg_cnt  = shift_shape && if_opcode[5];
 
 wire [5:0] shift_op =
 	(if_opcode[4:3] == 2'b00) ? (if_opcode[8] ? `AP040_ALU_ASL1  : `AP040_ALU_ASR1)  :
@@ -1078,6 +1082,8 @@ wire [5:0] shift_op =
 	                            (if_opcode[8] ? `AP040_ALU_ROL1  : `AP040_ALU_ROR1);
 
 // The immediate count field is 1..7 literally and 0 means EIGHT, not zero.
+// A register count is whatever the register holds, modulo 64, and CAN be
+// zero -- see ap040_pipe_alu.v's own note on that case.
 // ap040_pipe_alu.v's barrel takes 1..63 and composes the one-bit steps in a
 // single cycle, so nothing iterates here.
 wire [5:0] shift_cnt = (if_opcode[11:9] == 3'd0) ? 6'd8 : {3'd0, if_opcode[11:9]};
@@ -1717,6 +1723,7 @@ always @(posedge clk) begin
 		id_alu_op       <= 6'h0;
 		id_size         <= `AP040_SZ_L;
 		id_shcnt        <= 6'd1;
+		id_shift_reg    <= 1'b0;
 		id_src_a_is_imm <= 1'b0;
 		id_writes_reg   <= 1'b0;
 		id_writes_ccr   <= 1'b0;
@@ -1905,6 +1912,7 @@ always @(posedge clk) begin
 					                   (held_is_move_disp || held_is_alu_disp || held_is_abs) ? held_mv_size :
 					                                                        `AP040_SZ_L;
 					id_shcnt        <= 6'd1;
+					id_shift_reg    <= 1'b0;
 					// The gathered word IS the source: ap040_ea_fetch.v's
 					// operand_a mux already takes eac_imm on this flag, the
 					// path MOVEQ has used since milestone 2.
@@ -2135,7 +2143,7 @@ always @(posedge clk) begin
 				// for why RTS deliberately reuses that exact mem_issue/
 				// mem_complete path (id_is_mem_src below) instead of
 				// getting its own sequencer the way RTE needs.
-				id_src_reg      <= (bitop_shape || is_eor_rr) ? {1'b0, d_reg9} :
+				id_src_reg      <= (bitop_shape || is_eor_rr || shift_reg_cnt) ? {1'b0, d_reg9} :
 				                    (is_move_mem_l || is_jmp_an || is_jsr_an || is_move_ax || is_alu_mem || is_lea_an || is_pea_an || is_an_src || is_adda_areg_src || is_alu_dst || is_unlk || is_mul_mem || is_div_mem || is_unary_mem || is_chk_mem) ? {1'b1, d_rn} :
 				                    (is_rts || is_rte) ? 4'd15 : {1'b0, d_rn};
 				// Zeroed for is_move_mem_l/is_jmp_an/is_jsr_an/is_rts/is_rte
@@ -2162,6 +2170,7 @@ always @(posedge clk) begin
 				                    quick_shape ? {28'd0, quick_val} :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
 				id_shcnt        <= shift_cnt;
+				id_shift_reg    <= if_valid && shift_reg_cnt;
 				id_alu_op       <= is_alu_mem    ? alu_nib_op  :
 				                   quick_shape   ? quick_op    :
 				                   is_bcd1_rr    ? bcd1_op     :

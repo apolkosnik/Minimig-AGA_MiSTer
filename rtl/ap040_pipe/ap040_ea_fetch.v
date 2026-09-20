@@ -261,6 +261,7 @@ module ap040_ea_fetch
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
+	input             eac_shift_reg,
 	input             eac_src_a_is_imm,
 	input             eac_writes_reg,
 	input             eac_writes_ccr,
@@ -762,6 +763,12 @@ function [31:0] sxt_w_of;
 endfunction
 
 wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
+
+// A register-count shift (milestone 87) reads its count through port A,
+// which decode pointed at the count register -- so it forwards from EX and
+// WB like any other source operand, with no new path. The 68040 takes the
+// count modulo 64, which is the width of the field.
+wire [5:0] shcnt_now = eac_shift_reg ? operand_a[5:0] : eac_shcnt;
 
 // The flush cycle (milestone 78). The instruction behind an exception entry
 // waits in EA-calc through the frame push and moves in here the cycle the
@@ -1291,7 +1298,7 @@ always @(posedge clk) begin
 				                  eac_is_rmw ? mem_lane            : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
-				eaf_shcnt      <= eac_shcnt;
+				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
@@ -1477,7 +1484,7 @@ always @(posedge clk) begin
 				trace_pc       <= eac_pc;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
-				eaf_shcnt      <= eac_shcnt;
+				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any && own_exc;   // a trace entry runs none of the held instruction
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
@@ -1599,7 +1606,7 @@ always @(posedge clk) begin
 				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
-				eaf_shcnt      <= eac_shcnt;
+				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
@@ -1690,7 +1697,7 @@ always @(posedge clk) begin
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
-				eaf_shcnt      <= eac_shcnt;
+				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;

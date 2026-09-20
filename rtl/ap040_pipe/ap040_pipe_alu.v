@@ -383,6 +383,19 @@ always @* begin
 					c = x2;
 				end
 			endcase
+			// A REGISTER count can be zero and an immediate one cannot (0
+			// means 8), so this case only became reachable with milestone
+			// 87's register-count forms. The operand is unchanged, V and C
+			// are cleared -- except ROXL/ROXR, whose C takes X -- and X
+			// itself is untouched, which is the part the closed forms above
+			// get wrong: they compute a carry out of a shift that never
+			// happened and write it to X.
+			if (n == 6'd0) begin
+				r  = bm;
+				vf = 1'b0;
+				x2 = f_x;
+				c  = (op == `AP040_ALU_ROXL1 || op == `AP040_ALU_ROXR1) ? f_x : 1'b0;
+			end
 			result = r;
 			flags_out = {x2, res_msb(r), res_zero(r), vf, c};
 		end

@@ -122,7 +122,7 @@ task gen_program;
 			an  = rbits(32) % 5;                         // A0-A4: even, Long-safe
 			anw = 5 + (rbits(32) % 2);                   // A5 (odd) or A6: Word/Byte
 			w1 = `AP040_OP_NOP;
-			kind = rbits(32) % 29;
+			kind = rbits(32) % 30;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -192,7 +192,14 @@ task gen_program;
 			25: w0 = {4'b0011, anw[2:0], 6'b010_000, dm[2:0]};       // MOVE.W Dm,(Aw)
 			26: w0 = {4'b0011, dn[2:0], 6'b000_011, anw[2:0]};       // MOVE.W (Aw)+,Dn
 			27: w0 = {4'b1101, dm[2:0], 6'b101_010, anw[2:0]};       // ADD.W Dm,(Aw)
-			default: w0 = {4'b0001, dn[2:0], 6'b000_010, anw[2:0]};  // MOVE.B (Aw),Dn
+			28: w0 = {4'b0001, dn[2:0], 6'b000_010, anw[2:0]};       // MOVE.B (Aw),Dn
+			// A shift counted by a REGISTER (milestone 87), so the count is
+			// whatever dm happens to hold: 0 to 63 after the modulo, which
+			// covers both cases the immediate form cannot express -- more
+			// than 32, and zero.
+			default: begin sh = rbits(3); dir = rbits(1);
+			    w0 = {4'b1110, dm[2:0], dir[0], 2'b10, 1'b1, sh[1:0], dn[2:0]};
+			    end
 			endcase
 			prog[slot_base + 2*slot]     = w0;
 			prog[slot_base + 2*slot + 1] = w1;
