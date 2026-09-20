@@ -51,6 +51,12 @@ def main():
         src, inc = CORE, [RTL]
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
+        elif name.endswith("bus16"):
+            # ap040_pipe_bus16.v instantiates the FSM core's own 16-bit
+            # adapter, so that file and its include directory come too.
+            src = CORE + [RTL / "ap040_pipe_bus16.v",
+                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("alu_equiv"):
             src = [RTL / "ap040_pipe_alu.v", ROOT / "rtl/ap040/ap040_alu.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
