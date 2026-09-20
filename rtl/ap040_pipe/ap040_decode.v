@@ -1410,6 +1410,27 @@ wire is_jsr_opcode = (if_opcode[15:6] == 10'b0100111010);
 wire is_jsr_an     = is_jsr_opcode && (if_opcode[5:3] == 3'b010);
 wire is_jsr_disp   = is_jsr_opcode && (if_opcode[5:3] == 3'b101);
 
+// JMP/JSR with indexed, PC-relative and absolute targets (milestone 71).
+// JSR (d16,PC) is how position-independent code calls anything nearby,
+// JSR $xxx.L is the absolute call, and JMP (d8,PC,Xn) is a jump table.
+//
+// Every path they need exists: ea_base for PC-relative, idx_val for the
+// index, eac_imm for absolute, the push through eac_dest_reg = A7, and the
+// odd-target address error off ea_target. So the indexed and PC-relative
+// forms ride held_is_jmp/held_is_jsr with the held_ea_* properties LEA
+// already carries, and the absolute forms ride held_is_abs with two more
+// properties beside held_abs_lea and held_abs_push. Decode only.
+wire is_jmp_idx    = is_jmp_opcode && ea_indexed_mode;
+wire is_jmp_pcrel  = is_jmp_opcode && ea_pcrel_mode;
+wire is_jmp_abs    = is_jmp_opcode && abs_mode;
+wire is_jsr_idx    = is_jsr_opcode && ea_indexed_mode;
+wire is_jsr_pcrel  = is_jsr_opcode && ea_pcrel_mode;
+wire is_jsr_abs    = is_jsr_opcode && abs_mode;
+wire is_jmp_gather = is_jmp_disp || is_jmp_idx || is_jmp_pcrel;
+wire is_jsr_gather = is_jsr_disp || is_jsr_idx || is_jsr_pcrel;
+wire is_jmpjsr_abs   = is_jmp_abs || is_jsr_abs;
+wire is_jmpjsr_abs_l = is_jmpjsr_abs && abs_long;
+
 // TRAP #n: 0100 1110 0100 nnnn (0x4E40-0x4E4F) -- see header. Distinct
 // if_opcode[15:6] value (10'b0100111001) from both JSR's (...010) and JMP's
 // (...011), so no overlap is possible with either.
@@ -1538,6 +1559,8 @@ reg         held_imm_nowrite;
 reg         held_imm_dest9;
 reg         held_abs_lea;       // absolute, delivering the address to An
 reg         held_abs_push;      // absolute, pushing the address
+reg         held_abs_jmp;       // absolute, and the address is a JMP target
+reg         held_abs_jsr;       // absolute, and the address is a JSR target
 reg         held_abs_alu;       // this absolute form carries an operation, not just a MOVE
 reg         held_abs_rmw;       // ...and writes its result back to that address
 reg         held_is_abs;
@@ -1686,6 +1709,8 @@ always @(posedge clk) begin
 		held_imm_dest9   <= 1'b0;
 		held_abs_lea     <= 1'b0;
 		held_abs_push    <= 1'b0;
+		held_abs_jmp     <= 1'b0;
+		held_abs_jsr     <= 1'b0;
 		held_abs_alu     <= 1'b0;
 		held_abs_rmw     <= 1'b0;
 		held_is_abs      <= 1'b0;
@@ -1748,7 +1773,7 @@ always @(posedge clk) begin
 					// id_pc (held_pc, already set above), not id_next_pc, for
 					// its stacked PC -- see ap040_ea_fetch.v's header.
 					id_next_pc      <= held_pc + 32'd2 + (held_is_long ? 32'd4 : 32'd2);
-					id_dest_reg     <= (held_is_abs && held_abs_push) ? 4'd15 :
+					id_dest_reg     <= (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
 					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
 					                    held_is_abs  ? {1'b0, held_dest_reg} :
 					                    held_is_imm  ? (held_imm_dest9 ? {held_imm_areg, held_dest_reg}
@@ -1823,13 +1848,15 @@ always @(posedge clk) begin
 					// above.
 					// An absolute store writes memory, not a register.
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
+					                    (held_is_abs && held_abs_jsr) ||
 					                    (held_is_abs && (!held_abs_alu || !held_alu_nowrite)) ||
 					                    (held_is_imm && !held_imm_nowrite) ||
 					                    (held_is_alu_disp && !held_alu_nowrite) || held_is_lea || held_is_link ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
 					// MOVEA sets no condition codes.
 					id_writes_ccr   <= held_is_move_disp || (held_is_alu_disp && held_alu_ccr) ||
-					                    (held_is_abs && !held_abs_lea && !held_abs_push) || held_is_stabs ||
+					                    (held_is_abs && !held_abs_lea && !held_abs_push &&
+					                     !held_abs_jmp && !held_abs_jsr) || held_is_stabs ||
 					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
@@ -1841,12 +1868,13 @@ always @(posedge clk) begin
 					// LEA and PEA deliver the address itself, so unlike every
 					// other absolute form they read nothing.
 					id_is_mem_src   <= held_is_move_disp || held_is_alu_disp ||
-					                   (held_is_abs && !held_abs_lea && !held_abs_push);
+					                   (held_is_abs && !held_abs_lea && !held_abs_push &&
+					                    !held_abs_jmp && !held_abs_jsr);
 					id_is_abs       <= held_is_abs || held_is_stabs;
 					id_is_store     <= held_is_stabs;
 					id_is_postinc   <= 1'b0;
 					id_is_predec    <= 1'b0;
-					id_is_jmp       <= held_is_jmp;
+					id_is_jmp       <= held_is_jmp || (held_is_abs && held_abs_jmp);
 					id_is_lea       <= (held_is_lea && !held_lea_push) || (held_is_abs && held_abs_lea);
 					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw;
@@ -1866,7 +1894,7 @@ always @(posedge clk) begin
 					id_movem_wb     <= held_movem_wb;
 					id_is_unlk      <= 1'b0;
 					id_is_bsr       <= held_is_bsr;
-					id_is_jsr       <= held_is_jsr;
+					id_is_jsr       <= held_is_jsr || (held_is_abs && held_abs_jsr);
 					id_is_trap      <= 1'b0;
 					id_is_illegal   <= movec_illegal_gather;
 					id_is_movesr    <= 1'b0;
@@ -1886,7 +1914,9 @@ always @(posedge clk) begin
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_move_idx || is_alu_idx || is_lea_idx ||
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
-			              is_pea_gather || is_eaonly_abs || is_immsr || is_chk_imm) begin
+			              is_pea_gather || is_eaonly_abs || is_immsr || is_chk_imm ||
+			              is_jmp_idx || is_jmp_pcrel || is_jsr_idx || is_jsr_pcrel ||
+			              is_jmpjsr_abs) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -1899,7 +1929,8 @@ always @(posedge clk) begin
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
-				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp;
+				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp ||
+				                 is_jmpjsr_abs_l;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm || is_chk_imm;
 				held_imm_chk     <= is_chk_imm;
@@ -1925,7 +1956,9 @@ always @(posedge clk) begin
 				                    !is_chk_imm;
 				held_imm_div     <= is_div_imm;
 				held_imm_divs    <= is_div_imm && is_muldiv_imm_signed;
-				held_is_abs      <= is_move_abs || is_abs_alu || is_eaonly_abs;
+				held_is_abs      <= is_move_abs || is_abs_alu || is_eaonly_abs || is_jmpjsr_abs;
+				held_abs_jmp     <= is_jmp_abs;
+				held_abs_jsr     <= is_jsr_abs;
 				held_abs_lea     <= is_lea_abs;
 				held_abs_push    <= is_pea_abs;
 				held_abs_alu     <= is_abs_alu;
@@ -1943,9 +1976,11 @@ always @(posedge clk) begin
 				held_is_dbcc  <= is_dbcc;
 				held_is_move_disp <= is_move_disp || is_move_idx || is_move_pcrel;
 				held_ea_indexed   <= is_move_idx || is_alu_idx || is_lea_idx || is_pea_idx ||
+				                     is_jmp_idx || is_jsr_idx ||
 				                     ((is_move_pcrel || is_alu_pcrel || is_lea_pcrel ||
-				                       is_pea_pcrel) && ea_pcidx_mode);
-				held_ea_pcrel     <= is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_pea_pcrel;
+				                       is_pea_pcrel || is_jmp_pcrel || is_jsr_pcrel) && ea_pcidx_mode);
+				held_ea_pcrel     <= is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_pea_pcrel ||
+				                     is_jmp_pcrel || is_jsr_pcrel;
 				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp || is_alu_idx ||
 				                     is_alu_pcrel;
 				// The ir[8]=1 direction has its own op map: nibble 1011 is
@@ -1960,7 +1995,7 @@ always @(posedge clk) begin
 				                     is_alu_pcrel;
 				held_alu_sxt      <= is_adda_disp && (if_opcode[8] == 1'b0);
 				held_alu_rmw      <= is_alu_dst_disp;
-				held_is_jmp   <= is_jmp_disp;
+				held_is_jmp   <= is_jmp_gather;
 				held_is_lea   <= is_lea_disp || is_lea_idx || is_lea_pcrel || is_pea_gather;
 				held_lea_push <= is_pea_gather;
 				held_is_link  <= is_link;
@@ -1970,7 +2005,7 @@ always @(posedge clk) begin
 				held_movem_down<= is_movem_down;
 				held_movem_wb  <= is_movem_wb;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
-				held_is_jsr   <= is_jsr_disp;
+				held_is_jsr   <= is_jsr_gather;
 				held_is_movec <= is_movec_opcode;
 				held_movec_dir<= if_opcode[0];   // MOVEC's direction bit lives
 				                                  // in the OPCODE word, not the
@@ -1982,7 +2017,8 @@ always @(posedge clk) begin
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
 				                  is_adda_imm_l || is_abs_alu_l ||
-				                  is_eaonly_abs_l || is_movem_disp) ? 2'd2 : 2'd1;
+				                  is_eaonly_abs_l || is_movem_disp ||
+				                  is_jmpjsr_abs_l) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;

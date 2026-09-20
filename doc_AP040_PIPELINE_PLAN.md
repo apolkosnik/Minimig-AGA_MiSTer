@@ -1683,6 +1683,32 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 71: JMP/JSR with indexed, PC-relative and absolute targets
+
+   `JSR (d16,PC)`, `JSR $xxx.L`, `JMP (d8,PC,Xn)` and their counterparts.
+   JMP/JSR reached only `(An)` and `(d16,An)` before. Every EA path they
+   need already existed from LEA and PEA, so the indexed and PC-relative
+   forms ride `held_is_jmp`/`held_is_jsr` with the `held_ea_*` properties,
+   and the absolute forms ride `held_is_abs` with `held_abs_jmp` and
+   `held_abs_jsr` beside `held_abs_lea` and `held_abs_push`. Decode only.
+   `tb_ap040_pipe_jmpmodes.v` covers all six; on milestone-70 RTL none
+   decode and D2 stays 0.
+
+   **The control procedure failed again, one milestone after the rule was
+   written.** The command was labelled "via checkout" and then ran
+   `git checkout HEAD -- rtl/ap040_pipe/` FIRST -- discarding the
+   uncommitted decode edit -- followed by a `stash push` on the now-clean
+   path, which saved nothing, and a `stash pop` that pulled the August entry
+   in for a second time. The RTL edit was recovered by re-running the same
+   deterministic script; the suite had already passed on it before the
+   checkout. Same recovery as before: `reset --hard`, remove the eight
+   untracked files the pop drops, verify the stash list is unchanged.
+
+   The rule, restated so it cannot be half-followed: **commit first, then
+   `git checkout <rev> -- rtl/ap040_pipe/`, run, `git checkout HEAD --
+   rtl/ap040_pipe/`.** `stash` does not appear in a control at all, and
+   `checkout HEAD` is only ever the LAST step, after the run.
+
    ### How to run a control, and how not to
 
    For thirty milestones the control was `git stash push rtl/ap040_pipe/`,
