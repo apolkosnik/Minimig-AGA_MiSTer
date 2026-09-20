@@ -11,9 +11,11 @@
 //                                                                          //
 //   Z := 1  ;  TRAPNE  (false)  ;  TRAPEQ  (true)                          //
 //   Z := 0  ;  TRAPEQ.W #$1234 (false)  ;  TRAPNE.L #$12345678 (true)      //
-//   MOVEQ #$2A,D1  ;  TRAPT (true)                                         //
+//   MOVEQ #$2A,D1                                                          //
+//   V := 1 by an overflowing ADD  ;  DIVU.W #7,D3 clears it (long stall)   //
+//   TRAPVS (false)  ;  TRAPVC (true)  ;  TRAPT (true)                      //
 //                                                                          //
-// Checks: D2 = 3, D1 = $2A, D0 = 7, A7 back at $0600.                      //
+// Checks: D2 = 4, D1 = $2A, D0 = 7, A7 back at $0600.                      //
 //                                                                          //
 // Each check's meaning, and which RTL changes it is sensitive to, is       //
 // recorded in doc_AP040_PIPELINE_PLAN.md from mutation runs -- not here,   //
@@ -70,19 +72,28 @@ initial begin
 	dut.u_l1.mem[4   ] = 16'h0000;
 	dut.u_l1.mem[5   ] = 16'h0005;
 	dut.u_l1.mem[6   ] = 16'h56FC;   // TRAPNE        Z=1: condition false
-	dut.u_l1.mem[7   ] = 16'h57FC;   // TRAPEQ        Z=1: condition true
+	dut.u_l1.mem[7   ] = 16'h57FC;   // TRAPEQ        Z=1: condition true         (trap 1)
 	dut.u_l1.mem[8   ] = 16'h7007;   // MOVEQ #7,D0
 	dut.u_l1.mem[9   ] = 16'h0C80;   // CMPI.L #5,D0   Z := 0
 	dut.u_l1.mem[10  ] = 16'h0000;
 	dut.u_l1.mem[11  ] = 16'h0005;
 	dut.u_l1.mem[12  ] = 16'h57FA;   // TRAPEQ.W #$1234   false; one extension word
 	dut.u_l1.mem[13  ] = 16'h1234;
-	dut.u_l1.mem[14  ] = 16'h56FB;   // TRAPNE.L #$12345678   true; two extension words
+	dut.u_l1.mem[14  ] = 16'h56FB;   // TRAPNE.L #$12345678   true; two extension words   (trap 2)
 	dut.u_l1.mem[15  ] = 16'h1234;
 	dut.u_l1.mem[16  ] = 16'h5678;
 	dut.u_l1.mem[17  ] = 16'h722A;   // MOVEQ #$2A,D1
-	dut.u_l1.mem[18  ] = 16'h50FC;   // TRAPT         always
-	dut.u_l1.mem[19  ] = 16'h4E71;   // NOP
+	dut.u_l1.mem[18  ] = 16'h7664;   // MOVEQ #100,D3   dividend
+	dut.u_l1.mem[19  ] = 16'h283C;   // MOVE.L #$7FFFFFFF,D4
+	dut.u_l1.mem[20  ] = 16'h7FFF;
+	dut.u_l1.mem[21  ] = 16'hFFFF;
+	dut.u_l1.mem[22  ] = 16'hD884;   // ADD.L D4,D4    V := 1, the last flag-setter before the divide
+	dut.u_l1.mem[23  ] = 16'h86FC;   // DIVU.W #7,D3   V := 0; EX stalls ~32 cycles
+	dut.u_l1.mem[24  ] = 16'h0007;
+	dut.u_l1.mem[25  ] = 16'h59FC;   // TRAPVS        V=0 after the divide: false
+	dut.u_l1.mem[26  ] = 16'h58FC;   // TRAPVC        V=0: true                    (trap 3)
+	dut.u_l1.mem[27  ] = 16'h50FC;   // TRAPT         always                       (trap 4)
+	dut.u_l1.mem[28  ] = 16'h4E71;   // NOP
 	dut.u_l1.mem[512 ] = 16'h5282;   // handler: ADDQ.L #1,D2
 	dut.u_l1.mem[513 ] = 16'h4E73;   // RTE
 	dut.u_l1.mem[3598] = 16'h0000;   // vector 7 -> $0800
@@ -102,11 +113,11 @@ initial begin
 	// the poke has to land past the reset edge's own NBA region.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 500) @(posedge clk);
+	repeat (PROG_WORDS + 600) @(posedge clk);
 
-	if (dbg_d2 !== 32'h0000_0003) begin
+	if (dbg_d2 !== 32'h0000_0004) begin
 		errors = errors + 1;
-		$display("FAIL: trap count D2 = %h, expected 00000003", dbg_d2);
+		$display("FAIL: trap count D2 = %h, expected 00000004", dbg_d2);
 	end
 	if (dbg_d1 !== 32'h0000_002A) begin
 		errors = errors + 1;

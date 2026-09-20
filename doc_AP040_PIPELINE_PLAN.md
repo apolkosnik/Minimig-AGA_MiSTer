@@ -1683,6 +1683,52 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 74: TRAPcc, and the CCR one stage too early
+
+   TRAPcc traps to vector 7 if its condition holds; the `.W`/`.L` forms
+   carry an immediate the hardware ignores. Mode 111 in the Scc/DBcc space
+   was unclaimed. The condition is judged in EA-fetch -- where a frame can
+   still be pushed -- by a mirror of EX's `cond_true`, decided once and
+   latched.
+
+   **The bench's first run found a bug older than TRAPcc.** A `TRAPNE`
+   directly after a `CMPI` trapped with Z set: its frame push is logged
+   before the `CMPI` retires. `sr_resolved` forwarded flags only from WB.
+   The instruction in EX had computed new flags nobody one stage upstream
+   could read. Bcc/Scc/DBcc never saw it -- they evaluate in EX. TRAPcc is
+   the first EA-fetch consumer of the CCR, and **the exception frame's
+   stacked SR has had the same one-cycle blind spot since it existed** (the
+   same `sr_in` feeds `exc_sr_word`; it is now current too, though not
+   separately tested).
+
+   EX now exports its committing flags live (`ex_ccr_fwd_*`) and the core
+   folds them into a SECOND SR view, `sr_resolved_ea`, that only EA-fetch
+   reads. Folding it into the view EX itself reads (`ccr_in`) made
+   `alu_flags` feed the ALU that produced them -- a loop that broke ADDX,
+   the one op whose result depends on an input flag. TRAPcc's decision is
+   also gated on `!stall_in`, so a divide in EX finishes before the
+   condition is judged.
+
+   **What the bench is sensitive to, measured** (helper mutations, run
+   before this text was written):
+
+   | mutation | result |
+   |---|---|
+   | control: milestone-73 RTL | 4 failures, D2 = 0 |
+   | CCR forward removed from EA-fetch's view | D2 = 4: the spurious `TRAPNE` returns |
+   | `!stall_in` gate removed | D2 = 5, A7 unbalanced: `TRAPVS` judged the stale V mid-divide |
+   | vector 7 -> 6 | 4 failures: handler never found |
+   | `.L` `next_pc` counted as one word | D2 = 2, D1 = 0: RTE returned into the immediate |
+   | latch removed | **passes** -- unobservable here; the CCR is stable through every frame push in this program. Correct by argument, same standing as milestone 48's stall gate |
+
+   Two of those rows exist only because a first attempt was wrong. The stall
+   gate was unobservable until the bench gained a divide before a TRAPcc.
+   And my first length mutation removed `is_trapcc_l` from `ext_pending`
+   but not `held_is_long`, so `next_pc` stayed right and the stray word was
+   flushed by the trap itself -- a mutation that changes half of a
+   two-place invariant tests nothing. The half RTE actually consumes is
+   `held_is_long`.
+
    ### Milestone 73: MOVEM $xxx.L -- the three-word gather, and MOVEM complete
 
    Mask plus a 32-bit address is the first THREE-word gather in this
