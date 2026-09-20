@@ -17,15 +17,25 @@
 //   clobber D0, D1                                                         //
 //   MOVEM.L $00000500.L,D0-D1        load, three words                    //
 //                                                                          //
-// The MOVEQ #$2A,D2 immediately after the store is the length check. If    //
-// next_pc stepped over two extension words instead of three, the low       //
-// address word $0500 would be fetched as an OPCODE -- 0500 is ORI.B #x,D0  //
-// -- and D2 would never be written. D2 = 2A says all three were skipped.   //
+// CORRECTION. The first version of this header claimed the MOVEQ #$2A,D2  //
+// after the store checked the three-word length through next_pc. It does   //
+// not, and a mutation said so: with the xlong term of id_next_pc broken    //
+// the bench still passed. A plain MOVEM's id_next_pc is never CONSUMED --  //
+// IF fetches linearly and the gather stalls it for exactly ext_pending      //
+// cycles, so fetch lands after the third word whatever next_pc says, and   //
+// only an exception or a return would read it. The held_is_xlong term is   //
+// correct and, today, unobservable. D2 = 2A is kept only as a "the         //
+// sequence continued" sanity check and proves nothing about the gather.    //
 //                                                                          //
-// Memory and the round trip check the address was assembled from the       //
-// right two words and the mask from the right one: a mask read from the    //
-// wrong slot stores the wrong registers, and an address off by a word      //
-// lands the block somewhere the checks cannot see.                          //
+// What DOES guard the three-word gather is the ADDRESS and the MASK, and   //
+// both were verified by mutation rather than argued:                        //
+//   - gathering two words instead of three assembles {mask, addr_hi} as    //
+//     the address, the block lands out of sight, and the memory and        //
+//     round-trip checks all fail;                                          //
+//   - reading the mask from disp_acc[15:0] instead of [31:16] takes        //
+//     addr_hi (zero) as the mask, nothing is transferred, and the same     //
+//     checks fail.                                                         //
+// Under both mutations D2 was still 2A.                                    //
 //                                                                          //
 // On milestone 72's RTL neither form decodes.                              //
 //--------------------------------------------------------------------------//

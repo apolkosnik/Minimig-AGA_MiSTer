@@ -1699,6 +1699,23 @@ real MMU or bus-error path arrives, which is the same boundary
    packing in `id_imm` only worked while no mode needed all 32 bits of
    `id_imm` for an address, and the five MOVEM benches guarded the change.
 
+   **A claim in milestone 73's commit was wrong and is retracted here.** It
+   said the `MOVEQ #$2A,D2` after the store checked the three-word length
+   through `next_pc`. Mutating the xlong term of `id_next_pc` left the bench
+   passing. A plain MOVEM's `id_next_pc` is never consumed: IF fetches
+   linearly and the gather stalls it for exactly `ext_pending` cycles, so
+   fetch lands after the third word whatever `next_pc` says; only an
+   exception or a return would read it, and neither applies. The term is
+   correct and unobservable -- the same standing as milestone 48's stall
+   gate -- and is recorded as such.
+
+   What guards the three-word gather was then established by mutation:
+   shortening it to two words, or reading the mask from the wrong slot,
+   each fails the address and round-trip checks (three failures), while D2
+   stays `2A` under both. The lesson is the one from milestone 70 again,
+   now for a length rather than a timing: **the mutation has to be run
+   before the claim is written, not after.**
+
    **MOVEM is now complete**: `.W` and `.L`; `-(An)`, `(An)+`, `(An)`,
    `(d16,An)`, `(d16,PC)`, `$xxx.W`, `$xxx.L`.
 
