@@ -110,7 +110,7 @@ initial begin
 	// land past the reset edge's own NBA region.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 80) @(posedge clk);
+	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// SR resets to $2700. ANDI #$F8FF clears the mask, ORI #$0500 sets it to
 	// 5, and neither CCR operation may touch the upper byte.

@@ -98,7 +98,7 @@ initial begin
 	nreset = 1;
 
 	// No poking: A0 is loaded by the program itself.
-	repeat (PROG_WORDS + 34) @(posedge clk);
+	repeat ((PROG_WORDS + 34) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dut.u_regfile.areg[0] !== 32'h0000_0480) begin
 		errors = errors + 1;

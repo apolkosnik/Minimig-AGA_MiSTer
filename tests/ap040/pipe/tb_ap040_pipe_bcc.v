@@ -107,7 +107,7 @@ initial begin
 
 	// More margin than the other testbenches: this program is 9
 	// instructions plus drain, and a misprediction costs recovery cycles.
-	repeat (PROG_WORDS + 20) @(posedge clk);
+	repeat ((PROG_WORDS + 20) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h0000_0001) begin
 		errors = errors + 1;

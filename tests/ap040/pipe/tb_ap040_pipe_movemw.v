@@ -101,7 +101,7 @@ initial begin
 	// land past the reset edge's own NBA region.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 220) @(posedge clk);
+	repeat ((PROG_WORDS + 220) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// $05FC is word index 254, $05FE is 255 -- ADJACENT, which is what says
 	// the step was two.

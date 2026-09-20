@@ -105,7 +105,7 @@ initial begin
 	// ap040_pipe_regfile.v's internal `isp` register.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 30) @(posedge clk);
+	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d1 !== 32'h0000_0000) begin
 		errors = errors + 1;

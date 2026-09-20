@@ -134,7 +134,7 @@ initial begin
 	// the poke has to land past the reset edge's own NBA region.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 500) @(posedge clk);
+	repeat ((PROG_WORDS + 500) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d1 !== 32'h0000_0001) begin
 		errors = errors + 1;

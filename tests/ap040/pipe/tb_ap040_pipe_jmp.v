@@ -118,7 +118,7 @@ initial begin
 	dut.u_regfile.areg[0] = 32'h0000_0406;
 	dut.u_regfile.areg[1] = 32'h0000_0400;
 
-	repeat (PROG_WORDS + 25) @(posedge clk);
+	repeat ((PROG_WORDS + 25) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d1 !== 32'h0000_0000) begin
 		errors = errors + 1;

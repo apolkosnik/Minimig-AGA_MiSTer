@@ -110,7 +110,7 @@ initial begin
 	// land past the reset edge's own NBA region.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 80) @(posedge clk);
+	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// $05FC is word index 254, $05F4 is word index 250.
 	if ({dut.u_l1.mem[254], dut.u_l1.mem[255]} !== 32'h1111_2222) begin

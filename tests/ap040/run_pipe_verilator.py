@@ -32,6 +32,9 @@ def main():
     ap.add_argument("--work", type=Path, default=Path("/tmp/ap040-pipe"))
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--only", help="comma-separated bench names")
+    ap.add_argument("--slow-l1", action="store_true",
+                    help="build with AP040_PIPE_L1_SLOW: 0-3 extra cycles on every L1 read and "
+                         "write-buffer drain, so the benches prove the pipeline waits for memory")
     args = ap.parse_args()
     work = args.work.resolve(); work.mkdir(parents=True, exist_ok=True)
 
@@ -56,7 +59,12 @@ def main():
             rc = subprocess.run(
                 ["verilator", "--binary", "--timing", "--top-module", name,
                  "--Mdir", str(obj), "-j", str(args.jobs), "-Wno-fatal",
-                 *("-I" + str(d) for d in inc), str(b)] + [str(s) for s in src],
+                 *("-I" + str(d) for d in inc),
+                 # Every bench's end-of-program wait is `repeat (N * AP040_PIPE_WAIT_SCALE)`:
+                 # the slow L1 roughly triples the cycles a program takes, so the
+                 # wait scales with it rather than each bench guessing.
+                 "-DAP040_PIPE_WAIT_SCALE=" + ("4" if args.slow_l1 else "1"),
+                 *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []), str(b)] + [str(s) for s in src],
                 stdout=out, stderr=subprocess.STDOUT).returncode
             if rc == 0:
                 rc = subprocess.run([str(obj / ("V" + name))], stdout=out,

@@ -154,7 +154,7 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	repeat (PROG_WORDS + 100) @(posedge clk);
+	repeat ((PROG_WORDS + 100) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// ---------------------------------------------- Phase 1: MOVEC writes
 	if (dut.vbr !== 32'h0000_0040) begin

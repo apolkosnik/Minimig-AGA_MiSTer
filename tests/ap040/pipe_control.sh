@@ -17,6 +17,8 @@
 #      the run dies. `stash` does not appear here at all.
 #
 # Untracked files elsewhere (a bench still being written) are fine.
+# PIPE_HARNESS_ARGS in the environment is passed to the harness (e.g.
+# PIPE_HARNESS_ARGS=--slow-l1, milestone 80).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 if [ $# -ne 2 ]; then echo "usage: $0 <rev> <bench>[,<bench>...]" >&2; exit 2; fi
@@ -32,7 +34,7 @@ restore() { git checkout -q HEAD -- rtl/ap040_pipe/; rm -rf "$work"; }
 trap restore EXIT
 git checkout -q "$rev" -- rtl/ap040_pipe/
 echo "control: rtl/ap040_pipe/ at $(git log --oneline -1 "$rev")"
-python3 tests/ap040/run_pipe_verilator.py --work "$work" --only "$2" >/dev/null 2>&1 || true
+python3 tests/ap040/run_pipe_verilator.py $PIPE_HARNESS_ARGS --work "$work" --only "$2" >/dev/null 2>&1 || true
 for b in ${2//,/ }; do
 	echo "--- $b ---"
 	if [ -f "$work/$b.log" ]; then grep -E "FAIL|PASSED|FAILED|%Error" "$work/$b.log" | head -8

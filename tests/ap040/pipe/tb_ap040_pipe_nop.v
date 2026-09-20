@@ -129,7 +129,7 @@ initial begin
 
 	// Long enough for all PROG_WORDS instructions to clear all 6 stages
 	// (PROG_WORDS + 6 cycles) plus margin.
-	repeat (PROG_WORDS + 20) @(posedge clk);
+	repeat ((PROG_WORDS + 20) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (expect_idx !== PROG_WORDS) begin
 		errors = errors + 1;

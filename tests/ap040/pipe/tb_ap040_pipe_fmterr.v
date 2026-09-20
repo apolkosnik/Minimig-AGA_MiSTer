@@ -167,7 +167,7 @@ initial begin
 
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 600) @(posedge clk);
+	repeat ((PROG_WORDS + 600) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// Part 1
 	check32("D1 (landing point after the repaired RTE)",       dbg_d1,                32'h0000_002A);

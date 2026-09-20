@@ -109,7 +109,7 @@ initial begin
 	repeat (2) @(posedge clk);
 	nreset = 1;
 
-	repeat (PROG_WORDS + 60) @(posedge clk);
+	repeat ((PROG_WORDS + 60) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if ({dut.u_l1.mem[64], dut.u_l1.mem[65]} !== 32'h0000_0015) begin
 		errors = errors + 1;

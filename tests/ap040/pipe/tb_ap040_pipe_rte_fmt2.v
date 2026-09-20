@@ -110,7 +110,7 @@ initial begin
 	dut.u_regfile.areg[0] = 32'h0000_0407;  // A0: odd JMP target
 	dut.u_regfile.isp     = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 400) @(posedge clk);
+	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d1 !== 32'h0000_0011) begin
 		errors = errors + 1;

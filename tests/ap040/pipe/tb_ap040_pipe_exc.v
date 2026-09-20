@@ -142,7 +142,7 @@ initial begin
 	dut.u_regfile.areg[2] = 32'h0000_0406;  // A2: resume-mainline target for JMP
 	dut.u_regfile.isp     = 32'h0000_0600;  // A7
 
-	repeat (PROG_WORDS + 80) @(posedge clk);
+	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// -------------------------------------------------- Case A: illegal
 	if (dbg_d1 !== 32'h0000_0000) begin

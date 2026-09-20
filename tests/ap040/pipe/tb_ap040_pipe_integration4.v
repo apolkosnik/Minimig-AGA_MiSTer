@@ -221,7 +221,7 @@ initial begin
 	dut.u_regfile.isp = 32'h0000_0600;
 	dut.u_regfile.usp = 32'h0000_0500;
 
-	repeat (PROG_WORDS + 1200) @(posedge clk);
+	repeat ((PROG_WORDS + 1200) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dut.u_regfile.dreg[6] !== 32'h0000_1FFF) begin
 		errors = errors + 1;

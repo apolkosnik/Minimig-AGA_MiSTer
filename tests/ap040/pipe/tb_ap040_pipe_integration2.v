@@ -146,7 +146,7 @@ initial begin
 	// tb_ap040_pipe_move_mem.v's header for why the poke lands here.
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 400) @(posedge clk);
+	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// $04A0 is word index 80.
 	if ({dut.u_l1.mem[80], dut.u_l1.mem[81]} !== 32'h0000_0019) begin

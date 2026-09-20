@@ -167,7 +167,7 @@ initial begin
 	dut.u_regfile.isp = 32'h0000_0600;
 	dut.u_regfile.usp = 32'h0000_0050;
 
-	repeat (PROG_WORDS + 100) @(posedge clk);
+	repeat ((PROG_WORDS + 100) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// -------------------------------------------------- Phase A: BSR/RTS
 	if (dbg_d1 !== 32'h0000_0011) begin

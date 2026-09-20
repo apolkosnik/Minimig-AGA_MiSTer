@@ -544,6 +544,8 @@ ap040_pipe_regfile u_regfile
 // this pipeline already has.
 wire [L1_AW-1:0] l1_addr_a;
 wire      [15:0] l1_rdata_a;
+wire             if_l1_req_a, l1_rvalid_a;
+wire             eaf_l1_rd_b, l1_rvalid_b;
 wire [L1_AW-1:0] l1_addr_b;
 wire [L1_AW-1:0] eaf_l1_addr_b;
 wire       [31:0] l1_q_b;
@@ -580,15 +582,18 @@ ap040_pipe_l1 #(
 	// with the old condition, the recovery landed in pc while q_a still held
 	// the mispredicted branch's own opcode, and decode saw that opcode at
 	// the recovery PC.
-	.en_a      (ce && (!id_stall || flush)),
+	.en_a      (if_l1_req_a),
 	.q_a       (l1_rdata_a),
+	.rvalid_a  (l1_rvalid_a),
 
 	.address_b (l1_addr_b),
 	.data_b    (l1_data_b),
 	.wren_b    (l1_wren_b),
 	.be_b      (l1_be_b),
+	.rd_b      (eaf_l1_rd_b),
 	.wr_busy   (l1_wr_busy),
-	.q_b       (l1_q_b)
+	.q_b       (l1_q_b),
+	.rvalid_b  (l1_rvalid_b)
 );
 
 ap040_inst_fetch #(
@@ -607,7 +612,9 @@ ap040_inst_fetch #(
 	.redirect_pc    (final_redirect_pc),
 
 	.l1_addr_a  (l1_addr_a),
+	.l1_req_a   (if_l1_req_a),
 	.l1_rdata_a (l1_rdata_a),
+	.l1_rvalid_a(l1_rvalid_a),
 
 	.if_valid  (if_valid),
 	.if_pc     (if_pc),
@@ -909,6 +916,8 @@ ap040_ea_fetch #(
 
 	.l1_addr_b        (eaf_l1_addr_b),
 	.l1_q_b           (l1_q_b),
+	.l1_rvalid_b      (l1_rvalid_b),
+	.l1_rd_b          (eaf_l1_rd_b),
 	.l1_wren_b        (eaf_l1_wren_b),
 	.l1_be_b          (eaf_l1_be_b),
 	.l1_data_b        (eaf_l1_data_b),

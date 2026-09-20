@@ -162,7 +162,7 @@ initial begin
 	dut.u_regfile.areg[2] = 32'h0000_0408;  // A2: handler A's resume target
 	dut.u_regfile.isp     = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 140) @(posedge clk);
+	repeat ((PROG_WORDS + 140) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// -------------------------------------------------- Case A: JMP odd
 	if (dbg_d1 !== 32'h0000_0000) begin

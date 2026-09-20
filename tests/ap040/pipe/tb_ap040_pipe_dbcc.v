@@ -122,7 +122,7 @@ initial begin
 	// Case A loops 3 times (2 taken-and-correctly-predicted, 1 expired-and-
 	// mispredicted) before falling through; generous margin for the repeated
 	// gather + one recovery.
-	repeat (PROG_WORDS + 40) @(posedge clk);
+	repeat ((PROG_WORDS + 40) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h0000_FFFF) begin
 		errors = errors + 1;

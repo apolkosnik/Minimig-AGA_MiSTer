@@ -129,7 +129,7 @@ initial begin
 
 	dut.u_regfile.isp = 32'h0000_0600;
 
-	repeat (PROG_WORDS + 400) @(posedge clk);
+	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	check32("[$0B00] (the old A0: nothing may land here)", {dut.u_l1.mem[896],  dut.u_l1.mem[897]},  32'h0000_0000);
 	check32("[$0C00] (the new A0 gets the new D0)",        {dut.u_l1.mem[1024], dut.u_l1.mem[1025]}, 32'h0000_0022);

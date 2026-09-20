@@ -133,7 +133,7 @@ initial begin
 	repeat (2) @(posedge clk);
 	nreset = 1;
 
-	repeat (PROG_WORDS + 60) @(posedge clk);
+	repeat ((PROG_WORDS + 60) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h2222_2222) begin
 		errors = errors + 1;

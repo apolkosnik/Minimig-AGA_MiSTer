@@ -79,7 +79,7 @@ initial begin
 	// issued, PROG_WORDS + 6 cycles to fully drain if nothing ever stalls
 	// -- confirms the redirect costs zero extra cycles, not just that it
 	// eventually settles on the right values.
-	repeat (PROG_WORDS + 20) @(posedge clk);
+	repeat ((PROG_WORDS + 20) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h0000_0005) begin
 		errors = errors + 1;

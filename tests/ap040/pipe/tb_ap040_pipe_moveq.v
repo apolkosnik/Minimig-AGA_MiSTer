@@ -92,7 +92,7 @@ initial begin
 
 	// Same margin as tb_ap040_pipe_nop.v: PROG_WORDS instructions issued,
 	// PROG_WORDS + 6 cycles to fully drain if nothing ever stalls.
-	repeat (PROG_WORDS + 20) @(posedge clk);
+	repeat ((PROG_WORDS + 20) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'hFFFF_FFFF) begin
 		errors = errors + 1;

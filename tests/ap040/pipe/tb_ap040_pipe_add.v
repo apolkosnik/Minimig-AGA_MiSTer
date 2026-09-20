@@ -81,7 +81,7 @@ initial begin
 
 	// Same margin as the other two testbenches: PROG_WORDS instructions
 	// issued, PROG_WORDS + 6 cycles to fully drain if nothing ever stalls.
-	repeat (PROG_WORDS + 20) @(posedge clk);
+	repeat ((PROG_WORDS + 20) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h0000_0003) begin
 		errors = errors + 1;

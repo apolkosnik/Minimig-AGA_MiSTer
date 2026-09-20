@@ -354,6 +354,8 @@ module ap040_ea_fetch
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
 	output [L1_AW-1:0] l1_addr_b,
 	input        [31:0] l1_q_b,
+	input               l1_rvalid_b,   // l1_q_b is the return for the last l1_rd_b (milestone 80)
+	output              l1_rd_b,       // port-B read request: one in flight at a time
 	output              l1_wren_b,
 	output        [3:0] l1_be_b,
 	output       [31:0] l1_data_b,
@@ -608,7 +610,7 @@ wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_ta
 wire mvm_fin   = mvm_active && !mvm_any && !mvm_rd_pend;
 wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin && !trace_hold;
 
-assign rf3_we   = mvm_rd_pend;
+assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
 assign rf3_addr = mvm_rd_reg;
 // A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
 // preserve the upper half, it replaces it with the sign. That is the one
@@ -642,7 +644,7 @@ wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
 // normally. Found while designing CHK, which has the same operand shape.
 wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
 wire divzero_now = eac_valid && eac_is_div &&
-                   (eac_is_mem_src ? mem_pending : 1'b1) &&
+                   (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : 1'b1) &&
                    (div_divisor[15:0] == 16'd0);
 
 // ...and it has to be LATCHED, not recomputed. mem_lane is l1_q_b, which
@@ -673,7 +675,7 @@ wire signed [15:0] chk_bound = chk_src[15:0];
 wire chk_negative = chk_value < 16'sd0;
 wire chk_over     = chk_value > chk_bound;
 wire chk_now = eac_valid && eac_is_chk &&
-               (eac_is_mem_src ? mem_pending : 1'b1) &&
+               (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : 1'b1) &&
                (chk_negative || chk_over);
 reg exc_pend_chk;
 reg exc_pend_chk_n;
@@ -782,7 +784,7 @@ wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !tr
 //
 // No combinational loop: exc_active depends on mem_pending and mem_lane,
 // neither of which depends on mem_complete.
-wire mem_complete = mem_pending && !exc_active;
+wire mem_complete = mem_pending && l1_rvalid_b && !exc_active;
 // BSR/JSR's push -- no "pending" latch needed, see header: a write either
 // succeeds immediately (l1_wr_busy low) or must wait for the port, but
 // never needs a separate multi-cycle completion phase the way a read does.
@@ -885,7 +887,7 @@ wire exc_writing   = exc_active && !exc_vec_pending &&
 // L1 and must be retried rather than counted.
 wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
 wire exc_vec_issue = exc_active && !exc_vec_pending && (exc_ph == EXC_VECRD);
-wire exc_vec_done  = exc_active && exc_vec_pending;
+wire exc_vec_done  = exc_active && exc_vec_pending && l1_rvalid_b;
 wire exc_stall     = exc_active && !exc_vec_done;
 
 // RTE (milestone 16, new): a genuinely supervisor RTE (eac_is_priv already
@@ -912,9 +914,15 @@ reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
 
 wire ret_active   = live && eac_is_rte_active;
 wire ret_issue    = ret_active && !ret_pending;
-wire ret_complete = ret_active && ret_pending;
+wire ret_complete = ret_active && ret_pending && l1_rvalid_b;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
+
+// Every port-B read this stage makes, as the L1's request strobe. The four
+// requesters are exclusive by construction (one instruction is never more
+// than one of them), and each waits for l1_rvalid_b before it looks at l1_q_b
+// (milestone 80): mem_complete, exc_vec_done, ret_complete, rf3_we.
+assign l1_rd_b = mem_issue || exc_vec_issue || ret_issue || mvm_ld_go;
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
 // for everything but address error; $2 and $3 are the six-word frames ($3
@@ -935,7 +943,8 @@ wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
 wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
 assign fmterr_now = ret_done && !ret_fmt_ok;
 
-assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken || mvm_stall ||
+assign eaf_stall = stall_in || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
+                   ret_stall || port_taken || mvm_stall ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
@@ -1302,6 +1311,13 @@ always @(posedge clk) begin
 				eaf_sr_snapshot<= sr_in;
 				eaf_cond       <= eac_cond;
 				mem_pending    <= 1'b0;
+			end else if (mem_pending && !exc_active) begin
+				// The read is in flight and has not returned (milestone 80).
+				// Without this branch the chain fell through to the default
+				// and DEPARTED the instruction with no data. A faulting
+				// memory-source load keeps mem_pending set through its own
+				// exception entry, so exc_active must get past this.
+				eaf_valid      <= 1'b0;
 			end else if (wr_stall) begin
 				// Waiting for l1_wr_busy to clear -- see header. eac_* stays
 				// frozen (eaf_stall propagates backward), so this re-evaluates
@@ -1365,7 +1381,7 @@ always @(posedge clk) begin
 					mvm_addr    <= mvm_nxt_addr;
 					mvm_rd_pend <= 1'b1;
 					mvm_rd_reg  <= mvm_reg;
-				end else if (mvm_rd_pend) begin
+				end else if (mvm_rd_pend && l1_rvalid_b) begin
 					mvm_rd_pend <= 1'b0;
 				end else if (mvm_st_go) begin
 					// Predecrementing: the beat wrote mvm_st_addr, which
@@ -1402,6 +1418,9 @@ always @(posedge clk) begin
 				// relies on.
 				eaf_valid       <= 1'b0;
 				exc_vec_pending <= 1'b1;
+			end else if (exc_vec_pending && !exc_vec_done) begin
+				// vector read in flight (milestone 80) -- same as mem_pending above
+				eaf_valid       <= 1'b0;
 			end else if (exc_vec_done) begin
 				// l1_q_b now holds the handler address fetched last cycle.
 				// eaf_operand_a carries it into ap040_execute.v's
@@ -1530,6 +1549,9 @@ always @(posedge clk) begin
 				// and the exception's own vector-fetch already rely on.
 				eaf_valid   <= 1'b0;
 				ret_pending <= 1'b1;
+			end else if (ret_pending && !ret_complete) begin
+				// pop beat in flight (milestone 80)
+				eaf_valid   <= 1'b0;
 			end else if (ret_complete && ret_ph == RET_BEAT0) begin
 				// l1_q_b now holds dword0 ({SR, PC_hi}) -- stash it (this
 				// stage's carry-forward registers, eaf_operand_a/b, are

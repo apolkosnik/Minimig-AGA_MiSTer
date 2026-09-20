@@ -1686,7 +1686,9 @@ wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_
 // with. Without this exclusion the completing gather redirects to
 // held_pc + 2 + the immediate, which for ADDI.L #$12345678 is a wild jump
 // and the rest of the program never runs.
-wire redirect_from_gather = completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
+// ... and only when the completing word is actually here (milestone 80): a
+// fetch bubble mid-gather must not redirect on a stale if_opcode.
+wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
                              !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
                              !held_is_abs && !held_is_stabs && !held_is_immsr &&
@@ -1819,7 +1821,7 @@ always @(posedge clk) begin
 		if (flush) begin
 			id_valid    <= 1'b0;
 			ext_pending <= 2'd0;   // abandon any in-progress gather too
-		end else if (!stall_in) begin
+		end else if (!stall_in && if_valid) begin
 			if (ext_pending != 2'd0) begin
 				// Gathering: if_opcode is extension-word data, never a
 				// fresh opcode.
@@ -2249,6 +2251,14 @@ always @(posedge clk) begin
 				id_is_rte       <= if_valid && is_rte;
 				id_cond         <= if_opcode[11:8];
 			end
+		end else if (!stall_in) begin
+			// A fetch bubble (milestone 80): the L1 has not returned the next
+			// word. Nothing is consumed -- a gather in progress keeps its
+			// count and its held words -- and nothing is issued. With the
+			// one-cycle L1 a word arrived every unstalled cycle, so the
+			// gather counted cycles; the slow L1 build's first seven benches
+			// showed it consuming the held opcode as its own immediate.
+			id_valid <= 1'b0;
 		end
 	end
 end

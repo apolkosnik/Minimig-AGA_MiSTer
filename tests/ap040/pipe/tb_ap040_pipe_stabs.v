@@ -100,7 +100,7 @@ initial begin
 	repeat (2) @(posedge clk);
 	nreset = 1;
 
-	repeat (PROG_WORDS + 40) @(posedge clk);
+	repeat ((PROG_WORDS + 40) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// $0480 is word index 64, $04A0 is 80.
 	if ({dut.u_l1.mem[64], dut.u_l1.mem[65]} !== 32'hC0FF_EE00) begin

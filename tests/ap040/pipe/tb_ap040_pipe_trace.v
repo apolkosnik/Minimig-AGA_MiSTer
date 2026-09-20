@@ -234,7 +234,7 @@ initial begin
 	dut.u_regfile.areg[5] = 32'h0000_0A00;   // log pointer
 	dut.u_regfile.areg[6] = 32'h0000_0B00;   // I5's store target
 
-	repeat (PROG_WORDS + 1500) @(posedge clk);
+	repeat ((PROG_WORDS + 1500) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	check32("D7 (trace entries)", dut.u_regfile.dreg[7], N_TRACE);
 	for (e = 0; e < N_TRACE; e = e + 1)

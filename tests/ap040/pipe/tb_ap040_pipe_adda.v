@@ -137,7 +137,7 @@ initial begin
 	repeat (2) @(posedge clk);
 	nreset = 1;
 
-	repeat (PROG_WORDS + 80) @(posedge clk);
+	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dut.u_regfile.areg[1] !== 32'h1233_FFFF) begin
 		errors = errors + 1;

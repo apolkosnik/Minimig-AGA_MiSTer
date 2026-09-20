@@ -110,7 +110,7 @@ initial begin
 
 	// One extra cycle over the usual "PROG_WORDS + 20" margin for the
 	// memory stall.
-	repeat (PROG_WORDS + 21) @(posedge clk);
+	repeat ((PROG_WORDS + 21) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	if (dbg_d0 !== 32'h1234_5678) begin
 		errors = errors + 1;

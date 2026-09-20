@@ -43,14 +43,17 @@ always #5 clk = ~clk;
 
 reg  [AW-1:0] address_a;
 reg           wren_a_r;
-wire          en_a = 1'b1;
+reg           en_a = 1'b0;      // port A is REQUESTED since milestone 80 (see read_a below)
 wire   [15:0] q_a;
+wire          rvalid_a;
 
 reg  [AW-1:0] address_b;
 reg    [31:0] data_b;
 reg           wren_b;
+reg           rd_b = 1'b0;      // and so is a port-B read
 wire          wr_busy;
 wire   [31:0] q_b;
+wire          rvalid_b;
 
 ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
 (
@@ -62,6 +65,7 @@ ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
 	.wren_a    (1'b0),
 	.en_a      (en_a),
 	.q_a       (q_a),
+	.rvalid_a  (rvalid_a),
 
 	.address_b (address_b),
 	.data_b    (data_b),
@@ -69,9 +73,42 @@ ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
 	// Byte enables (milestone 38). All four: this bench predates sized
 	// stores and exercises the Long path, which is what 4'b1111 means.
 	.be_b      (4'b1111),
+	.rd_b      (rd_b),
 	.wr_busy   (wr_busy),
-	.q_b       (q_b)
+	.q_b       (q_b),
+	.rvalid_b  (rvalid_b)
 );
+
+// Milestone 80: reads are requests that return with a valid, and under
+// AP040_PIPE_L1_SLOW the return and the write buffer's drain take 0-3 extra
+// cycles. The exact-cycle drain checks below are the module's contract in
+// the normal build; the slow build waits instead, with a bound.
+task read_a;
+	input [AW-1:0] addr;
+	integer n;
+	begin
+		address_a = addr; en_a = 1;
+		@(posedge clk); #1;
+		en_a = 0; n = 0;
+		while (!rvalid_a && n < 8) begin @(posedge clk); #1; n = n + 1; end
+		if (!rvalid_a) begin errors = errors + 1; $display("FAIL: port A read of %h never returned", addr); end
+	end
+endtask
+
+task wait_drain;
+	input string msg;
+	integer n;
+	begin
+`ifdef AP040_PIPE_L1_SLOW
+		n = 0;
+		while (wr_busy && n < 8) begin @(posedge clk); #1; n = n + 1; end
+		check1(wr_busy, 1'b0, msg);
+`else
+		@(posedge clk); #1;
+		check1(wr_busy, 1'b0, msg);
+`endif
+	end
+endtask
 
 integer errors = 0;
 
@@ -140,16 +177,13 @@ initial begin
 	// wr_busy must be high THIS cycle -- the write just posted, not yet
 	// drained (drain happens on the NEXT edge).
 	check1(wr_busy, 1'b1, "case A: wr_busy not asserted right after posting");
-	@(posedge clk); #1;
-	// One drain cycle later, the buffer must be empty again.
-	check1(wr_busy, 1'b0, "case A: wr_busy still asserted one cycle after posting (drain took too long)");
+	// One drain cycle later (normal build), the buffer must be empty again.
+	wait_drain("case A: wr_busy still asserted after posting (drain took too long)");
 
 	// Confirm the write actually landed in mem[], via port A -- not q_b.
-	address_a = 8'h10;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h10);
 	check32({16'h0, q_a}, {16'h0, 16'hAABB}, "case A: high word did not land in mem[] (port A)");
-	address_a = 8'h11;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h11);
 	check32({16'h0, q_a}, {16'h0, 16'hCCDD}, "case A: low word did not land in mem[] (port A)");
 
 	// -------------------- Case B: back-to-back posts --------------------
@@ -170,32 +204,26 @@ initial begin
 	// module header is from the moment wr_busy is OBSERVED to drop, not
 	// from the moment a request first starts waiting behind a busy write.
 	address_b = 8'h30; data_b = 32'h3333_4444; wren_b = 1;
-	@(posedge clk); #1;
-	// Write 1 just drained. Write 2 -- held stable since before this edge
-	// -- was NOT accepted this same edge (drain took priority, per the
-	// module's own priority rule): wr_busy must read LOW here, for
-	// exactly this one edge, before write 2 gets its turn.
-	check1(wr_busy, 1'b0, "case B: wr_busy still high right after write 1's drain (should be low for exactly one edge before write 2 is accepted)");
+	// Write 1 drains (one edge in the normal build). Write 2 -- held stable
+	// since before that edge -- is NOT accepted on the drain edge (drain
+	// takes priority, per the module's own priority rule): wr_busy must read
+	// LOW for exactly one edge before write 2 gets its turn.
+	wait_drain("case B: wr_busy still high right after write 1's drain (should be low for exactly one edge before write 2 is accepted)");
 	@(posedge clk); #1;
 	// Write 2 -- held stable the whole time -- is accepted THIS edge
 	// (wr_busy read low going in), so it's now pending.
 	check1(wr_busy, 1'b1, "case B: write 2 was not accepted the edge after wr_busy dropped");
 	wren_b = 0;
-	@(posedge clk); #1;
-	// And drains here.
-	check1(wr_busy, 1'b0, "case B: second post never drained (lost, or stuck)");
+	// And drains.
+	wait_drain("case B: second post never drained (lost, or stuck)");
 
-	address_a = 8'h20;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h20);
 	check32({16'h0, q_a}, {16'h0, 16'h1111}, "case B: first write's high word wrong/missing");
-	address_a = 8'h21;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h21);
 	check32({16'h0, q_a}, {16'h0, 16'h2222}, "case B: first write's low word wrong/missing");
-	address_a = 8'h30;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h30);
 	check32({16'h0, q_a}, {16'h0, 16'h3333}, "case B: second write's high word wrong/missing");
-	address_a = 8'h31;
-	@(posedge clk); @(posedge clk); #1;
+	read_a(8'h31);
 	check32({16'h0, q_a}, {16'h0, 16'h4444}, "case B: second write's low word wrong/missing");
 
 	// -------------------- Case C: read-after-write forwarding -----------
@@ -205,8 +233,14 @@ initial begin
 	// Buffer is now holding $DEADBEEF at $40, undrained (wr_busy high).
 	// Issue a read to the SAME address on this, the very next cycle.
 	check1(wr_busy, 1'b1, "case C: buffer not holding the write when the forwarding read is issued");
-	address_b = 8'h40;
+	address_b = 8'h40; rd_b = 1;
 	@(posedge clk); #1;
+	rd_b = 0;
+	begin : wait_c
+		integer n; n = 0;
+		while (!rvalid_b && n < 8) begin @(posedge clk); #1; n = n + 1; end
+	end
+	check1(rvalid_b, 1'b1, "case C: the read never returned");
 	check32(q_b, 32'hDEAD_BEEF, "case C: read did not forward the buffered (undrained) write");
 
 	if (errors == 0)

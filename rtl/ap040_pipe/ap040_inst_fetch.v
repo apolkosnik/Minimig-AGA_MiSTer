@@ -53,11 +53,14 @@ module ap040_inst_fetch
 	input             redirect_valid,
 	input      [31:0] redirect_pc,
 
-	// ap040_pipe_l1.v port A -- read-only from here (see header)
+	// ap040_pipe_l1.v port A -- read-only from here (see header). Requested
+	// with l1_req_a, returned with l1_rvalid_a (milestone 80).
 	output [L1_AW-1:0] l1_addr_a,
+	output            l1_req_a,
 	input       [15:0] l1_rdata_a,
+	input             l1_rvalid_a,
 
-	output reg        if_valid,
+	output            if_valid,
 	output reg [31:0] if_pc,
 	output     [15:0] if_opcode
 );
@@ -65,6 +68,21 @@ module ap040_inst_fetch
 reg [31:0] pc;                       // next word's address, absent a redirect
 reg [31:0] issued;                   // instructions issued so far, 0..PROG_WORDS
 wire       have_more = (issued < PROG_WORDS);
+reg        if_pend;                  // a fetch has been requested and not yet handed on
+// A word is presented while the L1 has returned it and nothing newer has been
+// requested. The next request goes out when that word can move on (ID not
+// stalled) or on a redirect, which abandons whatever was in flight -- the L1
+// restarts port A on a new request (milestone 80). Until this milestone the
+// return was assumed to be the cycle after the request, and if_valid was a
+// register set at the request.
+assign if_valid  = if_pend && l1_rvalid_a;
+wire   can_issue = !if_pend || l1_rvalid_a;
+// A decode redirect is a one-cycle pulse and must issue in its cycle even
+// with a fetch in flight -- port A restarts on a new request -- or the
+// pulse is lost and fetch carries on down the not-taken path. The slow L1
+// build found that within its first seven benches; with a one-cycle L1 a
+// fetch was never in flight when the pulse came.
+assign l1_req_a  = ce && (flush || (!stall_in && (can_issue || redirect_valid)));
 
 // The redirect must land on THIS fetch, not merely be scheduled for the
 // following one -- otherwise the word at the old (sequential) pc still
@@ -88,15 +106,15 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		pc        <= PC_RESET;
 		issued    <= 32'd0;
-		if_valid  <= 1'b0;
+		if_pend   <= 1'b0;
 		if_pc     <= PC_RESET;
 	// A flush overrides the stall: nothing downstream will consume what IF
 	// was holding, so there is nothing to hold it for, and the redirect it
 	// carries would otherwise be lost. Decode's own speculative redirect does
 	// NOT get this treatment -- it arrives without a flush, and while decode
 	// is stalled its branch has not been consumed, so it will fire again.
-	end else if (ce && (!stall_in || flush)) begin
-		if_valid <= have_more;
+	end else if (l1_req_a) begin
+		if_pend <= have_more;
 		if (have_more) begin
 			if_pc     <= fetch_pc;
 			pc        <= fetch_pc + 32'd2;

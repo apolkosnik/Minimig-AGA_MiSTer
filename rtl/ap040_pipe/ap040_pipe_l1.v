@@ -162,6 +162,16 @@
 
 `include "ap040_pipe_defs.svh"
 
+// Request/return handshake (milestone 80). Both ports are REQUESTED (en_a,
+// rd_b) and RETURN with a valid (rvalid_a, rvalid_b); the data and its valid
+// hold until the next accepted request on that port. Without
+// AP040_PIPE_L1_SLOW every read returns the cycle after its request and the
+// write buffer drains the cycle after a post -- the timing every stage was
+// built against. With it, a deterministic xorshift adds 0-3 cycles to each
+// read and 0-3 to each drain, so the same benches prove the requesters wait
+// for the return rather than assume it. Port A accepts a new request while
+// one is in flight (a redirect abandons the fetch); port B may not, and the
+// slow model says ERROR if it happens.
 module ap040_pipe_l1
 #(
 	parameter AW = 12,   // word address width -> 2**AW words of storage
@@ -170,91 +180,157 @@ module ap040_pipe_l1
 (
 	input                clock,
 	input                nreset,   // see header -- resets wbuf_valid only
-
+	// port A: instruction fetch, 16-bit reads
 	input      [AW-1:0]  address_a,
 	input      [DW-1:0]  data_a,
 	input                wren_a,
-	input                en_a,     // see header -- must match the requester's own stall
+	input                en_a,      // request; the requester holds address_a until rvalid_a
 	output reg [DW-1:0]  q_a,
-
-	// port B: 32-bit, addresses the HIGH word; low word is address_b+1 -- see
-	// header comment.
+	output reg           rvalid_a,  // q_a is the word for the last request; holds until the next
+	// port B: data, 32-bit reads through the write buffer's forward, sized writes
 	input      [AW-1:0]  address_b,
 	input       [31:0]   data_b,
 	input                wren_b,
-	// Byte enables for port B, in address order: bit 3 is the longword's
-	// first byte. A Long store asserts all four, so every caller that
-	// predates milestone 38 is unaffected by tying this to 4'b1111.
 	input       [3:0]    be_b,
+	input                rd_b,      // read request; one in flight at a time
 	output               wr_busy,   // see header -- hold wren_b/address_b/data_b while high
-	output reg  [31:0]   q_b
+	output reg  [31:0]   q_b,
+	output reg           rvalid_b   // q_b is the longword for the last rd_b; holds until the next
 );
 
 reg [DW-1:0] mem [0:(1<<AW)-1];
-
 integer i;
 initial for (i = 0; i < (1<<AW); i = i + 1) mem[i] = `AP040_OP_NOP;
 
-wire [AW-1:0] address_b_lo = address_b + {{(AW-1){1'b0}}, 1'b1};
-
-// Posted write buffer -- see header.
+// One-entry write buffer (see header).
 reg              wbuf_valid;
 reg [AW-1:0]     wbuf_addr;
 reg [31:0]       wbuf_data;
 reg [3:0]        wbuf_be;
-
+reg [1:0]        wbuf_hold;    // extra drain cycles left (slow model only)
 wire [AW-1:0] wbuf_addr_lo = wbuf_addr + {{(AW-1){1'b0}}, 1'b1};
-
 assign wr_busy = wbuf_valid;
 
-// A read this cycle whose address matches the still-undrained buffered
-// write must see the buffered value, not stale mem[] content -- see header.
-wire wbuf_hits_read = wbuf_valid && (wbuf_addr == address_b);
+// Latency model. In the normal build every extra count is zero and the
+// xorshift is optimised away.
+`ifdef AP040_PIPE_L1_SLOW
+reg [15:0] lfsr;
+wire [15:0] lfsr_next = {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+wire [1:0] extra_a = lfsr[1:0];
+wire [1:0] extra_b = lfsr[5:4];
+wire [1:0] extra_w = lfsr[9:8];
+`else
+wire [1:0] extra_a = 2'd0;
+wire [1:0] extra_b = 2'd0;
+wire [1:0] extra_w = 2'd0;
+`endif
 
-// Byte enables for a sized store (milestone 38). Lane 3 is mem[addr][15:8],
-// lane 2 mem[addr][7:0], lane 1 mem[addr_lo][15:8], lane 0 mem[addr_lo][7:0]
-// -- the longword's four bytes in address order, since addr names the HIGH
-// word. A Long store asserts all four, which is exactly what every caller
-// before this milestone did, so their behaviour is unchanged.
-//
-// The read-after-write forward has to MERGE now rather than return
-// wbuf_data whole: a buffered byte store leaves the other three lanes in
-// mem[], and handing back the raw buffer would fabricate them.
-wire [31:0] wbuf_merged = {
-    wbuf_be[3] ? wbuf_data[31:24] : mem[address_b][15:8],
-    wbuf_be[2] ? wbuf_data[23:16] : mem[address_b][7:0],
-    wbuf_be[1] ? wbuf_data[15:8]  : mem[address_b_lo][15:8],
-    wbuf_be[0] ? wbuf_data[7:0]   : mem[address_b_lo][7:0]
+// Port A: one request in flight; a new request restarts it.
+reg          a_busy;
+reg [1:0]    a_cnt;
+reg [AW-1:0] a_addr;
+
+// Port B: one request in flight; its return merges the write buffer as it
+// stands THEN, at the latched address -- the requester holds its address, but
+// EX may take the port for a store while the read is waiting.
+reg          b_busy;
+reg [1:0]    b_cnt;
+reg [AW-1:0] b_addr;
+wire [AW-1:0] b_addr_lo = b_addr + {{(AW-1){1'b0}}, 1'b1};
+wire b_hits_wbuf = wbuf_valid && (wbuf_addr == b_addr);
+wire [31:0] b_merged = {
+    (b_hits_wbuf && wbuf_be[3]) ? wbuf_data[31:24] : mem[b_addr][15:8],
+    (b_hits_wbuf && wbuf_be[2]) ? wbuf_data[23:16] : mem[b_addr][7:0],
+    (b_hits_wbuf && wbuf_be[1]) ? wbuf_data[15:8]  : mem[b_addr_lo][15:8],
+    (b_hits_wbuf && wbuf_be[0]) ? wbuf_data[7:0]   : mem[b_addr_lo][7:0]
 };
 
 always @(posedge clock) begin
+`ifdef AP040_PIPE_L1_SLOW
+	if (!nreset) lfsr <= 16'hACE1;
+	else if (en_a || rd_b || wren_b) lfsr <= lfsr_next;
+`endif
+
+	// ---- port A ----
 	if (en_a) begin
 		if (wren_a) mem[address_a] <= data_a;
-		q_a <= mem[address_a];
+		a_addr   <= address_a;
+		a_cnt    <= extra_a;
+		a_busy   <= 1'b1;
+		rvalid_a <= 1'b0;
+	end else if (a_busy) begin
+		if (a_cnt == 2'd0) begin
+			q_a      <= mem[a_addr];
+			rvalid_a <= 1'b1;
+			a_busy   <= 1'b0;
+		end else
+			a_cnt <= a_cnt - 2'd1;
+	end
+	// A zero-extra request returns the cycle after it was made: the busy
+	// branch above is skipped in the request cycle, so resolve it here.
+	if (en_a && extra_a == 2'd0) begin
+		q_a      <= mem[address_a];
+		rvalid_a <= 1'b1;
+		a_busy   <= 1'b0;
 	end
 
+	// ---- port B read ----
+	if (rd_b) begin
+`ifdef AP040_PIPE_L1_SLOW
+		if (b_busy) $display("ERROR: ap040_pipe_l1 port B read issued while one is in flight");
+`endif
+		b_addr   <= address_b;
+		b_cnt    <= extra_b;
+		b_busy   <= 1'b1;
+		rvalid_b <= 1'b0;
+	end else if (b_busy) begin
+		if (b_cnt == 2'd0) begin
+			q_b      <= b_merged;
+			rvalid_b <= 1'b1;
+			b_busy   <= 1'b0;
+		end else
+			b_cnt <= b_cnt - 2'd1;
+	end
+	if (rd_b && extra_b == 2'd0) begin
+		// same cycle-after return as before this milestone, merged at the
+		// request address
+		q_b <= {
+		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[3]) ? wbuf_data[31:24] : mem[address_b][15:8],
+		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[2]) ? wbuf_data[23:16] : mem[address_b][7:0],
+		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[1]) ? wbuf_data[15:8]  : mem[address_b + {{(AW-1){1'b0}}, 1'b1}][15:8],
+		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[0]) ? wbuf_data[7:0]   : mem[address_b + {{(AW-1){1'b0}}, 1'b1}][7:0]
+		};
+		rvalid_b <= 1'b1;
+		b_busy   <= 1'b0;
+	end
+
+	// ---- port B write buffer ----
 	if (!nreset) begin
 		wbuf_valid <= 1'b0;
+		wbuf_hold  <= 2'd0;
 	end else begin
-		// Drain takes priority over accepting a new post: a write already
-		// posted must land before a new one can be buffered (only one
-		// entry deep -- see header, including the exact worst-case wait
-		// this ordering implies).
 		if (wbuf_valid) begin
-			if (wbuf_be[3]) mem[wbuf_addr][15:8]    <= wbuf_data[31:24];
-			if (wbuf_be[2]) mem[wbuf_addr][7:0]     <= wbuf_data[23:16];
-			if (wbuf_be[1]) mem[wbuf_addr_lo][15:8] <= wbuf_data[15:8];
-			if (wbuf_be[0]) mem[wbuf_addr_lo][7:0]  <= wbuf_data[7:0];
-			wbuf_valid        <= 1'b0;
+			if (wbuf_hold == 2'd0) begin
+				if (wbuf_be[3]) mem[wbuf_addr][15:8]    <= wbuf_data[31:24];
+				if (wbuf_be[2]) mem[wbuf_addr][7:0]     <= wbuf_data[23:16];
+				if (wbuf_be[1]) mem[wbuf_addr_lo][15:8] <= wbuf_data[15:8];
+				if (wbuf_be[0]) mem[wbuf_addr_lo][7:0]  <= wbuf_data[7:0];
+				wbuf_valid <= 1'b0;
+			end else
+				wbuf_hold <= wbuf_hold - 2'd1;
 		end else if (wren_b) begin
 			wbuf_valid <= 1'b1;
 			wbuf_addr  <= address_b;
 			wbuf_data  <= data_b;
 			wbuf_be    <= be_b;
+			wbuf_hold  <= extra_w;
 		end
 	end
 
-	q_b <= wbuf_hits_read ? wbuf_merged : {mem[address_b], mem[address_b_lo]};
+	if (!nreset) begin
+		a_busy <= 1'b0; rvalid_a <= 1'b0;
+		b_busy <= 1'b0; rvalid_b <= 1'b0;
+	end
 end
 
 endmodule

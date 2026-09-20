@@ -102,7 +102,7 @@ initial begin
 	dut.u_regfile.areg[0] = 32'h0000_0480;
 	dut.u_regfile.areg[1] = 32'h0000_0480;
 
-	repeat (PROG_WORDS + 30) @(posedge clk);
+	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// Byte $0480 is word index 64; $0484 is 66.
 	if ({dut.u_l1.mem[64], dut.u_l1.mem[65]} !== 32'h1111_2222) begin
