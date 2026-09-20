@@ -12,7 +12,7 @@ top-level-instantiable modules in one unit. tb_ap040_pipe_alu_equiv
 compares ap040_pipe_alu.v against the FSM core's rtl/ap040/ap040_alu.v,
 so it gets those two files and both include directories.
 """
-import argparse, shutil, subprocess, sys
+import argparse, os, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -46,6 +46,13 @@ def main():
                          "write-buffer drain, so the benches prove the pipeline waits for memory")
     args = ap.parse_args()
     work = args.work.resolve(); work.mkdir(parents=True, exist_ok=True)
+    # g++ writes its temporaries to TMPDIR, which on this machine is a 31 GB
+    # tmpfs shared with everything else. A full one makes the compiler exit
+    # with no diagnostic, which this harness reports as a failed bench -- the
+    # same false regression a full /home produced at milestone 90, from a
+    # different disk. The work directory is on real storage and is where the
+    # build already lives, so it holds the temporaries too.
+    env = dict(os.environ, TMPDIR=str(work))
 
     benches = sorted(TB.glob("tb_ap040_pipe_*.v"))
     if args.only:
@@ -59,6 +66,10 @@ def main():
         src, inc = CORE, [RTL]
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
+        elif name.endswith("busredirect"):
+            # ap040_pipe_membus.v standalone, same reason as l1_wbuf above:
+            # the bench drives the wrapper's ports directly.
+            src = [RTL / "ap040_pipe_membus.v"]
         elif name.endswith("dual"):
             # The differential bench instantiates the FSM core beside the
             # pipelined one, so rtl/ap040's whole core comes too.
@@ -90,10 +101,10 @@ def main():
                  # wait scales with it rather than each bench guessing.
                  "-DAP040_PIPE_WAIT_SCALE=" + ("4" if args.slow_l1 else "1"),
                  *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []), str(b)] + [str(s) for s in src],
-                stdout=out, stderr=subprocess.STDOUT).returncode
+                stdout=out, stderr=subprocess.STDOUT, env=env).returncode
             if rc == 0:
                 rc = subprocess.run([str(obj / ("V" + name))], stdout=out,
-                                    stderr=subprocess.STDOUT, timeout=300).returncode
+                                    stderr=subprocess.STDOUT, timeout=300, env=env).returncode
         text = log.read_text()
         ok = rc == 0 and not any(m in text for m in ("FAIL", "ERROR:", "MISMATCH", "%Error"))
         if ok and not args.keep_obj:
