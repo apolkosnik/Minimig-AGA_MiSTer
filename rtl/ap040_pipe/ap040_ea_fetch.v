@@ -302,6 +302,7 @@ module ap040_ea_fetch
 	// read is issued, no output register moves, and the stall propagates
 	// backward as usual. See ap040_execute.v's header for why EX wins.
 	input             port_taken,
+	input             wb_busy,         // WB holds an instruction (the core's exe_valid) -- trace waits for it
 	input             eac_is_bsr,
 	input             eac_is_jsr,
 	input             eac_is_trap,
@@ -410,6 +411,7 @@ module ap040_ea_fetch
 	output reg        eaf_is_rts,
 	output reg        eaf_is_rte,
 	output reg        eaf_is_fmterr,   // RTE format error, vector 14 (milestone 76)
+	output reg        eaf_is_trace,    // instruction trace, vector 9 (milestone 78)
 	// RTE's popped SR (masked, format-$0-frame's word0 high half) --
 	// ap040_execute.v's new commit source for restoring it, same shape as
 	// eaf_sr_snapshot above but this one's a REAL architectural value
@@ -459,14 +461,14 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // A load's address register is the SOURCE (ir[2:0]); a store's is the
 // DESTINATION (ir[11:9]), which resolves to operand_b. One base wire keeps
 // the increment logic below from having to care which it is.
-wire [31:0] an_base = eac_is_store ? operand_b : operand_a;
+wire [31:0] an_base = store_now ? operand_b : operand_a;
 // LINK reuses this as its own write address as well as An's new value.
 wire [31:0] push_addr = operand_b - 32'd4;
 
 // The auto-increment step follows the operand size, with the 68000's stack
 // exception: a BYTE access through A7 steps by two, not one, so the stack
 // pointer stays even. A7 is the address bank's register 7, unified index 15.
-wire        an_is_a7 = (eac_is_store ? eac_dest_reg : eac_src_reg) == 4'd15;
+wire        an_is_a7 = (store_now ? eac_dest_reg : eac_src_reg) == 4'd15;
 //
 // ADDA.W/SUBA.W/CMPA.W (milestone 44) are the first instructions whose
 // memory width and ALU width differ: they read a WORD, sign-extend it and
@@ -524,7 +526,7 @@ wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk))
                          (mvm_fin && mvm_wb);
 wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
-                         eac_is_store ? eac_dest_reg : eac_src_reg;
+                         store_now ? eac_dest_reg : eac_src_reg;
 wire [31:0] an_wr_data = eac_is_link  ? push_addr            :
                          eac_is_unlk  ? (operand_a + 32'd4)  :
                          eac_is_movem ? mvm_addr             : an_new;
@@ -601,7 +603,7 @@ wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_ta
 // cycle the instruction falls through to the ordinary completion path
 // below, which writes An through the second port via an_wr_*.
 wire mvm_fin   = mvm_active && !mvm_any && !mvm_rd_pend;
-wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin;
+wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin && !trace_hold;
 
 assign rf3_we   = mvm_rd_pend;
 assign rf3_addr = mvm_rd_reg;
@@ -727,7 +729,7 @@ wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
 // dynamic ones pushed format $0; tb_ap040_pipe_integration4.v's handlers
 // read the frames and said so.
 wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
-                       eac_is_trapcc_trap;
+                       eac_is_trapcc_trap || eac_is_trace;
 
 // The L1 always returns a full longword on port B (address_b is the HIGH
 // word, the low word implicitly address_b+1), so a sized load is a lane
@@ -755,7 +757,19 @@ endfunction
 
 wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
 
-wire mem_issue    = eac_valid && eac_is_mem_src && !mem_pending && !port_taken;
+// The flush cycle (milestone 78). The instruction behind an exception entry
+// waits in EA-calc through the frame push and moves in here the cycle the
+// entry departs -- which is the cycle EX raises flush for it. The output
+// block ignores that cycle (flush has priority there), but the combinational
+// side effects did not: a store wrote, a push wrote, and a TRAP's own beat 0
+// went out at ISP-8 before the first entry's A7 had committed -- on top of
+// the first frame. tb_ap040_pipe_trace.v found it because tracing makes
+// "exception entry, then another instruction that faults" the common case;
+// tb_ap040_pipe_excexc.v shows it without trace. Everything that reaches
+// the L1 from this stage on the instruction's behalf is gated by `live`.
+wire live         = eac_valid && !flush;
+
+wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold;
 // ...unless this instruction has just turned out to be an exception. For a
 // memory-source fault the value that CAUSES the fault is the one the load
 // just returned, so both conditions are true in the same cycle -- and the
@@ -773,8 +787,8 @@ wire mem_complete = mem_pending && !exc_active;
 // pushes at all, per ap040_core.v's own S_JSR1 -- it goes straight to the
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
-wire eac_is_push  = eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link || eac_is_pea;
-wire wr_stall     = eac_valid && (eac_is_push || eac_is_store) && (l1_wr_busy || port_taken);
+wire eac_is_push  = (eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link || eac_is_pea) && !trace_hold;
+wire wr_stall     = live && (eac_is_push || store_now) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
 // sequences the frame's writes and the vector-table read one at a time;
@@ -808,9 +822,39 @@ wire fmterr_now;
 reg  exc_pend_fmterr;
 wire eac_is_fmterr = fmterr_now || exc_pend_fmterr;
 
-wire eac_is_exc    = eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-                      eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr;
-wire exc_active    = eac_valid && eac_is_exc;
+// Instruction trace, T1 (milestone 78). The traced instruction is the one
+// that LEFT this stage with T1 set in its start SR (trace_arm/trace_pc are
+// written at every departure in the output block). The exception is
+// delivered on the instruction that FOLLOWS it: that instruction is held
+// here until EX and WB have drained -- so the stacked SR and the stack
+// pointer are the real registers, after the traced instruction's own writes
+// -- and is then turned into a format-$2 vector-9 entry whose PC field is
+// its own address and whose address field is the traced instruction's. Its
+// own semantics never happen (own_exc, and the !trace_hold gates on
+// mem_issue, the push/store write, MOVEM and the RTE pop): the frame's PC
+// brings it back after the handler's RTE. A traced TRAP/CHK therefore gets
+// its trace on the handler's first instruction, after the exception
+// processing, as on the 68020 and later. A traced MOVE to SR that clears T1
+// is still traced, with T1 clear in the stacked SR, so the handler's RTE
+// returns with tracing off.
+reg         trace_arm;
+reg  [31:0] trace_pc;
+reg         exc_pend_trace;
+wire trace_hold   = eac_valid && trace_arm;
+wire trace_take   = trace_hold && !eaf_valid && !wb_busy && !stall_in;
+wire eac_is_trace = trace_take || exc_pend_trace;
+wire own_exc      = !trace_hold;   // the held instruction's own faults are not taken
+// A held store is not a store: it selects nothing -- address, byte enables,
+// data, stall, write enable -- while the trace entry's own beats go out.
+// eac_is_store outranks exc_writing in l1_addr_word and st_be assumes the
+// store's size, so without this the frame's beats went to the store's
+// address with the store's lanes.
+wire store_now    = eac_is_store && !trace_hold;
+
+wire eac_is_exc    = eac_is_trace ||
+                     (own_exc && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
+                                  eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr));
+wire exc_active    = live && eac_is_exc;
 wire exc_writing   = exc_active && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && eac_is_fmt2));
@@ -837,14 +881,14 @@ wire exc_stall     = exc_active && !exc_vec_done;
 // The format nibble is judged when dword1 arrives (ret_fmt_* / fmterr_now,
 // below the sequencer's wires): $0 pops eight bytes, $2 and $3 twelve, and
 // anything else is a format error (milestone 76).
-wire eac_is_rte_active = eac_is_rte && !eac_is_priv;
+wire eac_is_rte_active = eac_is_rte && !eac_is_priv && !trace_hold;
 
 localparam RET_BEAT0 = 1'd0, RET_BEAT1 = 1'd1;
 reg        ret_ph;
 reg        ret_pending;   // this beat's read is in flight; l1_q_b valid NEXT cycle -- same shape as mem_pending
 reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
 
-wire ret_active   = eac_valid && eac_is_rte_active;
+wire ret_active   = live && eac_is_rte_active;
 wire ret_issue    = ret_active && !ret_pending;
 wire ret_complete = ret_active && ret_pending;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
@@ -869,7 +913,8 @@ wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
 wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
 assign fmterr_now = ret_done && !ret_fmt_ok;
 
-assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken || mvm_stall;
+assign eaf_stall = stall_in || mem_issue || wr_stall || exc_stall || ret_stall || port_taken || mvm_stall ||
+                   (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
 // faulting instruction's own eac_dest_reg says (MOVEC's read direction
@@ -933,7 +978,7 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 wire [31:0] exc_sp_bank    = sr_in[12] ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
 wire [31:0] exc_frame_size = eac_is_fmt2 ? 32'd12 : 32'd8;
 wire [31:0] exc_new_sp     = exc_sp_bank - exc_frame_size;
-wire [15:0] exc_sr_word    = eac_is_chk_trap
+wire [15:0] exc_sr_word    = (eac_is_chk_trap && !eac_is_trace)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}
                               : sr_in;
@@ -959,10 +1004,12 @@ wire [15:0] exc_sr_word    = eac_is_chk_trap
 //         call site. This is also why JSR's push never happens for this
 //         case (see eac_is_push above) -- there is no return address to
 //         protect if the call itself never completes.
-wire [31:0] exc_pc_field   = eac_is_jmp_odd ? (eac_pc + 32'd2) :
+wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
+                              eac_is_jmp_odd ? (eac_pc + 32'd2) :
                               eac_is_jsr_odd ? ea_target :
                               (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc : eac_next_pc;
-wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
+wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
+                              eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
                               eac_is_divzero ? 8'd5 :
                               eac_is_chk_trap ? 8'd6 :
@@ -975,7 +1022,8 @@ wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'
 // fields above); for CHK, TRAPcc and zero divide it is the faulting
 // instruction's own address (ap040_core.v passes pc_i), which is what a
 // handler needs to find the instruction its PC field has already stepped past.
-wire [31:0] exc_addr_field = eac_is_addrerr ? {ea_target[31:1], 1'b0} : eac_pc;
+wire [31:0] exc_addr_field = eac_is_trace   ? trace_pc :
+                             eac_is_addrerr ? {ea_target[31:1], 1'b0} : eac_pc;
 
 // Beat0 @ exc_new_sp: SR, then PC's high word. Beat1 @ exc_new_sp+4: PC's
 // low word, then the format/vector-offset word. Beat2 @ exc_new_sp+8
@@ -1007,7 +1055,7 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
 wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
-                            eac_is_store ? (eac_is_abs    ? eac_imm :
+                            store_now ? (eac_is_abs    ? eac_imm :
                                                        eac_is_predec ? (an_base - an_step)
                                                                      : an_base) :
                             eac_is_push  ? push_addr :
@@ -1016,17 +1064,17 @@ wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             ret_active  ? ret_addr :
                                                                   ea_target;
 assign l1_addr_b = (l1_addr_word - PC_RESET) >> 1;
-assign l1_wren_b = (eac_valid && (eac_is_push || eac_is_store)) || exc_writing || mvm_st_want;
+assign l1_wren_b = (live && (eac_is_push || store_now)) || exc_writing || mvm_st_want;
 // A sized store places its data in the lane the address names and enables
 // only that lane. Lane 3 is the longword's first byte, matching
 // ap040_pipe_l1.v's be_b. Everything that is not a sized store -- pushes,
 // exception frames, Long stores -- asserts all four and is unaffected.
 wire [1:0]  st_off = l1_addr_word[1:0];
-wire [3:0]  st_be  = (!eac_is_store)             ? 4'b1111 :
+wire [3:0]  st_be  = (!store_now)             ? 4'b1111 :
                      (eac_size == `AP040_SZ_L)   ? 4'b1111 :
                      (eac_size == `AP040_SZ_W)   ? 4'b1100 :
                      st_off[0]                   ? 4'b0100 : 4'b1000;
-wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !eac_is_store) ? operand_a :
+wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !store_now) ? operand_a :
                      (eac_size == `AP040_SZ_W) ? {operand_a[15:0], 16'd0} :
                      st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
                                : {operand_a[7:0], 24'd0};
@@ -1039,7 +1087,7 @@ assign l1_be_b   = mvm_active ? (mvm_word ? 4'b1100 : 4'b1111) : st_be;
 // LINK pushes the old An, and PEA pushes the effective address itself.
 assign l1_data_b = mvm_st_want  ? (mvm_word ? {operand_a[15:0], 16'd0} : operand_a) :
                    exc_writing  ? exc_wdata :
-                   eac_is_store ? st_dat  :
+                   store_now ? st_dat  :
                    eac_is_pea   ? ea_target :
                    eac_is_link  ? operand_a : eac_next_pc;
 
@@ -1088,6 +1136,7 @@ always @(posedge clk) begin
 		eaf_is_rts     <= 1'b0;
 		eaf_is_rte     <= 1'b0;
 		eaf_is_fmterr  <= 1'b0;
+		eaf_is_trace   <= 1'b0;
 		eaf_rte_sr_data<= 16'h0;
 		eaf_cond       <= 4'h0;
 		mem_pending    <= 1'b0;
@@ -1105,6 +1154,9 @@ always @(posedge clk) begin
 		exc_pend_chk_n   <= 1'b0;
 		exc_pend_trapcc  <= 1'b0;
 		exc_pend_fmterr  <= 1'b0;
+		exc_pend_trace   <= 1'b0;
+		trace_arm        <= 1'b0;
+		trace_pc         <= 32'h0;
 		exc_ph          <= EXC_BEAT0;
 		exc_vec_pending <= 1'b0;
 		ret_ph          <= RET_BEAT0;
@@ -1127,6 +1179,9 @@ always @(posedge clk) begin
 		if (exc_vec_done)     exc_pend_fmterr <= 1'b0;
 		else if (fmterr_now)  exc_pend_fmterr <= 1'b1;
 
+		if (exc_vec_done)     exc_pend_trace <= 1'b0;
+		else if (trace_take)  exc_pend_trace <= 1'b1;
+
 		if (flush) begin
 			eaf_valid       <= 1'b0;
 			mem_pending     <= 1'b0;
@@ -1136,6 +1191,12 @@ always @(posedge clk) begin
 			exc_pend_chk     <= 1'b0;
 			exc_pend_trapcc  <= 1'b0;
 			exc_pend_fmterr  <= 1'b0;
+			exc_pend_trace   <= 1'b0;
+			// trace_arm is NOT cleared by a flush: the flush that follows a
+			// traced branch or a traced exception entry kills the wrong-path
+			// or unreached instruction here, and the trace is still owed to
+			// whichever instruction arrives next. It is cleared only when the
+			// trace entry itself departs (exc_vec_done below).
 			// Abandon a mid-flight exception sequence the same way an
 			// abandoned mem_pending read is: nothing downstream of a flush
 			// consumes what was in progress, but exc_ph/exc_vec_pending
@@ -1156,6 +1217,8 @@ always @(posedge clk) begin
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;
+				trace_arm      <= sr_in[15];   // traced if T1 was set when it ran
+				trace_pc       <= eac_pc;
 				// A read-modify-write crosses its operands over here. The
 				// ALU computes b op a, and SUB.L D0,(A0) must be memory
 				// MINUS D0 -- so the loaded value has to be b, not a, which
@@ -1203,6 +1266,7 @@ always @(posedge clk) begin
 				eaf_is_rts     <= eac_is_rts;
 				eaf_is_rte     <= 1'b0;
 				eaf_is_fmterr  <= 1'b0;
+				eaf_is_trace   <= 1'b0;
 				eaf_sr_snapshot<= sr_in;
 				eaf_cond       <= eac_cond;
 				mem_pending    <= 1'b0;
@@ -1228,7 +1292,13 @@ always @(posedge clk) begin
 				// Bubbling ahead of it would drop it on the floor, since
 				// next cycle l1_q_b holds whatever EX's store put there.
 				eaf_valid       <= 1'b0;
-			end else if (eac_valid && eac_is_movem && !mvm_fin) begin
+			end else if (trace_hold && !exc_active) begin
+				// The instruction after a traced one waits here, doing
+				// nothing, until EX and WB are empty; then trace_take turns
+				// it into the trace entry (exc_writing, above in this chain
+				// on the next pass).
+				eaf_valid       <= 1'b0;
+			end else if (eac_valid && eac_is_movem && !mvm_fin && !trace_hold) begin
 				// Start, then one beat per cycle. eac_* is frozen by
 				// mvm_stall throughout, so operand_a still reads An on the
 				// starting cycle, and the mask and base are latched once.
@@ -1329,7 +1399,8 @@ always @(posedge clk) begin
 				// register, and the exception's result -- the new supervisor
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
-				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr) ? 4'd15 : eac_dest_reg;
+				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
+				                    eac_is_trace) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -1340,10 +1411,16 @@ always @(posedge clk) begin
 				// $00000000.
 				eaf_operand_a  <= l1_q_b;
 				eaf_operand_b  <= exc_new_sp;
+				// An exception entry is the traced instruction's completion
+				// (a traced TRAP is traced on its handler's first
+				// instruction), except the trace entry itself: the SR it
+				// stacks still has T1, but the handler starts with it clear.
+				trace_arm      <= sr_in[15] && !eac_is_trace;
+				trace_pc       <= eac_pc;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= eac_shcnt;
-				eaf_writes_an  <= an_wr_any;
+				eaf_writes_an  <= an_wr_any && own_exc;   // a trace entry runs none of the held instruction
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
@@ -1364,17 +1441,17 @@ always @(posedge clk) begin
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
-				eaf_is_chk     <= eac_is_chk_trap;
-				eaf_is_trapcc     <= eac_is_trapcc_trap;
+				eaf_is_chk     <= eac_is_chk_trap && own_exc;
+				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
-				eaf_is_trap    <= eac_is_trap;
-				eaf_is_illegal <= eac_is_illegal;
-				eaf_is_priv    <= eac_is_priv;
-				eaf_is_addrerr <= eac_is_addrerr;
-				eaf_is_divzero <= eac_is_divzero;
+				eaf_is_trap    <= eac_is_trap && own_exc;
+				eaf_is_illegal <= eac_is_illegal && own_exc;
+				eaf_is_priv    <= eac_is_priv && own_exc;
+				eaf_is_addrerr <= eac_is_addrerr && own_exc;
+				eaf_is_divzero <= eac_is_divzero && own_exc;
 				// The original (now-suppressed) instruction's own semantics
 				// must not reach EX -- a MOVEC/MOVE-to-SR that just faulted
 				// is NOT also still a MOVEC/MOVE-to-SR as far as
@@ -1394,6 +1471,7 @@ always @(posedge clk) begin
 				eaf_is_rts     <= 1'b0;
 				eaf_is_rte     <= 1'b0;
 				eaf_is_fmterr  <= eac_is_fmterr;
+				eaf_is_trace   <= eac_is_trace;
 				// The value ap040_execute.v's exception-masking arithmetic
 				// needs -- captured HERE (this stage's own already-forwarded
 				// read), not re-read live one cycle later there, to avoid a
@@ -1453,6 +1531,8 @@ always @(posedge clk) begin
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
+				trace_arm       <= sr_in[15];   // traced if T1 was set BEFORE the RTE, whatever it restores
+				trace_pc        <= eac_pc;
 				eaf_operand_b   <= operand_a +
 				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
 				eaf_alu_op      <= eac_alu_op;
@@ -1496,6 +1576,7 @@ always @(posedge clk) begin
 				eaf_is_rts      <= 1'b0;
 				eaf_is_rte      <= 1'b1;
 				eaf_is_fmterr  <= 1'b0;
+				eaf_is_trace   <= 1'b0;
 				// Popped SR, masked -- ap040_execute.v's new commit source
 				// for restoring it (exe_writes_sr/exe_sr_data) -- see its
 				// header for why this needs its own field rather than
@@ -1514,6 +1595,10 @@ always @(posedge clk) begin
 				mvm_active     <= 1'b0;
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
+				if (eac_valid) begin   // a bubble departing here must not drop a pending trace
+					trace_arm  <= sr_in[15];
+					trace_pc   <= eac_pc;
+				end
 				eaf_next_pc    <= eac_next_pc;
 				eaf_dest_reg   <= eac_dest_reg;
 				// JMP/JSR: route the computed EA itself, not the register
@@ -1585,6 +1670,7 @@ always @(posedge clk) begin
 				eaf_is_rts     <= 1'b0;
 				eaf_is_rte     <= 1'b0;
 				eaf_is_fmterr  <= 1'b0;
+				eaf_is_trace   <= 1'b0;
 				eaf_sr_snapshot<= sr_in;
 				eaf_cond       <= eac_cond;
 			end

@@ -226,7 +226,7 @@ wire  [5:0] eac_shcnt;
 wire        eac_src_a_is_imm, eac_writes_reg, eac_writes_ccr;
 wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
 wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr, eac_is_chk, eac_is_trapcc;
-wire        eaf_is_trapcc, eaf_is_fmterr;
+wire        eaf_is_trapcc, eaf_is_fmterr, eaf_is_trace;
 wire        eaf_is_chk;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
 wire        eaf_is_pea;
@@ -865,9 +865,11 @@ ap040_ea_fetch #(
 	.eaf_is_chk       (eaf_is_chk),
 	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_fmterr    (eaf_is_fmterr),
+	.eaf_is_trace     (eaf_is_trace),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
+	.wb_busy          (exe_valid),
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
@@ -1001,6 +1003,7 @@ ap040_execute u_ex
 	.eaf_is_chk       (eaf_is_chk),
 	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_fmterr    (eaf_is_fmterr),
+	.eaf_is_trace     (eaf_is_trace),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),

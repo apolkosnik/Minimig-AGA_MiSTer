@@ -130,6 +130,7 @@ module ap040_execute
 	input             eaf_div_signed,
 	input             eaf_is_trapcc,
 	input             eaf_is_fmterr,
+	input             eaf_is_trace,
 	input             eaf_is_chk,
 	input             eaf_is_immsr,
 	input             eaf_immsr_to_sr,
@@ -468,7 +469,8 @@ wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) :
 // read correctly and then nothing redirects, so the instruction after the
 // divide runs as if nothing had happened.
 wire exc_reaching_ex = eaf_is_trap || eaf_is_illegal || eaf_is_priv || eaf_is_addrerr ||
-                        eaf_is_divzero || eaf_is_chk || eaf_is_trapcc || eaf_is_fmterr;
+                        eaf_is_divzero || eaf_is_chk || eaf_is_trapcc || eaf_is_fmterr ||
+                        eaf_is_trace;
 
 // RTS/RTE (milestone 16) join the SAME unconditional-redirect club one
 // more time: RTS's popped PC (routed into eaf_operand_a exactly like
