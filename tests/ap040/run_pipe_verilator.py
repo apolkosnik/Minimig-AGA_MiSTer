@@ -12,7 +12,7 @@ top-level-instantiable modules in one unit. tb_ap040_pipe_alu_equiv
 compares ap040_pipe_alu.v against the FSM core's rtl/ap040/ap040_alu.v,
 so it gets those two files and both include directories.
 """
-import argparse, subprocess, sys
+import argparse, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -33,6 +33,14 @@ def main():
     ap.add_argument("--work", type=Path, default=Path("/tmp/ap040-pipe"))
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--only", help="comma-separated bench names")
+    ap.add_argument("--keep-obj", action="store_true",
+                    help="keep every bench's Verilator build directory. The default deletes "
+                         "one as soon as its bench PASSES: a full suite leaves about 10 GB of "
+                         "precompiled headers and object files behind otherwise, ninety "
+                         "milestones of that filled a 921 GB disk, and a full disk fails the "
+                         "g++ step with no diagnostic at all -- which reads as a suite-wide "
+                         "RTL regression. A FAILING bench keeps its directory either way, "
+                         "since that is when the build and the binary are worth having.")
     ap.add_argument("--slow-l1", action="store_true",
                     help="build with AP040_PIPE_L1_SLOW: 0-3 extra cycles on every L1 read and "
                          "write-buffer drain, so the benches prove the pipeline waits for memory")
@@ -88,6 +96,8 @@ def main():
                                     stderr=subprocess.STDOUT, timeout=300).returncode
         text = log.read_text()
         ok = rc == 0 and not any(m in text for m in ("FAIL", "ERROR:", "MISMATCH", "%Error"))
+        if ok and not args.keep_obj:
+            shutil.rmtree(obj, ignore_errors=True)
         (passed if ok else failed).append(name)
         print(f"  {'ok  ' if ok else 'FAIL'} {name}", flush=True)
 
