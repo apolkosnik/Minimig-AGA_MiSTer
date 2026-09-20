@@ -1661,6 +1661,27 @@ real MMU or bus-error path arrives, which is the same boundary
    bench covers a memory source. A register-only or immediate-only bench
    does not test the operand routing at all.
 
+   ### Milestone 67: MOVEM.W
+
+   `ir[6]` is the SIZE, so the shapes had pinned it and only the Long forms
+   decoded. Widening them is most of the decode work; the behaviour worth
+   testing is on the LOAD side, where MOVEM.W **sign-extends** each word
+   into the whole 32-bit register rather than preserving the upper half.
+
+   `$8001` is negative as a word and the destination starts as `AAAA8001`,
+   so the three candidate answers are all distinct -- `FFFF8001`
+   sign-extended, `00008001` zero-extended, `AAAA8001` upper half kept.
+   Verified by zero-extending, which gives exactly `00008001`.
+
+   Two things the bench had to be careful about:
+
+   - A7 returning to where it started does NOT prove the step was two: two
+     registers at four bytes each also balance. What proves it is the two
+     words landing in ADJACENT slots.
+   - The MOVEM.**L** bench is untouched by the sign-extension mutation, so
+     the Word form needed its own bench -- the same coverage-per-mode point
+     milestone 65 turned into a rule.
+
    ### Milestone 66: auditing every operand_a use
 
    Three milestones in a row turned on one root cause, so it was worth

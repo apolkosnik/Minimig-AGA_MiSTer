@@ -317,6 +317,7 @@ module ap040_decode
 	output reg        id_div_signed,
 	output reg        id_is_movem,
 	output reg        id_movem_dir,
+	output reg        id_movem_word,
 	output reg        id_is_unlk,
 	output reg        id_is_bsr,
 	output reg        id_is_jsr,
@@ -656,8 +657,14 @@ wire is_div_imm = div_shape && (if_opcode[5:0] == 6'b111100);
 wire is_muldiv_imm = is_mul_imm || is_div_imm;
 wire is_muldiv_imm_signed = is_muldiv_imm && (if_opcode[8] == 1'b1);
 
-wire is_movem_st = (if_opcode[15:3] == 13'b0100100011100);
-wire is_movem_ld = (if_opcode[15:3] == 13'b0100110011011);
+// ir[6] is the SIZE, so it must not be pinned by the shape: 0 is Word and
+// 1 is Long (milestone 67). MOVEM.W's load direction SIGN-EXTENDS each word
+// into the whole 32-bit register rather than preserving the upper half,
+// which is the behaviour worth testing -- the store direction simply writes
+// the low half.
+wire is_movem_st = (if_opcode[15:7] == 9'b010010001) && (if_opcode[5:3] == 3'b100);
+wire is_movem_ld = (if_opcode[15:7] == 9'b010011001) && (if_opcode[5:3] == 3'b011);
+wire is_movem_w  = (if_opcode[6] == 1'b0);
 wire is_movem    = is_movem_st || is_movem_ld;
 
 wire is_link = (if_opcode[15:3] == 13'b0100111001010);
@@ -1527,6 +1534,7 @@ reg         held_is_alu_disp;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
 reg         held_is_movem;      // the eleventh kind: MOVEM.L
 reg         held_movem_dir;
+reg         held_movem_word;
 reg         held_imm_div;       // this immediate form is a DIVIDE, not an ALU op
 reg         held_imm_divs;
 reg         held_lea_push;      // this LEA-shaped form pushes instead of writing An
@@ -1633,6 +1641,7 @@ always @(posedge clk) begin
 		id_div_signed   <= 1'b0;
 		id_is_movem     <= 1'b0;
 		id_movem_dir    <= 1'b0;
+		id_movem_word   <= 1'b0;
 		id_is_unlk      <= 1'b0;
 		id_is_bsr       <= 1'b0;
 		id_is_jsr       <= 1'b0;
@@ -1681,6 +1690,7 @@ always @(posedge clk) begin
 		held_is_link    <= 1'b0;
 		held_is_movem   <= 1'b0;
 		held_movem_dir  <= 1'b0;
+		held_movem_word <= 1'b0;
 		held_is_bsr     <= 1'b0;
 		held_is_jsr     <= 1'b0;
 		held_is_movec   <= 1'b0;
@@ -1821,6 +1831,7 @@ always @(posedge clk) begin
 					id_div_signed   <= held_is_imm && held_imm_divs;
 					id_is_movem     <= held_is_movem;
 					id_movem_dir    <= held_movem_dir;
+					id_movem_word   <= held_movem_word;
 					id_is_unlk      <= 1'b0;
 					id_is_bsr       <= held_is_bsr;
 					id_is_jsr       <= held_is_jsr;
@@ -1923,6 +1934,7 @@ always @(posedge clk) begin
 				held_is_link  <= is_link;
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
+				held_movem_word<= is_movem_w;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
 				held_is_jsr   <= is_jsr_disp;
 				held_is_movec <= is_movec_opcode;
@@ -2069,6 +2081,7 @@ always @(posedge clk) begin
 				id_div_signed   <= if_valid && is_divs;
 				id_is_movem     <= 1'b0;
 				id_movem_dir    <= 1'b0;
+				id_movem_word   <= 1'b0;
 				id_is_unlk      <= if_valid && is_unlk;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;

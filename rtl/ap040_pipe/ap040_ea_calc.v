@@ -102,6 +102,7 @@ module ap040_ea_calc
 	input             id_div_signed,
 	input             id_is_movem,
 	input             id_movem_dir,
+	input             id_movem_word,
 	input             id_is_chk,
 	input             id_is_immsr,
 	input             id_immsr_to_sr,
@@ -150,6 +151,7 @@ module ap040_ea_calc
 	output reg        eac_div_signed,
 	output reg        eac_is_movem,
 	output reg        eac_movem_dir,
+	output reg        eac_movem_word,
 	output reg        eac_is_chk,
 	output reg        eac_is_immsr,
 	output reg        eac_immsr_to_sr,
@@ -201,6 +203,7 @@ always @(posedge clk) begin
 		eac_div_signed   <= 1'b0;
 		eac_is_movem     <= 1'b0;
 		eac_movem_dir    <= 1'b0;
+		eac_movem_word   <= 1'b0;
 		eac_is_chk       <= 1'b0;
 		eac_is_immsr     <= 1'b0;
 		eac_immsr_to_sr  <= 1'b0;
@@ -250,6 +253,7 @@ always @(posedge clk) begin
 			eac_div_signed   <= id_div_signed;
 			eac_is_movem     <= id_is_movem;
 			eac_movem_dir    <= id_movem_dir;
+			eac_movem_word   <= id_movem_word;
 			eac_is_chk       <= id_is_chk;
 			eac_is_immsr     <= id_is_immsr;
 			eac_immsr_to_sr  <= id_immsr_to_sr;

@@ -283,6 +283,7 @@ module ap040_ea_fetch
 	input             eac_div_signed,
 	input             eac_is_movem,
 	input             eac_movem_dir,
+	input             eac_movem_word,
 	input             eac_is_chk,
 	input             eac_is_immsr,
 	input             eac_immsr_to_sr,
@@ -539,6 +540,7 @@ reg         mvm_active;
 reg  [15:0] mvm_mask;
 reg  [31:0] mvm_addr;
 reg         mvm_dir;        // 1 = memory -> registers
+reg         mvm_word;       // 1 = Word transfers, sign-extended on load
 reg         mvm_rd_pend;    // an address was driven last cycle; data is here now
 reg   [3:0] mvm_rd_reg;
 
@@ -562,7 +564,11 @@ wire  [3:0] mvm_bit  = mvm_mask[0]  ? 4'd0 :
                                      4'd0;
 wire [15:0] mvm_onehot = (16'd1 << mvm_bit);
 wire  [3:0] mvm_reg  = mvm_dir ? mvm_bit : (4'd15 - mvm_bit);
-wire [31:0] mvm_st_addr = mvm_addr - 32'd4;
+// Word transfers step by two and occupy the half-word the address names --
+// which for this L1 is the HIGH half of the longword pair, lanes 3 and 2,
+// exactly as a sized store already does.
+wire [31:0] mvm_step    = mvm_word ? 32'd2 : 32'd4;
+wire [31:0] mvm_st_addr = mvm_addr - mvm_step;
 
 // Wanting the port and getting it are separate, the same split exc_writing
 // and exc_beat_ack already use: wren_b is asserted while the request
@@ -579,7 +585,10 @@ wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin;
 
 assign rf3_we   = mvm_rd_pend;
 assign rf3_addr = mvm_rd_reg;
-assign rf3_data = l1_q_b;
+// A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
+// preserve the upper half, it replaces it with the sign. That is the one
+// behaviour separating MOVEM.W's load from a pair of half-width writes.
+assign rf3_data = mvm_word ? {{16{l1_q_b[31]}}, l1_q_b[31:16]} : l1_q_b;
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
@@ -920,13 +929,13 @@ wire [31:0] st_dat = (eac_size == `AP040_SZ_L || !eac_is_store) ? operand_a :
                      st_off[0] ? {8'd0, operand_a[7:0], 16'd0}
                                : {operand_a[7:0], 24'd0};
 
-assign l1_be_b   = mvm_active ? 4'b1111 : st_be;
+assign l1_be_b   = mvm_active ? (mvm_word ? 4'b1100 : 4'b1111) : st_be;
 // operand_a is port A, which mvm_st_want has pointed at the register this
 // beat stores -- so the same wire that carries a LINK's pushed An carries
 // each MOVEM register in turn.
 // Three different things ride the same push: BSR pushes a return address,
 // LINK pushes the old An, and PEA pushes the effective address itself.
-assign l1_data_b = mvm_st_want  ? operand_a :
+assign l1_data_b = mvm_st_want  ? (mvm_word ? {operand_a[15:0], 16'd0} : operand_a) :
                    exc_writing  ? exc_wdata :
                    eac_is_store ? st_dat  :
                    eac_is_pea   ? ea_target :
@@ -982,6 +991,7 @@ always @(posedge clk) begin
 		mvm_mask       <= 16'h0;
 		mvm_addr       <= 32'h0;
 		mvm_dir        <= 1'b0;
+		mvm_word       <= 1'b0;
 		mvm_rd_pend    <= 1'b0;
 		mvm_rd_reg     <= 4'h0;
 		exc_pend_divzero <= 1'b0;
@@ -1109,6 +1119,7 @@ always @(posedge clk) begin
 				if (!mvm_active) begin
 					mvm_active  <= 1'b1;
 					mvm_dir     <= eac_movem_dir;
+					mvm_word    <= eac_movem_word;
 					mvm_mask    <= eac_imm[15:0];
 					mvm_addr    <= operand_a;
 					mvm_rd_pend <= 1'b0;
@@ -1117,7 +1128,7 @@ always @(posedge clk) begin
 					// Address driven this cycle; l1_q_b has it next, and
 					// rf3_we commits it then.
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
-					mvm_addr    <= mvm_addr + 32'd4;
+					mvm_addr    <= mvm_addr + mvm_step;
 					mvm_rd_pend <= 1'b1;
 					mvm_rd_reg  <= mvm_reg;
 				end else if (mvm_rd_pend) begin
