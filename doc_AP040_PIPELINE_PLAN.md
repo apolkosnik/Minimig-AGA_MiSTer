@@ -1688,6 +1688,90 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 80: the pipeline waits for memory
+
+   First step of the bus axis. Until now every L1 access completed in one
+   cycle by construction, and every requester was built on that: the
+   instruction fetcher registered `if_valid` at the request, decode's
+   multi-word gather counted cycles, and EA-fetch's four readers (operand
+   load, vector fetch, RTE pop, MOVEM) each took `l1_q_b` the cycle after
+   driving the address. Nothing outside the L1 model can be attached to a
+   pipeline like that, so this milestone makes memory latency a variable
+   before anything is behind it.
+
+   **The L1 grows a request/return handshake on both ports**: `en_a`/
+   `rvalid_a`, `rd_b`/`rvalid_b`, data and valid held until the next
+   accepted request on that port. Port A restarts on a new request (a
+   redirect abandons the fetch in flight); port B allows one outstanding
+   read. In the normal build every read still returns the cycle after its
+   request and the write buffer drains the cycle after a post -- the timing
+   every bench was written against, and the fast suite is unchanged. With
+   `AP040_PIPE_L1_SLOW` a deterministic xorshift adds 0-3 cycles to every
+   read and every drain, and the SAME 86 benches run again
+   (`run_pipe_verilator.py --slow-l1`; `PIPE_HARNESS_ARGS=--slow-l1` for the
+   control and mutation helpers). Every bench's end-of-program wait is now
+   `repeat (N * AP040_PIPE_WAIT_SCALE)`, 1 normally and 4 in the slow
+   build, because a program takes about three times as long there.
+
+   **What the slow build found, in order, on its first seven benches:**
+
+   1. EA-fetch's chain had no state for "read in flight": with the return a
+      cycle late the chain fell through to the default branch and DEPARTED
+      the instruction with no data. Three wait branches now hold a bubble
+      (operand load, vector fetch, RTE pop); MOVEM's `rd_pend` waits for the
+      return before `rf3_we`. Two orderings I got wrong on the first pass:
+      the vector wait sat before `exc_vec_done` in the chain and won forever
+      once the vector returned, and the load wait pre-empted an active
+      exception on a faulting memory-source load (its data HAS returned;
+      `mem_pending` stays set through the entry).
+   2. A misdiagnosis, kept because the mutation table caught it. Seeing
+      opcode words land in data registers, I first blamed a lost decode
+      redirect (a one-cycle pulse arriving while a fetch was in flight) and
+      added `|| redirect_valid` to the fetch request. The real cause was
+      item 3. The mutation that removed the term passed the slow build,
+      and the reason is a two-line argument: decode redirects only on a
+      word it can see, `if_valid` implies `rvalid_a` implies `can_issue`,
+      so the redirected fetch always issued. The term is gone
+      (`2e445fa8c`), and the comment where it stood says why.
+   3. Decode's gather consumed a word every unstalled cycle whether or not
+      one had arrived: `MOVE.L #$64,D0` executed as `#$203C203C`, the held
+      opcode taken twice as its own immediate. The whole decode step is now
+      gated on `if_valid`, and `redirect_from_gather` too, so a bubble
+      mid-gather neither counts nor redirects on a stale word.
+   4. A store from EX into a write buffer still draining was fine after
+      all -- EX already holds `ex_st_req` under `rmw_wait` until the buffer
+      accepts -- but the one-cycle drain had never once exercised that wait.
+
+   None of these is visible in the normal build, which is the thesis of the
+   milestone and of the mutation table below.
+
+   Every mutation below passes the normal build's benches. That is the
+   finding of the milestone as much as the fixes are: a one-cycle memory
+   cannot see any of them.
+
+   | mutation (slow build) | result |
+   |---|---|
+   | operand-load wait branch removed | FAIL -- aluax, 3 checks: a `(An)+` load departs twice and increments An twice; benches without a postincrement load pass, the stale departure's register write being overwritten by the right one |
+   | vector-fetch wait branch removed | FAIL -- integration4, 2 checks |
+   | RTE-pop wait branch removed | FAIL -- integration4, USP $05F4 for $0500: the RTE departs twice; fmterr, rte_fmt2 pass |
+   | `mem_complete` ignores `rvalid_b` | FAIL -- 2 of 4 benches, 3 checks each |
+   | decode consumes on a fetch bubble | FAIL -- every bench in the set |
+   | MOVEM `rf3_we` ignores `rvalid_b` | **passes** -- unobservable: the pending-clear is still gated, so the stale write is followed by the right one to the same register before anything reads it; kept because a forwarded read of that register in between would see the stale word once a real bus makes the wait long |
+   | `\|\| redirect_valid` in the fetch request | **passes** -- redundant, see item 2; removed |
+   | full suite, normal build | 86/86 |
+   | full suite, slow build | 86/86 |
+
+   The rule this adds: **a milestone that changes timing needs a build in
+   which the timing is different**, or its benches test the old timing
+   twice. The slow build stays; every later memory-side change runs the
+   suite in both.
+
+   **Fit, same flow (of `fdb2537cc`):** 5,275 ALMs (5,220 after milestone
+   79), 7,197 combinational ALUTs (7,115), 2,250 registers (2,211), Fmax
+   40.80 MHz (40.55), setup slack at 25 ns +0.488 ns (+0.342), TNS 0. The
+   40 worst paths are the same spine; neither port's valid nor `if_pend`
+   is on any of them. The handshake cost 55 ALMs and 39 registers.
+
    ### Milestone 79: T0, trace on change of flow
 
    With T1T0 = 01 the trace arm is taken only by the instructions the
