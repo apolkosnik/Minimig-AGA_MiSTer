@@ -1688,6 +1688,72 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 83: checked against the FSM core, not against me
+
+   Every bench before this one compares the pipelined core to values I
+   worked out by hand. `tb_ap040_pipe_dual.v` compares it to
+   `rtl/ap040/ap040_core.v`, which passes 3,797 of 3,801 cputest slices --
+   recorded 68040 hardware behaviour. Where the two disagree, the
+   pipelined core is wrong.
+
+   Both cores run the same generated program, each behind its own 16-bit
+   bus (milestone 82 is what makes that a comparison of CPUs rather than of
+   bus models) and its own copy of the same memory. Neither core's
+   internals are read: the PROGRAM dumps its own state with one `MOVEM.L
+   D0-D7/A0-A6,$1000` and then writes a done flag, so what is compared is
+   architectural state in memory. Any exception on either side lands on a
+   shared handler that records the vector and the stacked PC, so a trap
+   names the instruction instead of hanging.
+
+   Programs are generated from a seeded xorshift in FOUR-BYTE SLOTS: a
+   one-word instruction is padded with a NOP, so every slot boundary is an
+   instruction boundary and a `Bcc` displacement of 4k-2 always lands on
+   one. That is the whole trick that makes random 68k generation tractable
+   without an assembler. Register-to-register forms only -- no memory
+   operand can wander -- A7 is never a destination, and divides are left
+   out because a divide by zero is a trap.
+
+   **16 programs x 96 slots: both cores agree on all 15 registers.** 1,536
+   generated instructions, the first validation of this core against
+   something other than my own arithmetic.
+
+   **Two bench bugs on the way, both of which looked exactly like core
+   findings**, which is the hazard of this technique:
+
+   - `rbits()` returns 32 bits. Dropped into a concatenation it contributes
+     all 32 and pushes the opcode out of the low 16, so `MOVEQ #$17,D1`
+     ($7217) was generated as $0017 -- `ORI.B #x,(A7)`, which the FSM core
+     implements and this one does not. Vector 4, and it looked like a
+     missing instruction until the generator was re-run in Python.
+   - The shift encoding is `1110 ccc d ss i tt rrr`, and I had the
+     count-source bit and the type field the wrong way round, generating
+     register-count shifts. Milestone 23 implemented immediate counts only,
+     so that one IS a real gap -- recorded below -- but it is not what the
+     generator meant.
+
+   | mutation of the pipelined core | result |
+   |---|---|
+   | `ADDQ/SUBQ #0` no longer means 8 | FAIL -- rounds 2, 4, 5: A3, A6, D4, D5, A2 |
+   | MOVEQ zero-extends instead of sign-extending | FAIL -- round 0, five registers |
+   | ASR loses its sign fill | FAIL -- rounds 2, 10, 14: A0 = $1FFFFFFF for $FFFFFFFF |
+   | EXT.L and EXTB.L swapped | **passes** -- the generator never emits EXTB.L, so the bench cannot see it. A differential tests what it generates, and this one's instruction set is the honest limit of the result above |
+   | full suite, normal build | 89/89 |
+   | full suite, slow build | 89/89 |
+
+   **What this does not cover yet**, in the order it should grow: no memory
+   operands (so no addressing modes, no stores, no MOVEM beyond the dump),
+   no divides or other traps, no supervisor state, and the comparison is
+   15 registers -- flags only insofar as the conditional branches in the
+   program act on them. Each of those is a generator change, not a harness
+   change, which is the point of building it this way.
+
+   **Gaps this found in the core itself:** register-count shifts
+   (`ASR.L D1,D2`) are not decoded -- milestone 23 built the immediate-count
+   forms and the register-count ones were never added. `ORI.B #x,(An)` and
+   the other immediate-to-memory forms are not decoded either. Neither is a
+   defect in what exists; both are decode reach, and the differential will
+   keep finding this class as the generator widens.
+
    ### Milestone 82: the 16-bit Minimig bus, with the FSM core's own adapter
 
    `ap040_pipe_bus16.v` is the third pairing of `ap040_pipe_cpu.v`: CPU ->
