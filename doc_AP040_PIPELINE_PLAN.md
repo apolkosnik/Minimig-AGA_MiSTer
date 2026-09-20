@@ -1688,6 +1688,68 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 79: T0, trace on change of flow
+
+   With T1T0 = 01 the trace arm is taken only by the instructions the
+   68040 defines as changes of flow: taken Bcc/DBcc, BSR/JMP/JSR, RTS/RTE,
+   every exception entry, and the non-branch ones that resynchronise the
+   pipeline -- MOVE to SR, ORI/ANDI/EORI to SR, MOVEC to a control
+   register, NOP. That list is `ap040_core.v`'s `t0_special`, which cputest
+   confirmed on hardware (its comments record BSET D5,(A6) once tracing by
+   mistake under T0 until CAS was told apart from it); MOVE An,USP and
+   MOVES/CAS/CINV/CPUSH/FSAVE are not decoded in this core and so do not
+   arise. NOP gained a decode flag for it. T1 still traces everything, and
+   T1T0 = 11 behaves as T1.
+
+   The one design point: a conditional branch's taken-ness is known in EX,
+   not where the arm is written. So Bcc/DBcc arm provisionally
+   (`trace_arm_cond`), and EX exports its verdict -- `ex_br_resolve` and
+   `ex_br_taken`, from the `cond_result`/`dbcc_branch_taken` it already
+   computes -- which confirms or cancels the arm the cycle after the branch
+   departs. The next instruction is held for at least that long, so no
+   departure write can race the verdict. This is independent of decode's
+   prediction policy; a flush is not used as a proxy for "not taken".
+
+   `tb_ap040_pipe_trace_t0.v`: a not-taken BEQ and a not-taken DBF leave
+   nothing; a taken BNE, NOP, JSR, RTS, ORI to SR, a taken DBF, a TRAP and
+   the MOVE to SR that clears T0 leave eight frames, logged and checked
+   field by field. Eight and not nine or ten is the point.
+
+   **The bench was wrong twice before the RTL was right once.** Its first
+   listing was one word off from K12 on -- the DBF's displacement word --
+   so the taken DBF landed in the poison slot, and it had put the
+   subroutine at $0440, where the end of the program fell through into its
+   RTS and popped garbage (ISP $0604). The RTL had traced exactly what ran;
+   the cycle monitor from milestone 78 said so within one run. Subroutines
+   go past $0800, as integration3 already knew.
+
+   | run | result |
+   |---|---|
+   | control: milestone-78 RTL | FAIL -- T0 ignored, D7 = 0 |
+   | NOP off the list | FAIL -- 7 entries, entry 2 gone |
+   | no verdict (not-taken branches keep the arm) | FAIL -- 10 entries, the BEQ and the second DBF traced |
+   | verdict inverted | FAIL -- entries 1 and 6 are the not-taken pair instead |
+   | exception entry not a T0 flow change | FAIL -- 7 entries, the TRAP's gone |
+   | MOVE to SR off the list | FAIL -- 7 entries, the last one gone |
+   | RTS off the list | FAIL -- 7 entries, entry 4 gone |
+   | full suite on milestone-79 RTL | 86/86 |
+
+   **Fit, same flow:** 5,220 ALMs (5,225 after milestone 78), 7,115
+   combinational ALUTs (7,088), Fmax 40.55 MHz (41.24), setup slack at 25 ns
+   +0.342 ns (+0.752), TNS 0. The 40 worst paths are the same spine, ALU ->
+   `ex_fwd_data` -> EA adder -> L1 address -> `q_b`; neither the arm nor
+   the verdict is on any of them. Four fits since milestone 75 have put
+   the slack between +0.34 and +0.96 ns for changes that never touched the
+   spine -- that spread is the fitter, and the spine's real margin at
+   25 ns is the low end of it.
+
+   This closes trace. With it, every exception the 68040 raises without a
+   bus, an MMU, an FPU or an interrupt controller is implemented and has a
+   bench: illegal, privilege, TRAP, TRAPcc, CHK, zero divide, address error
+   (odd JMP/JSR), format error, and trace in both modes. What is left in
+   the exception model is the hardware-facing part -- interrupts and the
+   throwaway frame, access error -- and that belongs with the bus.
+
    ### Milestone 78: T1 instruction trace, and the flush cycle it exposed
 
    **Trace.** The traced instruction is the one that leaves EA-fetch with
