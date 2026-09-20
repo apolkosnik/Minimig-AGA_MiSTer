@@ -1688,6 +1688,90 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 78: T1 instruction trace, and the flush cycle it exposed
+
+   **Trace.** The traced instruction is the one that leaves EA-fetch with
+   T1 set in its start SR; it arms `trace_arm`/`trace_pc` on its way out.
+   The exception is delivered on the instruction that FOLLOWS it: that
+   instruction is held in EA-fetch until EX and WB have drained (`wb_busy`
+   is the core's `exe_valid`), and is then turned into a format-$2 vector-9
+   entry whose PC field is its own address and whose address field is the
+   traced instruction's -- with the stacked SR and the stack pointer read
+   from the real registers, after the traced instruction's own writes.
+   None of the held instruction's semantics happen: `own_exc` keeps its own
+   fault out, and `!trace_hold` gates its read, its push/store write, its
+   MOVEM and its RTE pop. The frame's PC brings it back after the handler's
+   RTE. So a traced TRAP is traced on its handler's first instruction,
+   after the exception processing; a traced MOVE to SR that clears T1 is
+   still traced, with T1 clear in the frame, so the handler's RTE returns
+   with tracing off; a traced RTE stacks the SR it restored and the PC it
+   went to. `trace_arm` is not cleared by a flush -- the flush after a
+   traced branch or a traced TRAP kills the instruction in EA-fetch, and
+   the trace is still owed to whichever instruction arrives next -- and
+   clears only when the trace entry itself departs. T0 (change of flow)
+   is not implemented; T1T0 = 11 behaves as T1.
+
+   `tb_ap040_pipe_trace.v` sets T1 and logs every trace frame's four
+   fields at (A5)+: fifteen entries across a taken branch, a store, a
+   TRAP, an RTE from a hand-built frame, and the MOVE to SR that turns
+   tracing off. The SR column carries each instruction's own CCR result,
+   so it also says the stacked SR is the one AFTER the traced instruction.
+
+   **The bench's first run found a defect older than trace.** The third
+   entry never completed: the trace frame's second longword came back as
+   `{2700, 0000}`. A cycle monitor showed why. The instruction behind an
+   exception entry waits in EA-calc through the frame push and moves into
+   EA-fetch the cycle the entry departs -- which is the cycle EX raises
+   `flush` for it. The output block ignores that cycle (flush has priority
+   there), but the stage's combinational side effects did not: for one
+   cycle that instruction was live. Here it was the TRAP after the traced
+   store, and its own beat 0 went out at ISP-8 before the trace entry's A7
+   had committed -- on top of the trace frame. Without trace the same
+   cycle exists after EVERY exception entry: a store behind a TRAP wrote
+   to the pre-handler A0, and a TRAP behind a CHK wrote its `{SR, PC_hi}`
+   over the CHK frame's `{PC_lo, fmt/vec}`. `tb_ap040_pipe_excexc.v`
+   shows both without trace; on milestone-77 RTL the old A0 receives $11
+   and the CHK handler's RTE goes to $2700. The fix is one predicate,
+   `live = eac_valid && !flush`, on everything this stage sends to the L1
+   on the instruction's behalf: `mem_issue`, `wr_stall`, `exc_active`,
+   `ret_active`, `l1_wren_b`.
+
+   A second thing the bench forced: `eac_is_store` outranks `exc_writing`
+   in `l1_addr_word` and sets `st_be` to the store's size, so the trace
+   frame for a held STORE went to the store's address with the store's
+   lanes. Stores and exceptions had never coincided before. `store_now`
+   (the store predicate gated by the hold) now feeds every functional use.
+
+   And one thing the bench got wrong: its handler used D0 as scratch, and
+   the traced program's `MOVE D0,SR` then loaded the handler's leftover --
+   the fmt/vec word, $2024 -- into SR, dropping to user mode with IPL 0.
+   The RTL was right and the stacked SR said so. The handler uses D4.
+
+   | run | result |
+   |---|---|
+   | control: trace bench on milestone-77 RTL | FAIL -- D7 = 0, no entries |
+   | control: excexc bench on milestone-77 RTL | FAIL -- [$0B00] = $11; D5, D6 unset; ISP $05FC |
+   | `live` without `!flush` | FAIL -- excexc as the control; trace as its own first run (entry 3's PC field $2700) |
+   | trace entry re-arms | FAIL -- 17 entries, the handler traced (entry 1 = {$040C, $0800, $2700}) |
+   | no drain wait | FAIL -- entries 12-14: SR $2700 for $A708, PC field `a708042c`: the frame written under in-flight pushes |
+   | held store still selects the L1 | FAIL -- D7 = 2, entry 3 missing: the frame went to (A6) |
+   | held instruction's own fault taken | FAIL -- 13 entries; 8, 13, 14 wrong |
+   | RTE never arms | FAIL -- 14 entries; entry 13, the RTE, missing |
+   | flush clears the arm | FAIL -- 13 entries; entry 5, the TRAP's, missing |
+   | full suite on milestone-78 RTL | 85/85 |
+
+   **Fit, same flow:** 5,225 ALMs (5,199 after milestone 77), 7,088
+   combinational ALUTs (6,999), EA-fetch 1,365 ALMs (1,320), Fmax 41.24 MHz
+   (41.59), setup slack at 25 ns +0.752 ns (+0.957), TNS 0. The 40 worst
+   paths are the same spine, ALU -> `ex_fwd_data` -> EA adder -> L1 address
+   -> `q_b`; neither `live` (which puts `flush` on the L1 write enable) nor
+   the trace hold is on any of them.
+
+   Defect six, then, and it is the same shape as the other five: nothing
+   any unit bench for TRAP, CHK or the store path could see, because each
+   checked its own instruction's result, and the defect is in the cycle
+   between one instruction and the next.
+
    ### Milestone 77: the six-word frame for CHK, TRAPcc and zero divide -- found by integration4
 
    **The bench first.** `tb_ap040_pipe_integration4.v` is the third
