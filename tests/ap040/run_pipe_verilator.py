@@ -8,7 +8,9 @@ there is no assembler dependency and no 4-state X requirement.
 
 tb_ap040_pipe_l1_wbuf tests ap040_pipe_l1.v standalone, so it gets only
 that file; compiling it against the full list would put two
-top-level-instantiable modules in one unit.
+top-level-instantiable modules in one unit. tb_ap040_pipe_alu_equiv
+compares ap040_pipe_alu.v against the FSM core's rtl/ap040/ap040_alu.v,
+so it gets those two files and both include directories.
 """
 import argparse, subprocess, sys
 from pathlib import Path
@@ -42,14 +44,19 @@ def main():
     passed, failed = [], []
     for b in benches:
         name = b.stem
-        src = [RTL / "ap040_pipe_l1.v"] if name.endswith("l1_wbuf") else CORE
+        src, inc = CORE, [RTL]
+        if name.endswith("l1_wbuf"):
+            src = [RTL / "ap040_pipe_l1.v"]
+        elif name.endswith("alu_equiv"):
+            src = [RTL / "ap040_pipe_alu.v", ROOT / "rtl/ap040/ap040_alu.v"]
+            inc = [RTL, ROOT / "rtl/ap040"]
         obj = work / ("obj-" + name)
         log = work / (name + ".log")
         with log.open("w") as out:
             rc = subprocess.run(
                 ["verilator", "--binary", "--timing", "--top-module", name,
                  "--Mdir", str(obj), "-j", str(args.jobs), "-Wno-fatal",
-                 "-I" + str(RTL), str(b)] + [str(s) for s in src],
+                 *("-I" + str(d) for d in inc), str(b)] + [str(s) for s in src],
                 stdout=out, stderr=subprocess.STDOUT).returncode
             if rc == 0:
                 rc = subprocess.run([str(obj / ("V" + name))], stdout=out,

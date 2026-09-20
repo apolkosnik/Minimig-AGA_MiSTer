@@ -63,6 +63,30 @@ function res_zero;
 	end
 endfunction
 
+// n mod (nbits+1), the count of the ROX rotates. nbits+1 is 9, 17 or 33
+// and n is six bits, so this is at most three conditional subtracts of a
+// constant. Written as `n % (nbits + 1)` it infers an lpm_divide, and the
+// first standalone fit after milestone 74 found that divider on every one
+// of the 40 worst paths.
+function [5:0] mod_np1;
+	input [5:0] n;
+	reg   [5:0] t;
+	begin
+		case (size)
+			`AP040_SZ_B: begin
+				t = (n >= 6'd36) ? n - 6'd36 : n;
+				t = (t >= 6'd18) ? t - 6'd18 : t;
+				mod_np1 = (t >= 6'd9) ? t - 6'd9 : t;
+			end
+			`AP040_SZ_W: begin
+				t = (n >= 6'd34) ? n - 6'd34 : n;
+				mod_np1 = (t >= 6'd17) ? t - 6'd17 : t;
+			end
+			default: mod_np1 = (n >= 6'd33) ? n - 6'd33 : n;
+		endcase
+	end
+endfunction
+
 // shared adder/subtractor with carry out per size
 wire [32:0] add_full  = {1'b0, bm} + {1'b0, am};
 wire [32:0] addx_full = {1'b0, bm} + {1'b0, am} + {32'd0, f_x};
@@ -305,7 +329,7 @@ always @* begin
 			n  = shcnt;
 			r  = 32'd0; c = 1'b0; x2 = f_x; vf = 1'b0;
 			nm = n & (nbits - 6'd1);
-			nx = n % (nbits + 6'd1);
+			nx = mod_np1(n);
 			ne = (n > nbits) ? nbits : n;
 			cmask = (33'd2 << nbits) - 33'd1;
 			w = ({32'd0, f_x} << nbits) | {1'b0, bm};
