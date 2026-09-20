@@ -719,7 +719,15 @@ reg  exc_pend_trapcc;
 wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 
 wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
-wire eac_is_fmt2     = eac_is_addrerr;   // the only format-$2 source so far
+// The six-word frame (milestone 77): address error, and -- as on the 68040
+// and in ap040_core.v's exc(..., 4'd2, pc, pc_i) -- CHK, TRAPcc and zero
+// divide, whose extra longword is the faulting instruction's own address
+// while the PC field stays the next instruction. TRAP, illegal, privilege
+// and format error keep the four-word frame. Until milestone 77 the three
+// dynamic ones pushed format $0; tb_ap040_pipe_integration4.v's handlers
+// read the frames and said so.
+wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
+                       eac_is_trapcc_trap;
 
 // The L1 always returns a full longword on port B (address_b is the HIGH
 // word, the low word implicitly address_b+1), so a sized load is a lane
@@ -961,10 +969,13 @@ wire  [7:0] exc_vec_num    = eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
 wire [15:0] exc_vecoff_word = {eac_is_fmt2 ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
-// Format $2's own extra "instruction address" longword -- the odd target
-// itself, LSB cleared (ap040_core.v's own convention for this field,
-// identical for both JMP and JSR despite their differing PC fields above).
-wire [31:0] exc_addr_field = {ea_target[31:1], 1'b0};
+// Format $2's own extra "instruction address" longword. For an odd JMP/JSR
+// target it is the target itself, LSB cleared (ap040_core.v's own convention
+// for this field, identical for JMP and JSR despite their differing PC
+// fields above); for CHK, TRAPcc and zero divide it is the faulting
+// instruction's own address (ap040_core.v passes pc_i), which is what a
+// handler needs to find the instruction its PC field has already stepped past.
+wire [31:0] exc_addr_field = eac_is_addrerr ? {ea_target[31:1], 1'b0} : eac_pc;
 
 // Beat0 @ exc_new_sp: SR, then PC's high word. Beat1 @ exc_new_sp+4: PC's
 // low word, then the format/vector-offset word. Beat2 @ exc_new_sp+8
