@@ -1688,6 +1688,77 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 91: a store with a displacement
+
+   `MOVE.sz Dn,(d16,An)`. Destination mode 101 was the last one the MOVE
+   family could not reach; loads have had it since milestone 10 and the
+   ALU family since milestone 40, and it is how every compiled function
+   writes a local. The eleventh gather kind, and one that does not branch,
+   so it joins `redirect_from_gather`'s exclusion list.
+
+   **Three shapes were fitted, because the first one cost a nanosecond.**
+   A store's address had been `an_base`, with the predecrement mode
+   subtracting a step from it. The obvious change was to make that a
+   general offset -- one adder where there was already one -- and it
+   measured **+0.530 ns**, against milestone 90's +1.502. Quartus is
+   deterministic here (milestone 90 was fitted twice, identical to the
+   picosecond), so that is a real 0.97 ns, not noise.
+
+   The second shape shared the LOAD's adder by making `ea_base` select
+   `operand_b` for a store. One adder, a smaller address mux, and one more
+   mux level on the load spine: **+0.849 ns**. Better, and still 0.65 ns
+   short.
+
+   The third shape keeps the load spine untouched. Decode points
+   `eac_src_reg` at An for this form instead of at Dn, so `operand_a` is
+   already the base and `ea_target` is already base plus displacement --
+   the address falls through to the bottom of the address mux with no new
+   adder and no new mux input, just `!eac_st_disp` ANDed onto a select
+   that existed. The data and the flags then come from port B, both on
+   registered assignments rather than the address path. **+0.996 ns**,
+   5,849 ALMs.
+
+   That is still 0.5 ns below milestone 90 and it is the honest number:
+   reaching a new addressing mode from the store side costs something, and
+   three shapes is where the search stopped rather than where it
+   converged. The ordering is the useful part -- an adder on the address
+   branch cost 0.97 ns, sharing an adder through a mux on `ea_base` cost
+   0.65, and reusing the adder that was already there cost 0.51.
+
+   **A mutation the memory model cannot see, and the check that replaced
+   it.** Zero-extending the store displacement instead of sign-extending
+   it passed every value check and both cores of the differential.
+   `ap040_pipe_l1.v` indexes with `address[12:0]`, so the model wraps every
+   8 KB -- and a 16-bit displacement that is zero-extended is off by
+   exactly 65536, a multiple of 8 KB. It lands on the SAME word whatever
+   address is chosen, so no sentinel anywhere could catch it, and the
+   differential's own 64 KB model wraps the same way. The bench now
+   records the address the core DRIVES at each of its six write posts and
+   checks all six. That is the quantity in question and it does not depend
+   on the memory model at all.
+
+   | mutation | `stdisp` | `dual` |
+   |---|---|---|
+   | the displacement not applied | 7 checks | fails, round 0 |
+   | the displacement zero-extended | 1 check (store 1's address) -- only after the address capture | passes: the model memory wraps at exactly the error |
+   | not excluded from `redirect_from_gather` | 8 checks | the core never finishes |
+   | `id_is_store` not set | 8 checks | fails, round 0 |
+   | the address register read as Dn | 8 checks | fails, round 0 |
+   | the data register not selected | 6 checks | fails, round 0 |
+   | the store not writing condition codes | 1 check (D6) | fails, round 12 |
+   | the size not taken from the MOVE field | 2 checks | fails, round 0 |
+
+   The rule: **a bench that reads only memory contents cannot see an
+   address error the memory model aliases away.** Where the address itself
+   is the claim, check the address the core drives.
+
+   | run | result |
+   |---|---|
+   | control, both benches on milestone 90's RTL | both fail; the differential reports vector 4 on `1b46 001e` |
+   | full suite, normal build | 95/95 |
+   | full suite, slow build | 95/95 |
+   | standalone fit | +0.996 ns at 25 ns, 5,849 ALMs |
+
    ### Milestone 90: the quick forms' other two destinations
 
    `0101 qqq d SS mmm rrr` has reached only `mmm=000` since milestone 27.

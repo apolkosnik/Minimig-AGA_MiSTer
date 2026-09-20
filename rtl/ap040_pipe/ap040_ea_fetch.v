@@ -520,15 +520,6 @@ wire [31:0] ea_base = eac_ea_pcrel ? (eac_pc + 32'd2) : operand_a;
 // it. eac_immrmw is a register, which is what the milestone-88 rule
 // requires of anything selecting on this path.
 wire [31:0] ea_disp   = eac_imm & {32{~eac_immrmw}};
-// A STORE's address, as one offset added to the base (milestone 91). The
-// predecrement case was already an adder on this branch, so giving the
-// offset a third value folds the displacement mode into it rather than
-// putting a second adder on the L1 address path. Both selects are
-// registered flags and the three offsets are registered values or
-// constants, which is what the milestone-88 rule asks of anything here.
-wire [31:0] store_off = eac_is_predec ? (32'd0 - an_step) :
-                        eac_st_disp   ? eac_imm           : 32'd0;
-
 wire [31:0] ea_target = eac_is_abs     ? eac_imm            :
                         eac_is_predec  ? (an_base - an_step) :
                         eac_ea_indexed ? (ea_base + idx_val + idx_disp) :
@@ -1158,8 +1149,19 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
 wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
-                            store_now ? (eac_is_abs ? eac_imm
-                                                     : (an_base + store_off)) :
+                            // A store with a displacement takes the LOAD's
+                            // adder instead of one of its own (milestone
+                            // 91): decode points eac_src_reg at An for
+                            // that form, so operand_a is already the base
+                            // and ea_target is already base + eac_imm.
+                            // The whole cost here is one registered term
+                            // on a select that existed anyway -- an adder
+                            // on this branch cost 0.97 ns, and an adder
+                            // shared by way of a mux on ea_base cost 0.65.
+                            (store_now && !eac_st_disp)
+                                      ? (eac_is_abs    ? eac_imm :
+                                         eac_is_predec ? (an_base - an_step)
+                                                       : an_base) :
                             eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
@@ -1187,7 +1189,7 @@ assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
 // same expression now.
 assign l1_data_b = mvm_st_want  ? operand_a :
                    exc_writing  ? exc_wdata :
-                   store_now    ? operand_a :
+                   store_now    ? (eac_st_disp ? operand_b : operand_a) :
                    eac_is_pea   ? ea_target :
                    eac_is_link  ? operand_a : eac_next_pc;
 
@@ -1768,7 +1770,12 @@ always @(posedge clk) begin
 				// deliver the computed address as the operand, so ALU_MOVE
 				// then writes it to An. This one line is the entire
 				// datapath cost of the instruction.
+				// A store with a displacement reads its ADDRESS through
+				// port A (milestone 91), so the data -- which is what MOVE
+				// sets N and Z from -- is on port B. A registered
+				// assignment, not the address path.
 				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
+				                  eac_st_disp                              ? operand_b :
 				                  eac_sxt_w                                ? sxt_w_of(operand_a) :
 				                                                             operand_a;
 				// BSR/JSR: the NEW A7 value (== push_addr, the same

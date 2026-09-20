@@ -137,7 +137,7 @@ task gen_program;
 				w0 = {4'b0101, cc[3:0], 2'b11, 3'b000, dn[2:0]};   // Scc Dn
 				want_scc = 0;
 			end else begin
-			kind = rbits(32) % 42;
+			kind = rbits(32) % 45;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -260,6 +260,23 @@ task gen_program;
 			40: begin q = rbits(3);
 			    w0 = {4'b0101, q[2:0], 6'b010_001, an[2:0]};          // ADDQ.L #q,An
 			    w1 = {4'b0101, q[2:0], 6'b110_001, an[2:0]}; end      // SUBQ.L #q,An
+			// ---- a store with a displacement (milestone 91). Signed and
+			// bounded to plus or minus 128 bytes, which keeps every access
+			// inside the compared window ($4000..$7FFE) while still going
+			// both ways: a dropped sign extension lands the store on the
+			// far side of the base, where the other core did not write.
+			// The Long form keeps the base's parity by stepping in fours,
+			// the Byte form steps in ones, and the Word form goes through
+			// the odd A5 as well as the even A6.
+			41: begin imm = rbits(6);
+			    w0 = {4'b0010, an[2:0], 6'b101_000, dm[2:0]};
+			    w1 = (imm - 32) * 4; end                             // MOVE.L Dm,(d,An)
+			42: begin imm = rbits(6);
+			    w0 = {4'b0011, anw[2:0], 6'b101_000, dm[2:0]};
+			    w1 = (imm - 32) * 2; end                             // MOVE.W Dm,(d,Aw)
+			43: begin imm = rbits(6);
+			    w0 = {4'b0001, anw[2:0], 6'b101_000, dm[2:0]};
+			    w1 = imm - 32; end                                   // MOVE.B Dm,(d,Aw)
 			// A shift counted by a REGISTER (milestone 87), so the count is
 			// whatever dm happens to hold: 0 to 63 after the modulo, which
 			// covers both cases the immediate form cannot express -- more

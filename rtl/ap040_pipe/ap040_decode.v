@@ -1960,7 +1960,7 @@ always @(posedge clk) begin
 					// A store's address register is its DESTINATION, at
 					// ir[11:9] -- the opposite end of the opcode from a
 					// load's, which is why this sits above the rest.
-					id_dest_reg     <= held_st_disp ? {1'b1, held_dest_reg} :
+					id_dest_reg     <= held_st_disp ? {1'b0, held_reg} :
 					                    (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
 					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
 					                    held_is_abs  ? {1'b0, held_dest_reg} :
@@ -1990,7 +1990,8 @@ always @(posedge clk) begin
 					// An immediate with a memory destination reads An as its
 					// address base, exactly like every other memory form --
 					// the immediate rides in id_imm instead of displacing it.
-					id_src_reg      <= (held_is_stabs || held_st_disp) ? {1'b0, held_reg} :
+					id_src_reg      <= held_st_disp ? {1'b1, held_dest_reg} :
+					                    held_is_stabs ? {1'b0, held_reg} :
 					                    held_imm_mem ? {1'b1, held_reg} :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
