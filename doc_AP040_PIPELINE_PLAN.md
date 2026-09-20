@@ -1688,6 +1688,68 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 77: the six-word frame for CHK, TRAPcc and zero divide -- found by integration4
+
+   **The bench first.** `tb_ap040_pipe_integration4.v` is the third
+   integration bench, and like the two before it, it was written across the
+   seams the unit benches do not cross: supervisor to user with `MOVE D0,SR`,
+   a MOVEM round trip on the USER stack, then from user mode TRAP #1, CHK,
+   TRAPEQ, DIVU #0 and a privileged ORI to SR, and TRAP #0 to finish in
+   supervisor. Every handler bumps D7 and ORs a bit into D6 per fact about
+   its own frame -- format/vector word, stacked PC, the address field of a
+   six-word frame, S clear in the stacked SR -- the way an OS reads a frame.
+   The privilege handler advances the stacked PC past the ORI; the last one
+   discards its frame with `LEA 8(A7),A7`. Ten checks: the thirteen frame
+   facts as one mask, six handler entries, both stacks balanced (USP $0500,
+   ISP $0600), the user code's and the finisher's markers, S set and T clear
+   at the end.
+
+   **On milestone-76 RTL it failed one check, and that check named the
+   seam:** D6 = $1E13, bits 2, 3, 5, 6, 7 and 8 -- CHK, TRAPcc and zero
+   divide pushed format $0 with no address field. The 68040 pushes the
+   six-word format-$2 frame for those three (and trace), with the faulting
+   instruction's address in the extra longword and the NEXT instruction in
+   the PC field; `rtl/ap040/ap040_core.v` does exactly that
+   (`exc(vector, 4'd2, pc, pc_i)`) and passes cputest with it. The pipe
+   core's RTE pops whatever the format word says, so the wrong format was
+   self-consistent: every unit bench for these exceptions returned
+   correctly and balanced A7, and none of them looked at the frame.
+
+   The fix is two lines in `ap040_ea_fetch.v`: `eac_is_fmt2` covers
+   `eac_is_divzero`, `eac_is_chk_trap` and `eac_is_trapcc_trap` beside
+   address error, and `exc_addr_field` is `eac_pc` for them (the odd
+   JMP/JSR target, LSB cleared, stays for address error). Frame size, the
+   format nibble, the third write beat and RTE's twelve-byte pop were all
+   already keyed on `eac_is_fmt2` since milestones 17 and 54.
+
+   | run | result |
+   |---|---|
+   | control: bench against milestone-76 RTL | FAIL -- D6 = $1E13 (bits 2, 3, 5, 6, 7, 8) |
+   | address field = `eac_next_pc` | FAIL -- D6 = $1EB7: bits 3, 6, 8, the three address-field checks and nothing else |
+   | TRAPcc dropped from the six-word list | FAIL -- D6 = $1F9F: bits 5, 6 |
+   | zero divide dropped from the six-word list | FAIL -- D6 = $1E7F: bits 7, 8 |
+   | full suite on milestone-77 RTL | 83/83 |
+
+   Each mutation removes exactly the bits its check owns, so the mask is
+   diagnostic rather than a pass/fail: the failing bit says which frame and
+   which field.
+
+   **Fit, same flow:** 5,199 ALMs (5,185 after milestone 75), 6,999
+   combinational ALUTs (7,064), Fmax 41.59 MHz (40.68), setup slack at 25 ns
+   +0.957 ns (+0.417), TNS 0. The 40 worst paths are the same spine as
+   before -- ALU -> `ex_fwd_data` -> EA adder -> L1 address -> `q_b` -- and
+   `eac_is_fmt2` now sits on all forty, since it selects the frame's beat
+   address. The slack moved by half a nanosecond for a two-line change,
+   which is the fitter's placement varying between runs, not a result; what
+   the fit says is that the change cost nothing at 25 ns.
+
+   Three integration benches have now found five pipeline defects that the
+   unit benches around them did not: the lost redirect, the WB re-commit,
+   the memory-source divide by zero, the CCR blind spot, and this frame
+   format. The pattern in all five is the same -- a unit bench checks the
+   instruction's own result, and the defect is in what the instruction
+   leaves for the NEXT thing to read.
+
    ### Milestone 76: RTE format error
 
    RTE judges the format nibble when the pop's second dword arrives: $0
