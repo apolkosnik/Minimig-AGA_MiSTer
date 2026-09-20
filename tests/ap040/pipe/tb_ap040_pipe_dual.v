@@ -90,7 +90,7 @@ endfunction
 // of the low 16: the first run of this bench generated $0017 where $7217
 // was meant, which is ORI.B #x,(A7) -- an instruction the FSM core has and
 // the pipelined core does not, so it looked exactly like a real finding.
-integer slot, kind, dn, dm, an, q, cc, k, sh, imm, dir;
+integer slot, kind, dn, dm, an, anw, q, cc, k, sh, imm, dir;
 integer pro;
 reg [15:0] w0, w1;
 
@@ -105,16 +105,23 @@ task gen_program;
 		for (pro = 0; pro < 7; pro = pro + 1) begin
 			prog[prog_words + 0] = {4'b0010, pro[2:0], 6'b001_111, 3'b100};  // MOVEA.L #imm,An
 			prog[prog_words + 1] = 16'h0000;
-			prog[prog_words + 2] = SCRATCH[15:0] + pro[15:0] * 16'h0100;
+			// A5 starts ODD on purpose (milestone 85): it is the pointer the
+			// Word and Byte forms below use, so every run exercises
+			// unaligned Word accesses. Word steps keep it odd. A0-A4 stay
+			// even and are the only pointers the Long forms use, because a
+			// Long at an odd address is not implemented yet.
+			prog[prog_words + 2] = SCRATCH[15:0] + pro[15:0] * 16'h0100
+			                       + ((pro == 5) ? 16'd1 : 16'd0);
 			prog_words = prog_words + 3;
 		end
 		slot_base = prog_words;
 
 		for (slot = 0; slot < NSLOT; slot = slot + 1) begin
 			dn = rbits(3); dm = rbits(3);
-			an = rbits(3); if (an == 7) an = 6;          // never A7
+			an  = rbits(32) % 5;                         // A0-A4: even, Long-safe
+			anw = 5 + (rbits(32) % 2);                   // A5 (odd) or A6: Word/Byte
 			w1 = `AP040_OP_NOP;
-			kind = rbits(32) % 24;
+			kind = rbits(32) % 29;
 			case (kind)
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
@@ -178,7 +185,13 @@ task gen_program;
 			20: w0 = {4'b0010, an[2:0], 6'b011_000, dm[2:0]};        // MOVE.L Dm,(An)+
 			21: w0 = {4'b1101, dn[2:0], 6'b010_010, an[2:0]};        // ADD.L (An),Dn
 			22: w0 = {4'b1101, dm[2:0], 6'b110_010, an[2:0]};        // ADD.L Dm,(An)  (RMW)
-			default: w0 = {4'b1011, dn[2:0], 6'b010_010, an[2:0]};   // CMP.L (An),Dn
+			23: w0 = {4'b1011, dn[2:0], 6'b010_010, an[2:0]};        // CMP.L (An),Dn
+			// ---- Word and Byte through A5 (odd) or A6 (even)
+			24: w0 = {4'b0011, dn[2:0], 6'b000_010, anw[2:0]};       // MOVE.W (Aw),Dn
+			25: w0 = {4'b0011, anw[2:0], 6'b010_000, dm[2:0]};       // MOVE.W Dm,(Aw)
+			26: w0 = {4'b0011, dn[2:0], 6'b000_011, anw[2:0]};       // MOVE.W (Aw)+,Dn
+			27: w0 = {4'b1101, dm[2:0], 6'b101_010, anw[2:0]};       // ADD.W Dm,(Aw)
+			default: w0 = {4'b0001, dn[2:0], 6'b000_010, anw[2:0]};  // MOVE.B (Aw),Dn
 			endcase
 			prog[slot_base + 2*slot]     = w0;
 			prog[slot_base + 2*slot + 1] = w1;
