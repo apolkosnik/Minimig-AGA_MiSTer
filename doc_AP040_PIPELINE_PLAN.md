@@ -1661,6 +1661,45 @@ real MMU or bus-error path arrives, which is the same boundary
    bench covers a memory source. A register-only or immediate-only bench
    does not test the operand routing at all.
 
+   ### Milestone 70: a mispredict on top of every stall
+
+   `tb_ap040_pipe_integration3.v` places a not-taken BNE -- which decode
+   predicts taken, so each one is a recovery -- immediately after a divide,
+   a MOVEM restore, an RMW followed by a load of the same address, and a
+   nested BSR/RTS pair. D2 counts checkpoints: 4 if every recovery landed,
+   -1 if a branch went the wrong way, fewer if the pipeline hung.
+
+   **The first version was vacuous, and only the control run said so.** It
+   passed on milestone-68 RTL, which has the lost-redirect bug. The reason
+   is a precise statement of that bug's trigger: the redirect is lost only
+   when the branch's PREDICTED-TAKEN TARGET is a memory instruction, because
+   that instruction is fetched speculatively and its `mem_issue` is what
+   stalls IF in the recovery cycle. `fail:` was a MOVEQ, so nothing ever
+   stalled. It now opens with `MOVE.L (A0),D3`, and on the old RTL the bench
+   hangs at the first recovery with D2 = 0 -- the failure mode milestone 69
+   actually saw, reproduced on purpose.
+
+   The rule that follows: **a bench for a control-flow bug has to reproduce
+   the exact timing, not just the instruction sequence**, and the control
+   run is the only thing that tells you whether it did.
+
+   ### How to run a control, and how not to
+
+   For thirty milestones the control was `git stash push rtl/ap040_pipe/`,
+   run, `git stash pop`. It worked only because there were always
+   uncommitted RTL changes to stash. Run on a CLEAN tree -- as after
+   milestone 69's commit -- `stash push` with a pathspec saves nothing, and
+   `stash pop` then pops whatever is on top of the stash: here an August
+   entry from the other worktree, into this one, with merge conflicts across
+   `Minimig.sv`, `rtl/ap040/` and `tests/ap040/build/`. Recovered with
+   `git reset --hard HEAD` (all work was committed) plus removal of the
+   eight untracked files the pop dropped in; the stale entry itself is
+   untouched, since a conflicting pop keeps it.
+
+   **Use `git checkout <rev> -- rtl/ap040_pipe/` to run a control and
+   `git checkout HEAD -- rtl/ap040_pipe/` to come back.** It works whether
+   or not the tree is clean, and it touches nothing outside the path.
+
    ### Milestone 69: an integration bench, and the two things it found
 
    `tb_ap040_pipe_integration2.v` runs a whole subroutine the way compiled
