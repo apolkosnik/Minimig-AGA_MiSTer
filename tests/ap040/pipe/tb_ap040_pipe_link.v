@@ -108,7 +108,7 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -123,15 +123,15 @@ initial begin
 		$display("FAIL: mem[$05F4] = %h%h, expected aabbccdd (A7 must be $05F4; a zero-extended d16 puts it at $000105f4)",
 		         dut.u_l1.mem[250], dut.u_l1.mem[251]);
 	end
-	if (dut.u_regfile.areg[6] !== 32'h1111_2222) begin
+	if (dut.u_cpu.u_regfile.areg[6] !== 32'h1111_2222) begin
 		errors = errors + 1;
 		$display("FAIL: A6 = %h, expected 11112222 (UNLK pops through A6; 4e714e71 means A6 pointed at NOP fill)",
-		         dut.u_regfile.areg[6]);
+		         dut.u_cpu.u_regfile.areg[6]);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
 		$display("FAIL: A7 = %h, expected 00000600 (UNLK must restore the stack it was handed)",
-		         dut.u_regfile.isp);
+		         dut.u_cpu.u_regfile.isp);
 	end
 
 	// dbg_ccr[3:0] is {N,Z,V,C}. MOVE.L of aabbccdd set N; the UNLK after it

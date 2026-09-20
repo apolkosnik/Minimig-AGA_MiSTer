@@ -230,13 +230,13 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	dut.u_regfile.isp     = 32'h0000_0600;
-	dut.u_regfile.areg[5] = 32'h0000_0A00;   // log pointer
-	dut.u_regfile.areg[6] = 32'h0000_0B00;   // I5's store target
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;
+	dut.u_cpu.u_regfile.areg[5] = 32'h0000_0A00;   // log pointer
+	dut.u_cpu.u_regfile.areg[6] = 32'h0000_0B00;   // I5's store target
 
 	repeat ((PROG_WORDS + 1500) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	check32("D7 (trace entries)", dut.u_regfile.dreg[7], N_TRACE);
+	check32("D7 (trace entries)", dut.u_cpu.u_regfile.dreg[7], N_TRACE);
 	for (e = 0; e < N_TRACE; e = e + 1)
 		for (f = 0; f < 4; f = f + 1)
 			if (log_word[4*e + f] !== want_log(e, f)) begin
@@ -247,11 +247,11 @@ initial begin
 			end
 	check32("D1", dbg_d1, 32'h0000_0003);
 	check32("D2 (TRAP handler ran)", dbg_d2, 32'h0000_0042);
-	check32("D3", dut.u_regfile.dreg[3], 32'h0000_0003);
-	check32("D5 (untraced tail ran)", dut.u_regfile.dreg[5], 32'h0000_0055);
+	check32("D3", dut.u_cpu.u_regfile.dreg[3], 32'h0000_0003);
+	check32("D5 (untraced tail ran)", dut.u_cpu.u_regfile.dreg[5], 32'h0000_0055);
 	check32("[$0B00] (I5's store)", {dut.u_l1.mem[896], dut.u_l1.mem[897]}, 32'h0000_0003);
-	check32("ISP", dut.u_regfile.isp, 32'h0000_0600);
-	check32("SR at the end", {16'd0, dut.sr}, 32'h0000_2700);
+	check32("ISP", dut.u_cpu.u_regfile.isp, 32'h0000_0600);
+	check32("SR at the end", {16'd0, dut.u_cpu.sr}, 32'h0000_2700);
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
 	    dbg_eaf_valid || dbg_ex_valid || dbg_wb_valid) begin

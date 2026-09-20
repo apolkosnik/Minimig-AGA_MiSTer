@@ -6,7 +6,7 @@
 // Destination mode 001 writes an ADDRESS register. Until now nothing could //
 // -- the second write port of milestone 30 updates An as a side effect of  //
 // (An)+/-(An), but no instruction targeted one -- so every testbench that  //
-// needed an address had to poke dut.u_regfile.areg[] directly after reset. //
+// needed an address had to poke dut.u_cpu.u_regfile.areg[] directly after reset. //
 // This is the first one that does not, and it is written that way on       //
 // purpose: the setup is now part of the program under test.                //
 //                                                                          //
@@ -100,9 +100,9 @@ initial begin
 	// No poking: A0 is loaded by the program itself.
 	repeat ((PROG_WORDS + 34) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[0] !== 32'h0000_0480) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0480) begin
 		errors = errors + 1;
-		$display("FAIL: A0 = %h, expected 00000480 (MOVEA.L #imm,An)", dut.u_regfile.areg[0]);
+		$display("FAIL: A0 = %h, expected 00000480 (MOVEA.L #imm,An)", dut.u_cpu.u_regfile.areg[0]);
 	end
 	if ({dut.u_l1.mem[64], dut.u_l1.mem[65]} !== 32'hFEED_FACE) begin
 		errors = errors + 1;
@@ -113,9 +113,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D2 = %h, expected FEEDFACE", dbg_d2);
 	end
-	if (dut.u_regfile.areg[1] !== 32'h0000_0000) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_0000) begin
 		errors = errors + 1;
-		$display("FAIL: A1 = %h, expected 00000000 (MOVEA.L Dn,An)", dut.u_regfile.areg[1]);
+		$display("FAIL: A1 = %h, expected 00000000 (MOVEA.L Dn,An)", dut.u_cpu.u_regfile.areg[1]);
 	end
 	// N must still be set from the CMPI: MOVEA writes no flags. Had it
 	// written them, the second MOVEA moved D0 = 0 and would leave Z set.

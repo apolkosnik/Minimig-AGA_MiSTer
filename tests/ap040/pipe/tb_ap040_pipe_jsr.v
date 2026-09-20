@@ -116,9 +116,9 @@ initial begin
 
 	// See tb_ap040_pipe_move_mem.v's header for why the poke must land
 	// here, past the reset edge's own NBA region.
-	dut.u_regfile.areg[0] = 32'h0000_0406;
-	dut.u_regfile.areg[1] = 32'h0000_0400;
-	dut.u_regfile.isp     = 32'h0000_0600;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0406;
+	dut.u_cpu.u_regfile.areg[1] = 32'h0000_0400;
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 25) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -145,9 +145,9 @@ initial begin
 
 	// A7 must be decremented by exactly 4 per JSR -- read directly, same
 	// hierarchical-poke style used to seed it.
-	if (dut.u_regfile.isp !== 32'h0000_05F8) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05F8) begin
 		errors = errors + 1;
-		$display("FAIL: A7 (isp) = %h, expected 000005f8 (two JSRs, -4 each, from 00000600)", dut.u_regfile.isp);
+		$display("FAIL: A7 (isp) = %h, expected 000005f8 (two JSRs, -4 each, from 00000600)", dut.u_cpu.u_regfile.isp);
 	end
 
 	// Both pushes' return addresses, read directly out of the L1 array,

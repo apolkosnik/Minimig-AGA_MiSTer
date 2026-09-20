@@ -218,26 +218,26 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	dut.u_regfile.isp = 32'h0000_0600;
-	dut.u_regfile.usp = 32'h0000_0500;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.usp = 32'h0000_0500;
 
 	repeat ((PROG_WORDS + 1200) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.dreg[6] !== 32'h0000_1FFF) begin
+	if (dut.u_cpu.u_regfile.dreg[6] !== 32'h0000_1FFF) begin
 		errors = errors + 1;
-		$display("FAIL: D6 = %h, expected 00001fff -- frame facts that did not hold:", dut.u_regfile.dreg[6]);
+		$display("FAIL: D6 = %h, expected 00001fff -- frame facts that did not hold:", dut.u_cpu.u_regfile.dreg[6]);
 		for (b = 0; b < 13; b = b + 1)
-			if (!dut.u_regfile.dreg[6][b]) $display("      bit %0d", b);
+			if (!dut.u_cpu.u_regfile.dreg[6][b]) $display("      bit %0d", b);
 	end
-	check32("D7 (handler entries)",                       dut.u_regfile.dreg[7], 32'h0000_0006);
-	check32("D5 (user code reached its end)",             dut.u_regfile.dreg[5], 32'h0000_0055);
-	check32("D4 (TRAP #0 handler finished)",              dut.u_regfile.dreg[4], 32'h0000_0033);
+	check32("D7 (handler entries)",                       dut.u_cpu.u_regfile.dreg[7], 32'h0000_0006);
+	check32("D5 (user code reached its end)",             dut.u_cpu.u_regfile.dreg[5], 32'h0000_0055);
+	check32("D4 (TRAP #0 handler finished)",              dut.u_cpu.u_regfile.dreg[4], 32'h0000_0033);
 	check32("D1 (MOVEM round trip on the user stack)",    dbg_d1,                32'h1111_2222);
 	check32("D2 (MOVEM round trip on the user stack)",    dbg_d2,                32'h3333_4444);
-	check32("USP",                                        dut.u_regfile.usp,     32'h0000_0500);
-	check32("ISP",                                        dut.u_regfile.isp,     32'h0000_0600);
-	check32("SR S bit at the end",                        {31'd0, dut.sr[13]},   32'h0000_0001);
-	check32("SR T bits at the end",                       {30'd0, dut.sr[15:14]}, 32'h0000_0000);
+	check32("USP",                                        dut.u_cpu.u_regfile.usp,     32'h0000_0500);
+	check32("ISP",                                        dut.u_cpu.u_regfile.isp,     32'h0000_0600);
+	check32("SR S bit at the end",                        {31'd0, dut.u_cpu.sr[13]},   32'h0000_0001);
+	check32("SR T bits at the end",                       {30'd0, dut.u_cpu.sr[15:14]}, 32'h0000_0000);
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
 	    dbg_eaf_valid || dbg_ex_valid || dbg_wb_valid) begin

@@ -100,7 +100,7 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 220) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -124,10 +124,10 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: [$0504] = %h%h, expected 22222222", dut.u_l1.mem[130], dut.u_l1.mem[131]);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_0600 || dut.u_regfile.areg[0] !== 32'h0) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600 || dut.u_cpu.u_regfile.areg[0] !== 32'h0) begin
 		errors = errors + 1;
 		$display("FAIL: A7/A0 = %h/%h, expected 00000600/0 (control modes touch no address register)",
-		         dut.u_regfile.isp, dut.u_regfile.areg[0]);
+		         dut.u_cpu.u_regfile.isp, dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

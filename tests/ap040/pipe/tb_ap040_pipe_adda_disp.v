@@ -124,19 +124,19 @@ initial begin
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[1] !== 32'h0000_1030) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_1030) begin
 		errors = errors + 1;
-		$display("FAIL: A1 = %h, expected 00001030 (ADDA.L (0,A0),A1)", dut.u_regfile.areg[1]);
+		$display("FAIL: A1 = %h, expected 00001030 (ADDA.L (0,A0),A1)", dut.u_cpu.u_regfile.areg[1]);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_2020) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_2020) begin
 		errors = errors + 1;
 		$display("FAIL: A2 = %h, expected 00002020 (SUBA.W: 00200eef means the Word size was lost, ffff2020 the sign)",
-		         dut.u_regfile.areg[2]);
+		         dut.u_cpu.u_regfile.areg[2]);
 	end
-	if (dut.u_regfile.areg[3] !== 32'h0000_1060) begin
+	if (dut.u_cpu.u_regfile.areg[3] !== 32'h0000_1060) begin
 		errors = errors + 1;
 		$display("FAIL: A3 = %h, expected 00001060 (CMPA writes nothing, then ADDA.L adds $30)",
-		         dut.u_regfile.areg[3]);
+		         dut.u_cpu.u_regfile.areg[3]);
 	end
 
 	// dbg_ccr[3:0] is {N,Z,V,C}. The CMPA set Z; the ADDA after it must not

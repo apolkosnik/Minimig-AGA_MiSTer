@@ -108,16 +108,16 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// SR resets to $2700. ANDI #$F8FF clears the mask, ORI #$0500 sets it to
 	// 5, and neither CCR operation may touch the upper byte.
-	if (dut.sr[15:8] !== 8'h25) begin
+	if (dut.u_cpu.sr[15:8] !== 8'h25) begin
 		errors = errors + 1;
 		$display("FAIL: SR[15:8] = %h, expected 25 (supervisor set, mask 5; 00 means a CCR op ran 16 bits wide)",
-		         dut.sr[15:8]);
+		         dut.u_cpu.sr[15:8]);
 	end
 	if (dbg_d0 !== 32'hFFFF_FFFF) begin
 		errors = errors + 1;

@@ -18,6 +18,15 @@
 `define AP040_PIPE_DEFS_SVH
 
 // Internal transfer sizes
+// Function codes, for the bus port alone (milestone 81) -- the same values
+// rtl/ap040/ap040_defs.svh uses, since ap040_pipe_membus.v drives the same
+// external port rtl/ap040/ap040_core.v does.
+`define AP040_FC_USER_DATA   3'd1
+`define AP040_FC_USER_PROG   3'd2
+`define AP040_FC_SUPER_DATA  3'd5
+`define AP040_FC_SUPER_PROG  3'd6
+`define AP040_FC_CPU_SPACE   3'd7
+
 `define AP040_SZ_B        2'd0
 `define AP040_SZ_W        2'd1
 `define AP040_SZ_L        2'd2

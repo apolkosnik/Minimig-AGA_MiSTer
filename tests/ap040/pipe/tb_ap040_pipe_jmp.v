@@ -115,8 +115,8 @@ initial begin
 
 	// See tb_ap040_pipe_move_mem.v's header for why the poke must land
 	// here, past the reset edge's own NBA region.
-	dut.u_regfile.areg[0] = 32'h0000_0406;
-	dut.u_regfile.areg[1] = 32'h0000_0400;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0406;
+	dut.u_cpu.u_regfile.areg[1] = 32'h0000_0400;
 
 	repeat ((PROG_WORDS + 25) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 

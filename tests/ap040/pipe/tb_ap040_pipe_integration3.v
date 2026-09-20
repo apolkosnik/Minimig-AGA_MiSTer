@@ -151,7 +151,7 @@ initial begin
 
 	// BSR, LINK and MOVEM all push, so A7 must point somewhere real. See
 	// tb_ap040_pipe_move_mem.v's header for why the poke lands here.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -169,9 +169,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: [$0900] = %h%h, expected 0000000f (the RMW)", dut.u_l1.mem[640], dut.u_l1.mem[641]);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
-		$display("FAIL: A7 = %h, expected 00000600 (MOVEM and two BSR/RTS pairs must balance)", dut.u_regfile.isp);
+		$display("FAIL: A7 = %h, expected 00000600 (MOVEM and two BSR/RTS pairs must balance)", dut.u_cpu.u_regfile.isp);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

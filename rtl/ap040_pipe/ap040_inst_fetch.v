@@ -32,8 +32,7 @@
 module ap040_inst_fetch
 #(
 	parameter [31:0] PC_RESET   = 32'h0000_0400,
-	parameter         PROG_WORDS = 10,
-	parameter         L1_AW      = 12   // must match the ap040_pipe_l1.v instance's AW
+	parameter         PROG_WORDS = 10
 )
 (
 	input             clk,
@@ -55,7 +54,7 @@ module ap040_inst_fetch
 
 	// ap040_pipe_l1.v port A -- read-only from here (see header). Requested
 	// with l1_req_a, returned with l1_rvalid_a (milestone 80).
-	output [L1_AW-1:0] l1_addr_a,
+	output     [31:0] l1_addr_a,
 	output            l1_req_a,
 	input       [15:0] l1_rdata_a,
 	input             l1_rvalid_a,
@@ -77,13 +76,20 @@ reg        if_pend;                  // a fetch has been requested and not yet h
 // register set at the request.
 assign if_valid  = if_pend && l1_rvalid_a;
 wire   can_issue = !if_pend || l1_rvalid_a;
+// The stage advances whenever it could take a new word; it only ASKS memory
+// for one when there is a word to ask for (milestone 81). Those were the
+// same signal until a real bus was underneath: with nothing left to fetch,
+// the request kept firing at the same address every cycle, which an array
+// answers for free and a bus does not. The advance itself must keep firing,
+// because it is what clears if_pend and lets the pipeline drain.
+wire   advance   = ce && (flush || (!stall_in && can_issue));
 // A decode redirect needs no special case here: decode redirects only on a
 // word it can see (if_valid), and if_valid implies rvalid_a implies
 // can_issue, so the redirected fetch always issues in the pulse's cycle. A
 // first draft added `|| redirect_valid` on a misdiagnosis of a decode bug;
 // the mutation that removed it passed the slow build, which is how the
 // misdiagnosis was found.
-assign l1_req_a  = ce && (flush || (!stall_in && can_issue));
+assign l1_req_a  = advance && have_more;
 
 // The redirect must land on THIS fetch, not merely be scheduled for the
 // following one -- otherwise the word at the old (sequential) pc still
@@ -96,7 +102,9 @@ wire [31:0] fetch_pc = redirect_valid ? redirect_pc : pc;
 // Combinational -- see header. Assumes fetch_pc stays within the L1's
 // address window (PC_RESET..PC_RESET+2*(2**AW-1)), same assumption the old
 // inline rom_idx made about staying in-ROM.
-assign l1_addr_a = (fetch_pc - PC_RESET) >> 1;
+// The byte address itself (milestone 81): what the memory does with it is
+// the memory's business, not the fetcher's.
+assign l1_addr_a = fetch_pc;
 
 // if_opcode is L1's OWN registered output, not re-registered here -- see
 // header for why that reproduces the old timing exactly rather than adding
@@ -114,7 +122,7 @@ always @(posedge clk) begin
 	// carries would otherwise be lost. Decode's own speculative redirect does
 	// NOT get this treatment -- it arrives without a flush, and while decode
 	// is stalled its branch has not been consumed, so it will fire again.
-	end else if (l1_req_a) begin
+	end else if (advance) begin
 		if_pend <= have_more;
 		if (have_more) begin
 			if_pc     <= fetch_pc;

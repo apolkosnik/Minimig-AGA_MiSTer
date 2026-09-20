@@ -175,20 +175,26 @@
 module ap040_pipe_l1
 #(
 	parameter AW = 12,   // word address width -> 2**AW words of storage
-	parameter DW = 16    // word width
+	parameter DW = 16,   // word width
+	// Both ports take a 32-bit BYTE address (milestone 81); this module maps
+	// it to its own storage, which is a window of 2**AW words starting at
+	// PC_RESET. The conversion used to live in ap040_inst_fetch.v and
+	// ap040_ea_fetch.v, which meant the CPU emitted an index into THIS
+	// array's layout -- nothing else could ever have been attached to it.
+	parameter [31:0] PC_RESET = 32'h0000_0400
 )
 (
 	input                clock,
 	input                nreset,   // see header -- resets wbuf_valid only
 	// port A: instruction fetch, 16-bit reads
-	input      [AW-1:0]  address_a,
+	input      [31:0]    address_a,   // byte address
 	input      [DW-1:0]  data_a,
 	input                wren_a,
 	input                en_a,      // request; the requester holds address_a until rvalid_a
 	output reg [DW-1:0]  q_a,
 	output reg           rvalid_a,  // q_a is the word for the last request; holds until the next
 	// port B: data, 32-bit reads through the write buffer's forward, sized writes
-	input      [AW-1:0]  address_b,
+	input      [31:0]    address_b,   // byte address of the HIGH word
 	input       [31:0]   data_b,
 	input                wren_b,
 	input       [3:0]    be_b,
@@ -199,6 +205,11 @@ module ap040_pipe_l1
 );
 
 reg [DW-1:0] mem [0:(1<<AW)-1];
+
+// The window map. Truncation to AW bits is deliberate and is what the
+// callers' own `(addr - PC_RESET) >> 1` did before this milestone.
+wire [AW-1:0] ia = (address_a - PC_RESET) >> 1;
+wire [AW-1:0] ib = (address_b - PC_RESET) >> 1;
 integer i;
 initial for (i = 0; i < (1<<AW); i = i + 1) mem[i] = `AP040_OP_NOP;
 
@@ -253,8 +264,8 @@ always @(posedge clock) begin
 
 	// ---- port A ----
 	if (en_a) begin
-		if (wren_a) mem[address_a] <= data_a;
-		a_addr   <= address_a;
+		if (wren_a) mem[ia] <= data_a;
+		a_addr   <= ia;
 		a_cnt    <= extra_a;
 		a_busy   <= 1'b1;
 		rvalid_a <= 1'b0;
@@ -269,7 +280,7 @@ always @(posedge clock) begin
 	// A zero-extra request returns the cycle after it was made: the busy
 	// branch above is skipped in the request cycle, so resolve it here.
 	if (en_a && extra_a == 2'd0) begin
-		q_a      <= mem[address_a];
+		q_a      <= mem[ia];
 		rvalid_a <= 1'b1;
 		a_busy   <= 1'b0;
 	end
@@ -279,7 +290,7 @@ always @(posedge clock) begin
 `ifdef AP040_PIPE_L1_SLOW
 		if (b_busy) $display("ERROR: ap040_pipe_l1 port B read issued while one is in flight");
 `endif
-		b_addr   <= address_b;
+		b_addr   <= ib;
 		b_cnt    <= extra_b;
 		b_busy   <= 1'b1;
 		rvalid_b <= 1'b0;
@@ -295,10 +306,10 @@ always @(posedge clock) begin
 		// same cycle-after return as before this milestone, merged at the
 		// request address
 		q_b <= {
-		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[3]) ? wbuf_data[31:24] : mem[address_b][15:8],
-		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[2]) ? wbuf_data[23:16] : mem[address_b][7:0],
-		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[1]) ? wbuf_data[15:8]  : mem[address_b + {{(AW-1){1'b0}}, 1'b1}][15:8],
-		    (wbuf_valid && wbuf_addr == address_b && wbuf_be[0]) ? wbuf_data[7:0]   : mem[address_b + {{(AW-1){1'b0}}, 1'b1}][7:0]
+		    (wbuf_valid && wbuf_addr == ib && wbuf_be[3]) ? wbuf_data[31:24] : mem[ib][15:8],
+		    (wbuf_valid && wbuf_addr == ib && wbuf_be[2]) ? wbuf_data[23:16] : mem[ib][7:0],
+		    (wbuf_valid && wbuf_addr == ib && wbuf_be[1]) ? wbuf_data[15:8]  : mem[ib + {{(AW-1){1'b0}}, 1'b1}][15:8],
+		    (wbuf_valid && wbuf_addr == ib && wbuf_be[0]) ? wbuf_data[7:0]   : mem[ib + {{(AW-1){1'b0}}, 1'b1}][7:0]
 		};
 		rvalid_b <= 1'b1;
 		b_busy   <= 1'b0;
@@ -320,7 +331,7 @@ always @(posedge clock) begin
 				wbuf_hold <= wbuf_hold - 2'd1;
 		end else if (wren_b) begin
 			wbuf_valid <= 1'b1;
-			wbuf_addr  <= address_b;
+			wbuf_addr  <= ib;
 			wbuf_data  <= data_b;
 			wbuf_be    <= be_b;
 			wbuf_hold  <= extra_w;

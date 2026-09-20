@@ -112,10 +112,10 @@ initial begin
 
 	repeat ((PROG_WORDS + 60) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[1] !== 32'h0000_0480) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_0480) begin
 		errors = errors + 1;
 		$display("FAIL: A1 = %h, expected 00000480 (LEA (d16,PC); 0000047e means the base was the opcode PC, not PC+2)",
-		         dut.u_regfile.areg[1]);
+		         dut.u_cpu.u_regfile.areg[1]);
 	end
 	if (dbg_d0 !== 32'h1111_2222) begin
 		errors = errors + 1;
@@ -125,15 +125,15 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D1 = %h, expected 0000000c (5 + [$0484]; the ALU family with a PC-relative source)", dbg_d1);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_0400) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_0400) begin
 		errors = errors + 1;
 		$display("FAIL: A2 = %h, expected 00000400 (a NEGATIVE PC displacement, reaching back past the program)",
-		         dut.u_regfile.areg[2]);
+		         dut.u_cpu.u_regfile.areg[2]);
 	end
-	if (dut.u_regfile.areg[3] !== 32'h0000_0426) begin
+	if (dut.u_cpu.u_regfile.areg[3] !== 32'h0000_0426) begin
 		errors = errors + 1;
 		$display("FAIL: A3 = %h, expected 00000426 (PC base composed with milestone 56's index path)",
-		         dut.u_regfile.areg[3]);
+		         dut.u_cpu.u_regfile.areg[3]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

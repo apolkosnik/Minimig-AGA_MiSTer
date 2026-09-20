@@ -118,7 +118,7 @@ initial begin
 
 	// BSR, LINK and MOVEM all push, so A7 must point somewhere real. See
 	// tb_ap040_pipe_move_mem.v's header for why the poke lands here.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -128,9 +128,9 @@ initial begin
 		$display("FAIL: checkpoints D2 = %h, expected 00000004 (ffffffff = a JMP fell through onto a poison)",
 		         dbg_d2);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
-		$display("FAIL: A7 = %h, expected 00000600 (three JSR/RTS pairs must balance)", dut.u_regfile.isp);
+		$display("FAIL: A7 = %h, expected 00000600 (three JSR/RTS pairs must balance)", dut.u_cpu.u_regfile.isp);
 	end
 	if (dbg_d0 !== 32'h0000_0004 || dbg_d1 !== 32'h0000_0002) begin
 		errors = errors + 1;

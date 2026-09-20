@@ -19,7 +19,7 @@
 // different (PC_RESET-relative, see ap040_ea_fetch.v's header) index --      //
 // there is no separate data-memory model to keep in sync.                    //
 //                                                                          //
-// A0 itself is poked directly (dut.u_regfile.areg[0]), not loaded by an      //
+// A0 itself is poked directly (dut.u_cpu.u_regfile.areg[0]), not loaded by an      //
 // instruction -- MOVEA/LEA don't exist yet (deferred, see                    //
 // AP040_IMPLEMENTATION_PLAN.md section 6). This means EX-forwarding INTO      //
 // the address computation (a producer instruction writing An immediately     //
@@ -106,7 +106,7 @@ initial begin
 	// for one delta, gone by the next clock read) -- unlike ap040_pipe_l1.v's
 	// mem[], which has no reset logic at all, so the ROM pokes above never
 	// hit this race. Waiting one more edge sidesteps it entirely.
-	dut.u_regfile.areg[0] = 32'h0000_0600;   // word index $100, PC_RESET-relative
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0600;   // word index $100, PC_RESET-relative
 
 	// One extra cycle over the usual "PROG_WORDS + 20" margin for the
 	// memory stall.

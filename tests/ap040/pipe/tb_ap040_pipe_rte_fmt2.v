@@ -107,8 +107,8 @@ initial begin
 	// returns with JMP, not RTE), so A7 must point somewhere real and
 	// clear of the program. See tb_ap040_pipe_move_mem.v's header for why
 	// the poke has to land past the reset edge's own NBA region.
-	dut.u_regfile.areg[0] = 32'h0000_0407;  // A0: odd JMP target
-	dut.u_regfile.isp     = 32'h0000_0600;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0407;  // A0: odd JMP target
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -122,10 +122,10 @@ initial begin
 	end
 	// The point of the milestone. A format $2 frame is twelve bytes; popping
 	// eight returns correctly and leaves A7 four low, once per return.
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
 		$display("FAIL: A7 = %h, expected 00000600 (000005fc means RTE popped an 8-byte frame off a 12-byte one)",
-		         dut.u_regfile.isp);
+		         dut.u_cpu.u_regfile.isp);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

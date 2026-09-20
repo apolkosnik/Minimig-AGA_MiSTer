@@ -121,24 +121,24 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.isp !== 32'h0000_05F0) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05F0) begin
 		errors = errors + 1;
 		$display("FAIL: A7 = %h, expected 000005f0 ($0600 - $20 + $10; 0610 means the SUBA was skipped or reversed, 05e0 the ADDA)",
-		         dut.u_regfile.isp);
+		         dut.u_cpu.u_regfile.isp);
 	end
-	if (dut.u_regfile.areg[1] !== 32'h0000_0FF8) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_0FF8) begin
 		errors = errors + 1;
 		$display("FAIL: A1 = %h, expected 00000ff8 (ADDA.W #$FFF8 must sign-extend; zero-extending gives 00010ff8)",
-		         dut.u_regfile.areg[1]);
+		         dut.u_cpu.u_regfile.areg[1]);
 	end
-	if (dut.u_regfile.areg[3] !== 32'h0000_0FFC) begin
+	if (dut.u_cpu.u_regfile.areg[3] !== 32'h0000_0FFC) begin
 		errors = errors + 1;
 		$display("FAIL: A3 = %h, expected 00000ffc (CMPA must write nothing, then ADDA.L #4)",
-		         dut.u_regfile.areg[3]);
+		         dut.u_cpu.u_regfile.areg[3]);
 	end
 
 	// dbg_ccr[3:0] is {N,Z,V,C}. CMPA set Z although its destination is an

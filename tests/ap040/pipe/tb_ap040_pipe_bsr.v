@@ -103,7 +103,7 @@ initial begin
 	// here, past the reset edge's own NBA region. A7 (sr_s=1/sr_m=0
 	// hardwired in ap040_pipe_core.v, so A7 always banks to ISP) is
 	// ap040_pipe_regfile.v's internal `isp` register.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -130,9 +130,9 @@ initial begin
 
 	// A7 must be decremented by exactly 4 per BSR -- read directly, same
 	// hierarchical-poke style used to seed it.
-	if (dut.u_regfile.isp !== 32'h0000_05F8) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05F8) begin
 		errors = errors + 1;
-		$display("FAIL: A7 (isp) = %h, expected 000005f8 (two BSRs, -4 each, from 00000600)", dut.u_regfile.isp);
+		$display("FAIL: A7 (isp) = %h, expected 000005f8 (two BSRs, -4 each, from 00000600)", dut.u_cpu.u_regfile.isp);
 	end
 
 	// Both pushes' return addresses, read directly out of the L1 array --

@@ -114,18 +114,18 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[1] !== 32'h0000_0480) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_0480) begin
 		errors = errors + 1;
 		$display("FAIL: A1 = %h, expected 00000480 (LEA $xxx.L; deadbeef means it read instead of addressing)",
-		         dut.u_regfile.areg[1]);
+		         dut.u_cpu.u_regfile.areg[1]);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_0484) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_0484) begin
 		errors = errors + 1;
-		$display("FAIL: A2 = %h, expected 00000484 (LEA $xxx.W, the short form)", dut.u_regfile.areg[2]);
+		$display("FAIL: A2 = %h, expected 00000484 (LEA $xxx.W, the short form)", dut.u_cpu.u_regfile.areg[2]);
 	end
 	// $05FC is word index 254, $05F8 is 252.
 	if ({dut.u_l1.mem[254], dut.u_l1.mem[255]} !== 32'h0000_0480) begin
@@ -138,9 +138,9 @@ initial begin
 		$display("FAIL: [$05F8] = %h%h, expected 00000484 (PEA $xxx.W)",
 		         dut.u_l1.mem[252], dut.u_l1.mem[253]);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_05F8) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05F8) begin
 		errors = errors + 1;
-		$display("FAIL: A7 = %h, expected 000005f8 (two pushes of four bytes)", dut.u_regfile.isp);
+		$display("FAIL: A7 = %h, expected 000005f8 (two pushes of four bytes)", dut.u_cpu.u_regfile.isp);
 	end
 
 	// dbg_ccr[3:0] is {N,Z,V,C}. MOVEQ #1 leaves them all clear; neither LEA

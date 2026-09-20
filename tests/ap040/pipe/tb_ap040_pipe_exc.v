@@ -139,8 +139,8 @@ initial begin
 
 	// See tb_ap040_pipe_move_mem.v's header for why the poke must land
 	// here, past the reset edge's own NBA region.
-	dut.u_regfile.areg[2] = 32'h0000_0406;  // A2: resume-mainline target for JMP
-	dut.u_regfile.isp     = 32'h0000_0600;  // A7
+	dut.u_cpu.u_regfile.areg[2] = 32'h0000_0406;  // A2: resume-mainline target for JMP
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;  // A7
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -195,9 +195,9 @@ initial begin
 	end
 
 	// A7 decremented by exactly 8 twice (two format-$0 frames), from $600.
-	if (dut.u_regfile.isp !== 32'h0000_05F0) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05F0) begin
 		errors = errors + 1;
-		$display("FAIL: A7 (isp) = %h, expected 000005f0 (two format-$0 frames, -8 each, from 00000600)", dut.u_regfile.isp);
+		$display("FAIL: A7 (isp) = %h, expected 000005f0 (two format-$0 frames, -8 each, from 00000600)", dut.u_cpu.u_regfile.isp);
 	end
 
 	if (dbg_ccr[3:0] !== 4'b0000) begin

@@ -165,22 +165,22 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 600) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// Part 1
 	check32("D1 (landing point after the repaired RTE)",       dbg_d1,                32'h0000_002A);
 	check32("D2 (stacked SR, the live SR with CCR at the RTE)", dbg_d2,                32'h0000_271F);
-	check32("D3 (stacked PC, the RTE's own address)",          dut.u_regfile.dreg[3], 32'h0000_041E);
-	check32("D4 (format/vector word: format 0, vector 14)",    dut.u_regfile.dreg[4], 32'h0000_0038);
-	check32("D5 (bad frame's SR, eight bytes above the handler's)", dut.u_regfile.dreg[5], 32'h0000_2700);
-	check32("D6 (bad frame's PC)",                             dut.u_regfile.dreg[6], 32'h0000_0420);
+	check32("D3 (stacked PC, the RTE's own address)",          dut.u_cpu.u_regfile.dreg[3], 32'h0000_041E);
+	check32("D4 (format/vector word: format 0, vector 14)",    dut.u_cpu.u_regfile.dreg[4], 32'h0000_0038);
+	check32("D5 (bad frame's SR, eight bytes above the handler's)", dut.u_cpu.u_regfile.dreg[5], 32'h0000_2700);
+	check32("D6 (bad frame's PC)",                             dut.u_cpu.u_regfile.dreg[6], 32'h0000_0420);
 	// Part 2
 	check32("D0 (landing point after the format-3 RTE)",       dbg_d0,                32'h0000_0033);
 	// Both parts
-	check32("A7 (both frames popped whole)",                   dut.u_regfile.isp,     32'h0000_0600);
-	check32("SR (from the last frame popped)",                 {16'd0, dut.sr},       32'h0000_2700);
+	check32("A7 (both frames popped whole)",                   dut.u_cpu.u_regfile.isp,     32'h0000_0600);
+	check32("SR (from the last frame popped)",                 {16'd0, dut.u_cpu.sr},       32'h0000_2700);
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
 	    dbg_eaf_valid || dbg_ex_valid || dbg_wb_valid) begin

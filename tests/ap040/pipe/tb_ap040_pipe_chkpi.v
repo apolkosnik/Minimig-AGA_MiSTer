@@ -132,7 +132,7 @@ initial begin
 	// returns with JMP, not RTE), so A7 must point somewhere real and
 	// clear of the program. See tb_ap040_pipe_move_mem.v's header for why
 	// the poke has to land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 500) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -145,10 +145,10 @@ initial begin
 	// CHK (A0)+ still advances A0. Here that falls out of the second write
 	// port surviving the exception path: eaf_writes_an is set from an_wr_any
 	// in the exception branch as well as the ordinary one.
-	if (dut.u_regfile.areg[0] !== 32'h0000_0482) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0482) begin
 		errors = errors + 1;
 		$display("FAIL: A0 = %h, expected 00000482 (a trapping CHK (A0)+ must still advance A0 by the Word step)",
-		         dut.u_regfile.areg[0]);
+		         dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

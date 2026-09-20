@@ -112,9 +112,9 @@ initial begin
 		$display("FAIL: D2 = %h, expected low word 3344 (a word step must be TWO)", dbg_d2);
 	end
 	// Separate quantity: catches a step used for the access but not the update.
-	if (dut.u_regfile.areg[0] !== 32'h0000_0484) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0484) begin
 		errors = errors + 1;
-		$display("FAIL: A0 = %h, expected 00000484 (1 + 1 + 2 from 0480)", dut.u_regfile.areg[0]);
+		$display("FAIL: A0 = %h, expected 00000484 (1 + 1 + 2 from 0480)", dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

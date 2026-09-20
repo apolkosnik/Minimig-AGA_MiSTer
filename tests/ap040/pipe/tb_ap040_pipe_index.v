@@ -145,10 +145,10 @@ initial begin
 		$display("FAIL: D1 = %h, expected 22232221 (an ADDRESS register as the index, on an ALU source)",
 		         dbg_d1);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_0484) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_0484) begin
 		errors = errors + 1;
 		$display("FAIL: A2 = %h, expected 00000484 (LEA (8,A0,D1.W*4); 00040484 means the Word index was zero-extended)",
-		         dut.u_regfile.areg[2]);
+		         dut.u_cpu.u_regfile.areg[2]);
 	end
 	if (dbg_d2 !== 32'h3333_3333) begin
 		errors = errors + 1;

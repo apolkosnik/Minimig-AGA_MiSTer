@@ -99,8 +99,8 @@ initial begin
 	nreset = 1;
 
 	@(posedge clk);
-	dut.u_regfile.areg[0] = 32'h0000_0480;
-	dut.u_regfile.areg[1] = 32'h0000_0480;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0480;
+	dut.u_cpu.u_regfile.areg[1] = 32'h0000_0480;
 
 	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -121,10 +121,10 @@ initial begin
 		$display("FAIL: D2 = %h, expected 11112222 (a load and a store disagree about $0480)", dbg_d2);
 	end
 	// Two postincrements: the update must go to A0, not to the data register.
-	if (dut.u_regfile.areg[0] !== 32'h0000_0488) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0488) begin
 		errors = errors + 1;
 		$display("FAIL: A0 = %h, expected 00000488 (the store's update went to the wrong register)",
-		         dut.u_regfile.areg[0]);
+		         dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

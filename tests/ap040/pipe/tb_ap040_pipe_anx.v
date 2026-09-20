@@ -111,7 +111,7 @@ initial begin
 	// The first instruction cannot read A0 until it reaches EA-fetch several
 	// cycles from now, so one cycle of margin is enough.
 	@(posedge clk);
-	dut.u_regfile.areg[0] = 32'h0000_0480;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0480;
 
 	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -133,9 +133,9 @@ initial begin
 		$display("FAIL: D2 = %h, expected 33334444 (-(An) must access the DECREMENTED address)", dbg_d2);
 	end
 	// And A0 itself must end where -(A0) left it.
-	if (dut.u_regfile.areg[0] !== 32'h0000_0484) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0484) begin
 		errors = errors + 1;
-		$display("FAIL: A0 = %h, expected 00000484 (two increments then one decrement)", dut.u_regfile.areg[0]);
+		$display("FAIL: A0 = %h, expected 00000484 (two increments then one decrement)", dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

@@ -41,13 +41,17 @@ reg nreset = 0;
 
 always #5 clk = ~clk;
 
-reg  [AW-1:0] address_a;
+// Both ports take a 32-bit BYTE address since milestone 81. This bench
+// still reasons in word indices, so it instantiates the module at
+// PC_RESET 0 and converts with ba() -- the array layout, and so every
+// index below, is unchanged.
+reg  [31:0]   address_a;
 reg           wren_a_r;
 reg           en_a = 1'b0;      // port A is REQUESTED since milestone 80 (see read_a below)
 wire   [15:0] q_a;
 wire          rvalid_a;
 
-reg  [AW-1:0] address_b;
+reg  [31:0]   address_b;
 reg    [31:0] data_b;
 reg           wren_b;
 reg           rd_b = 1'b0;      // and so is a port-B read
@@ -55,7 +59,12 @@ wire          wr_busy;
 wire   [31:0] q_b;
 wire          rvalid_b;
 
-ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
+function [31:0] ba;
+	input [31:0] idx;
+	ba = idx << 1;
+endfunction
+
+ap040_pipe_l1 #(.AW(AW), .DW(16), .PC_RESET(32'd0)) dut
 (
 	.clock     (clk),
 	.nreset    (nreset),
@@ -84,14 +93,14 @@ ap040_pipe_l1 #(.AW(AW), .DW(16)) dut
 // cycles. The exact-cycle drain checks below are the module's contract in
 // the normal build; the slow build waits instead, with a bound.
 task read_a;
-	input [AW-1:0] addr;
+	input [31:0] addr;   // word index; converted by ba() below
 	integer n;
 	begin
-		address_a = addr; en_a = 1;
+		address_a = ba(addr); en_a = 1;
 		@(posedge clk); #1;
 		en_a = 0; n = 0;
 		while (!rvalid_a && n < 8) begin @(posedge clk); #1; n = n + 1; end
-		if (!rvalid_a) begin errors = errors + 1; $display("FAIL: port A read of %h never returned", addr); end
+		if (!rvalid_a) begin errors = errors + 1; $display("FAIL: port A read of word %h never returned", addr); end
 	end
 endtask
 
@@ -171,7 +180,7 @@ initial begin
 	// ambiguity everywhere, not just where a failure happened to surface.
 
 	// -------------------- Case A: post, drain, land --------------------
-	address_b = 8'h10; data_b = 32'hAABB_CCDD; wren_b = 1;
+	address_b = ba(8'h10); data_b = 32'hAABB_CCDD; wren_b = 1;
 	@(posedge clk); #1;
 	wren_b = 0;
 	// wr_busy must be high THIS cycle -- the write just posted, not yet
@@ -188,7 +197,7 @@ initial begin
 
 	// -------------------- Case B: back-to-back posts --------------------
 	// Write 1 posts normally.
-	address_b = 8'h20; data_b = 32'h1111_2222; wren_b = 1;
+	address_b = ba(8'h20); data_b = 32'h1111_2222; wren_b = 1;
 	@(posedge clk); #1;
 	check1(wr_busy, 1'b1, "case B: wr_busy not asserted right after the first post");
 
@@ -203,7 +212,7 @@ initial begin
 	// actually accept write 2 -- the "at most one cycle" bound in the
 	// module header is from the moment wr_busy is OBSERVED to drop, not
 	// from the moment a request first starts waiting behind a busy write.
-	address_b = 8'h30; data_b = 32'h3333_4444; wren_b = 1;
+	address_b = ba(8'h30); data_b = 32'h3333_4444; wren_b = 1;
 	// Write 1 drains (one edge in the normal build). Write 2 -- held stable
 	// since before that edge -- is NOT accepted on the drain edge (drain
 	// takes priority, per the module's own priority rule): wr_busy must read
@@ -227,13 +236,13 @@ initial begin
 	check32({16'h0, q_a}, {16'h0, 16'h4444}, "case B: second write's low word wrong/missing");
 
 	// -------------------- Case C: read-after-write forwarding -----------
-	address_b = 8'h40; data_b = 32'hDEAD_BEEF; wren_b = 1;
+	address_b = ba(8'h40); data_b = 32'hDEAD_BEEF; wren_b = 1;
 	@(posedge clk); #1;
 	wren_b = 0;
 	// Buffer is now holding $DEADBEEF at $40, undrained (wr_busy high).
 	// Issue a read to the SAME address on this, the very next cycle.
 	check1(wr_busy, 1'b1, "case C: buffer not holding the write when the forwarding read is issued");
-	address_b = 8'h40; rd_b = 1;
+	address_b = ba(8'h40); rd_b = 1;
 	@(posedge clk); #1;
 	rd_b = 0;
 	begin : wait_c

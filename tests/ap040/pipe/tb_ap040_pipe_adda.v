@@ -139,33 +139,33 @@ initial begin
 
 	repeat ((PROG_WORDS + 80) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[1] !== 32'h1233_FFFF) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h1233_FFFF) begin
 		errors = errors + 1;
 		$display("FAIL: A1 = %h, expected 1233ffff (ADDA.W must write all 32 bits; a low-word splice leaves 1234ffff)",
-		         dut.u_regfile.areg[1]);
+		         dut.u_cpu.u_regfile.areg[1]);
 	end
-	if (dut.u_regfile.areg[3] !== 32'h0000_1020) begin
+	if (dut.u_cpu.u_regfile.areg[3] !== 32'h0000_1020) begin
 		errors = errors + 1;
-		$display("FAIL: A3 = %h, expected 00001020 (ADDA.L (A2),A3)", dut.u_regfile.areg[3]);
+		$display("FAIL: A3 = %h, expected 00001020 (ADDA.L (A2),A3)", dut.u_cpu.u_regfile.areg[3]);
 	end
-	if (dut.u_regfile.areg[4] !== 32'h0000_2010) begin
+	if (dut.u_cpu.u_regfile.areg[4] !== 32'h0000_2010) begin
 		errors = errors + 1;
 		$display("FAIL: A4 = %h, expected 00002010 (SUBA.W must SIGN-extend; zero-extending leaves ffff2010)",
-		         dut.u_regfile.areg[4]);
+		         dut.u_cpu.u_regfile.areg[4]);
 	end
-	if (dut.u_regfile.areg[5] !== 32'h0000_0486) begin
+	if (dut.u_cpu.u_regfile.areg[5] !== 32'h0000_0486) begin
 		errors = errors + 1;
 		$display("FAIL: A5 = %h, expected 00000486 (a Word postincrement steps by 2; from eac_size it would reach 0488)",
-		         dut.u_regfile.areg[5]);
+		         dut.u_cpu.u_regfile.areg[5]);
 	end
-	if (dut.u_regfile.areg[6] !== 32'h0000_1020) begin
+	if (dut.u_cpu.u_regfile.areg[6] !== 32'h0000_1020) begin
 		errors = errors + 1;
 		$display("FAIL: A6 = %h, expected 00001020 (CMPA must not write its result back)",
-		         dut.u_regfile.areg[6]);
+		         dut.u_cpu.u_regfile.areg[6]);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_047E) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_047E) begin
 		errors = errors + 1;
-		$display("FAIL: A2 = %h, expected 0000047e (ADDA.W D0,A2 after the CMPA)", dut.u_regfile.areg[2]);
+		$display("FAIL: A2 = %h, expected 0000047e (ADDA.W D0,A2 after the CMPA)", dut.u_cpu.u_regfile.areg[2]);
 	end
 
 	// dbg_ccr[3:0] is {N,Z,V,C}. The CMPA set Z; the ADDA that follows it

@@ -5,6 +5,11 @@
 # so no build products land in the repo, runs map/fit/sta in the FOREGROUND
 # with its PID printed, and prints the four numbers the plan tracks.
 #
+# TOP_LEVEL_ENTITY is ap040_pipe_core: the CPU plus the L1 array, which is
+# what the milestone benches run and what every fit in the plan has measured.
+# ap040_pipe_sys.v (the CPU plus ap040_pipe_membus.v, no array) is in the
+# file list too, so a fit of the bus-side top needs only the entity changed.
+#
 # L1_AW=4 on purpose: ap040_pipe_l1.v is a behavioural array with a
 # combinational forward, so in synthesis it becomes flops, not RAM. At the
 # default AW=12 that is 64 kbit of registers and swamps the core; at 4 it is

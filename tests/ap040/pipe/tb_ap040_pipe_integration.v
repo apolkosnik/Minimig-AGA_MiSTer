@@ -120,9 +120,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D1 = %h, expected 00000004 (the last element loaded)", dbg_d1);
 	end
-	if (dut.u_regfile.areg[0] !== 32'h0000_0490) begin
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0490) begin
 		errors = errors + 1;
-		$display("FAIL: A0 = %h, expected 00000490 (four postincrements from 0480)", dut.u_regfile.areg[0]);
+		$display("FAIL: A0 = %h, expected 00000490 (four postincrements from 0480)", dut.u_cpu.u_regfile.areg[0]);
 	end
 	// $04A0 is word index 80.
 	if ({dut.u_l1.mem[80], dut.u_l1.mem[81]} !== 32'h0000_000A) begin

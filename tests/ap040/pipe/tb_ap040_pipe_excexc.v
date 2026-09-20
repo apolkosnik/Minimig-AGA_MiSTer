@@ -127,18 +127,18 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 400) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	check32("[$0B00] (the old A0: nothing may land here)", {dut.u_l1.mem[896],  dut.u_l1.mem[897]},  32'h0000_0000);
 	check32("[$0C00] (the new A0 gets the new D0)",        {dut.u_l1.mem[1024], dut.u_l1.mem[1025]}, 32'h0000_0022);
 	check32("D2 (TRAP #1 handler ran)",  dbg_d2,                32'h0000_0001);
-	check32("D4 (CHK handler ran)",      dut.u_regfile.dreg[4], 32'h0000_0033);
-	check32("D5 (TRAP #4 handler ran)",  dut.u_regfile.dreg[5], 32'h0000_0044);
-	check32("D6 (end reached)",          dut.u_regfile.dreg[6], 32'h0000_0055);
-	check32("ISP",                       dut.u_regfile.isp,     32'h0000_0600);
-	check32("SR",                        {16'd0, dut.sr},       32'h0000_2700);
+	check32("D4 (CHK handler ran)",      dut.u_cpu.u_regfile.dreg[4], 32'h0000_0033);
+	check32("D5 (TRAP #4 handler ran)",  dut.u_cpu.u_regfile.dreg[5], 32'h0000_0044);
+	check32("D6 (end reached)",          dut.u_cpu.u_regfile.dreg[6], 32'h0000_0055);
+	check32("ISP",                       dut.u_cpu.u_regfile.isp,     32'h0000_0600);
+	check32("SR",                        {16'd0, dut.u_cpu.sr},       32'h0000_2700);
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
 	    dbg_eaf_valid || dbg_ex_valid || dbg_wb_valid) begin

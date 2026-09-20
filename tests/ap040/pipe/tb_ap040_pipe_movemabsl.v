@@ -114,7 +114,7 @@ initial begin
 	// A7 is the address bank's register 7, which in supervisor mode is the
 	// ISP. See tb_ap040_pipe_move_mem.v's header for why the poke has to
 	// land past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 220) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -136,9 +136,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D0/D1 = %h/%h, expected 11111111/22222222 (load from $xxx.L after a clobber)", dbg_d0, dbg_d1);
 	end
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
-		$display("FAIL: A7 = %h, expected 00000600 (a control mode writes no address register)", dut.u_regfile.isp);
+		$display("FAIL: A7 = %h, expected 00000600 (a control mode writes no address register)", dut.u_cpu.u_regfile.isp);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||

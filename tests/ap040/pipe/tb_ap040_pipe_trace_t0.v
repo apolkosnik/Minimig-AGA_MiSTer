@@ -206,12 +206,12 @@ initial begin
 	nreset = 1;
 	@(posedge clk);
 
-	dut.u_regfile.isp     = 32'h0000_0600;
-	dut.u_regfile.areg[5] = 32'h0000_0A00;   // log pointer
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;
+	dut.u_cpu.u_regfile.areg[5] = 32'h0000_0A00;   // log pointer
 
 	repeat ((PROG_WORDS + 1200) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	check32("D7 (trace entries)", dut.u_regfile.dreg[7], N_TRACE);
+	check32("D7 (trace entries)", dut.u_cpu.u_regfile.dreg[7], N_TRACE);
 	for (e = 0; e < N_TRACE; e = e + 1)
 		for (f = 0; f < 4; f = f + 1)
 			if (log_word[4*e + f] !== want_log(e, f)) begin
@@ -220,16 +220,16 @@ initial begin
 				         f == 0 ? "address" : f == 1 ? "PC" : f == 2 ? "SR" : "fmt/vec",
 				         log_word[4*e + f], want_log(e, f));
 			end
-	if (dut.u_regfile.dreg[7] > N_TRACE)
+	if (dut.u_cpu.u_regfile.dreg[7] > N_TRACE)
 		$display("      unexpected entry %0d: address %h PC %h SR %h", N_TRACE + 1,
 		         log_word[4*N_TRACE], log_word[4*N_TRACE+1], log_word[4*N_TRACE+2]);
 	check32("D1 (neither poison ran)",     dbg_d1,                32'h0000_0002);
-	check32("D3 (subroutine ran)",         dut.u_regfile.dreg[3], 32'h0000_0007);
-	check32("D4 (DBF pair counted down)",  dut.u_regfile.dreg[4], 32'h0000_FFFF);
-	check32("D5 (TRAP handler ran)",       dut.u_regfile.dreg[5], 32'h0000_0042);
-	check32("D6 (end reached)",            dut.u_regfile.dreg[6], 32'h0000_0055);
-	check32("ISP",                         dut.u_regfile.isp,     32'h0000_0600);
-	check32("SR at the end",               {16'd0, dut.sr},       32'h0000_2700);
+	check32("D3 (subroutine ran)",         dut.u_cpu.u_regfile.dreg[3], 32'h0000_0007);
+	check32("D4 (DBF pair counted down)",  dut.u_cpu.u_regfile.dreg[4], 32'h0000_FFFF);
+	check32("D5 (TRAP handler ran)",       dut.u_cpu.u_regfile.dreg[5], 32'h0000_0042);
+	check32("D6 (end reached)",            dut.u_cpu.u_regfile.dreg[6], 32'h0000_0055);
+	check32("ISP",                         dut.u_cpu.u_regfile.isp,     32'h0000_0600);
+	check32("SR at the end",               {16'd0, dut.u_cpu.sr},       32'h0000_2700);
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
 	    dbg_eaf_valid || dbg_ex_valid || dbg_wb_valid) begin

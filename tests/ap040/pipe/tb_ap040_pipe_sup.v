@@ -157,29 +157,29 @@ initial begin
 	repeat ((PROG_WORDS + 100) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	// ---------------------------------------------- Phase 1: MOVEC writes
-	if (dut.vbr !== 32'h0000_0040) begin
+	if (dut.u_cpu.vbr !== 32'h0000_0040) begin
 		errors = errors + 1;
-		$display("FAIL: VBR = %h, expected 00000040", dut.vbr);
+		$display("FAIL: VBR = %h, expected 00000040", dut.u_cpu.vbr);
 	end
-	if (dut.cacr !== 32'h8000_8000) begin
+	if (dut.u_cpu.cacr !== 32'h8000_8000) begin
 		errors = errors + 1;
-		$display("FAIL: CACR = %h, expected 80008000 (0xFFFFFFFF masked & 32'h8000_8000)", dut.cacr);
+		$display("FAIL: CACR = %h, expected 80008000 (0xFFFFFFFF masked & 32'h8000_8000)", dut.u_cpu.cacr);
 	end
-	if (dut.sfc !== 3'd3) begin
+	if (dut.u_cpu.sfc !== 3'd3) begin
 		errors = errors + 1;
-		$display("FAIL: SFC = %0d, expected 3", dut.sfc);
+		$display("FAIL: SFC = %0d, expected 3", dut.u_cpu.sfc);
 	end
-	if (dut.dfc !== 3'd5) begin
+	if (dut.u_cpu.dfc !== 3'd5) begin
 		errors = errors + 1;
-		$display("FAIL: DFC = %0d, expected 5", dut.dfc);
+		$display("FAIL: DFC = %0d, expected 5", dut.u_cpu.dfc);
 	end
 	// ISP: written to $70 here, then decremented by phase 4's exception
 	// frame (-8) at the very end -- checked at its FINAL value below, not
 	// here, to avoid asserting a value this same test later legitimately
 	// changes.
-	if (dut.u_regfile.msp !== 32'h0000_0060) begin
+	if (dut.u_cpu.u_regfile.msp !== 32'h0000_0060) begin
 		errors = errors + 1;
-		$display("FAIL: MSP = %h, expected 00000060", dut.u_regfile.msp);
+		$display("FAIL: MSP = %h, expected 00000060", dut.u_cpu.u_regfile.msp);
 	end
 	// USP: written to $50 here, then decremented by phase 3's BSR push
 	// (-4) -- same "check the final value" reasoning as ISP above.
@@ -205,9 +205,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D3 = %h, expected 00000077 (target A did not run -- BSR broken in user mode)", dbg_d3);
 	end
-	if (dut.u_regfile.usp !== 32'h0000_004C) begin
+	if (dut.u_cpu.u_regfile.usp !== 32'h0000_004C) begin
 		errors = errors + 1;
-		$display("FAIL: USP = %h, expected 0000004c (BSR's push, in user mode, must decrement USP by 4 from $50)", dut.u_regfile.usp);
+		$display("FAIL: USP = %h, expected 0000004c (BSR's push, in user mode, must decrement USP by 4 from $50)", dut.u_cpu.u_regfile.usp);
 	end
 	// The pushed return address, read directly out of the L1 array at
 	// USP-4 = $4C, same style every push-verifying test already uses.
@@ -233,20 +233,20 @@ initial begin
 	end
 	// VBR must be UNCHANGED by the faulted MOVEC (it never executes its
 	// real effect) -- still $40 from phase 1, not $00.
-	if (dut.vbr !== 32'h0000_0040) begin
+	if (dut.u_cpu.vbr !== 32'h0000_0040) begin
 		errors = errors + 1;
-		$display("FAIL: VBR = %h after the faulted MOVEC, expected 00000040 (unchanged -- the write must never have happened)", dut.vbr);
+		$display("FAIL: VBR = %h after the faulted MOVEC, expected 00000040 (unchanged -- the write must never have happened)", dut.u_cpu.vbr);
 	end
 	// The critical check this test exists for: the exception frame must
 	// land on the SUPERVISOR stack (ISP, $70->$68), NOT on USP -- which
 	// must stay EXACTLY where phase 3 left it, completely unperturbed.
-	if (dut.u_regfile.isp !== 32'h0000_0068) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0068) begin
 		errors = errors + 1;
-		$display("FAIL: ISP = %h, expected 00000068 (privilege-violation frame must decrement ISP by 8 from $70, even though the fault occurred IN USER MODE)", dut.u_regfile.isp);
+		$display("FAIL: ISP = %h, expected 00000068 (privilege-violation frame must decrement ISP by 8 from $70, even though the fault occurred IN USER MODE)", dut.u_cpu.u_regfile.isp);
 	end
-	if (dut.u_regfile.usp !== 32'h0000_004C) begin
+	if (dut.u_cpu.u_regfile.usp !== 32'h0000_004C) begin
 		errors = errors + 1;
-		$display("FAIL: USP = %h after the privilege violation, expected 0000004c (must be COMPLETELY unperturbed by an exception frame that has nothing to do with the user stack)", dut.u_regfile.usp);
+		$display("FAIL: USP = %h after the privilege violation, expected 0000004c (must be COMPLETELY unperturbed by an exception frame that has nothing to do with the user stack)", dut.u_cpu.u_regfile.usp);
 	end
 	// Frame @ ISP-8=$68 (word idx $0F4/$0F6): SR=$0000 (the OLD, pre-fault
 	// live SR -- S=0, everything else 0), PC=$0000043A (the faulting

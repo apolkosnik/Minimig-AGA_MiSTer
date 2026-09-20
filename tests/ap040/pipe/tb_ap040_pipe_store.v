@@ -101,8 +101,8 @@ initial begin
 	// Seeded after reset: the regfile clears areg, and no instruction here
 	// can load an address register yet.
 	@(posedge clk);
-	dut.u_regfile.areg[0] = 32'h0000_0480;
-	dut.u_regfile.areg[1] = 32'h0000_0484;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0480;
+	dut.u_cpu.u_regfile.areg[1] = 32'h0000_0484;
 
 	repeat ((PROG_WORDS + 30) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 

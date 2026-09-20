@@ -121,22 +121,22 @@ initial begin
 
 	repeat ((PROG_WORDS + 60) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dut.u_regfile.areg[1] !== 32'h0000_0480) begin
+	if (dut.u_cpu.u_regfile.areg[1] !== 32'h0000_0480) begin
 		errors = errors + 1;
-		$display("FAIL: A1 = %h, expected 00000480 (LEA (A0) must address, not read)", dut.u_regfile.areg[1]);
+		$display("FAIL: A1 = %h, expected 00000480 (LEA (A0) must address, not read)", dut.u_cpu.u_regfile.areg[1]);
 	end
-	if (dut.u_regfile.areg[2] !== 32'h0000_0488) begin
+	if (dut.u_cpu.u_regfile.areg[2] !== 32'h0000_0488) begin
 		errors = errors + 1;
-		$display("FAIL: A2 = %h, expected 00000488 (LEA (8,A0))", dut.u_regfile.areg[2]);
+		$display("FAIL: A2 = %h, expected 00000488 (LEA (8,A0))", dut.u_cpu.u_regfile.areg[2]);
 	end
-	if (dut.u_regfile.areg[3] !== 32'h0000_047C) begin
+	if (dut.u_cpu.u_regfile.areg[3] !== 32'h0000_047C) begin
 		errors = errors + 1;
 		$display("FAIL: A3 = %h, expected 0000047c (LEA (-4,A0): the displacement must sign-extend)",
-		         dut.u_regfile.areg[3]);
+		         dut.u_cpu.u_regfile.areg[3]);
 	end
-	if (dut.u_regfile.areg[4] !== 32'h0000_048C) begin
+	if (dut.u_cpu.u_regfile.areg[4] !== 32'h0000_048C) begin
 		errors = errors + 1;
-		$display("FAIL: A4 = %h, expected 0000048c (LEA (12,A0))", dut.u_regfile.areg[4]);
+		$display("FAIL: A4 = %h, expected 0000048c (LEA (12,A0))", dut.u_cpu.u_regfile.areg[4]);
 	end
 	if (dbg_d0 !== 32'hCAFE_BABE) begin
 		errors = errors + 1;

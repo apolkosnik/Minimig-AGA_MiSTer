@@ -243,8 +243,7 @@
 
 module ap040_ea_fetch
 #(
-	parameter [31:0] PC_RESET = 32'h0000_0400,   // must match ap040_inst_fetch.v's -- see header
-	parameter         L1_AW    = 12               // must match the ap040_pipe_l1.v instance's AW
+	parameter         DUMMY    = 0   // (no parameters of its own since milestone 81)
 )
 (
 	input             clk,
@@ -352,7 +351,7 @@ module ap040_ea_fetch
 
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
-	output [L1_AW-1:0] l1_addr_b,
+	output     [31:0] l1_addr_b,
 	input        [31:0] l1_q_b,
 	input               l1_rvalid_b,   // l1_q_b is the return for the last l1_rd_b (milestone 80)
 	output              l1_rd_b,       // port-B read request: one in flight at a time
@@ -1094,7 +1093,7 @@ wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
                             ret_active  ? ret_addr :
                                                                   ea_target;
-assign l1_addr_b = (l1_addr_word - PC_RESET) >> 1;
+assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 assign l1_wren_b = (live && (eac_is_push || store_now)) || exc_writing || mvm_st_want;
 // A sized store places its data in the lane the address names and enables
 // only that lane. Lane 3 is the longword's first byte, matching

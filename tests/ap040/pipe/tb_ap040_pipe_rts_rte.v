@@ -164,8 +164,8 @@ initial begin
 
 	// See tb_ap040_pipe_move_mem.v's header for why the poke must land
 	// here, past the reset edge's own NBA region.
-	dut.u_regfile.isp = 32'h0000_0600;
-	dut.u_regfile.usp = 32'h0000_0050;
+	dut.u_cpu.u_regfile.isp = 32'h0000_0600;
+	dut.u_cpu.u_regfile.usp = 32'h0000_0050;
 
 	repeat ((PROG_WORDS + 100) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -234,13 +234,13 @@ initial begin
 	// EXACTLY back where it started ($600), and the frame's own stack
 	// access must NEVER have touched USP (still $50 until the post-RTE
 	// BSR explicitly decrements it to $4C).
-	if (dut.u_regfile.isp !== 32'h0000_0600) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0600) begin
 		errors = errors + 1;
-		$display("FAIL: ISP = %h, expected 00000600 (both round trips together must be net zero)", dut.u_regfile.isp);
+		$display("FAIL: ISP = %h, expected 00000600 (both round trips together must be net zero)", dut.u_cpu.u_regfile.isp);
 	end
-	if (dut.u_regfile.usp !== 32'h0000_004C) begin
+	if (dut.u_cpu.u_regfile.usp !== 32'h0000_004C) begin
 		errors = errors + 1;
-		$display("FAIL: USP = %h, expected 0000004c (the post-RTE BSR's push, in user mode, must decrement USP by 4 from $50)", dut.u_regfile.usp);
+		$display("FAIL: USP = %h, expected 0000004c (the post-RTE BSR's push, in user mode, must decrement USP by 4 from $50)", dut.u_cpu.u_regfile.usp);
 	end
 
 	if (dbg_ccr[3:0] !== 4'b0000) begin

@@ -176,10 +176,10 @@ initial begin
 		$display("FAIL: $048C = %h%h, expected 11273344 (ADD.B at the ODD address $048D)",
 		         dut.u_l1.mem[70], dut.u_l1.mem[71]);
 	end
-	if (dut.u_regfile.areg[4] !== 32'h0000_048E) begin
+	if (dut.u_cpu.u_regfile.areg[4] !== 32'h0000_048E) begin
 		errors = errors + 1;
 		$display("FAIL: A4 = %h, expected 0000048e (the read half must still autoincrement)",
-		         dut.u_regfile.areg[4]);
+		         dut.u_cpu.u_regfile.areg[4]);
 	end
 	if (dbg_d0 !== 32'h0000_0005) begin
 		errors = errors + 1;

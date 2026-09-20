@@ -157,10 +157,10 @@ initial begin
 
 	// See tb_ap040_pipe_move_mem.v's header for why the poke must land
 	// here, past the reset edge's own NBA region.
-	dut.u_regfile.areg[0] = 32'h0000_0407;  // A0: odd JMP target
-	dut.u_regfile.areg[1] = 32'h0000_040D;  // A1: odd JSR target
-	dut.u_regfile.areg[2] = 32'h0000_0408;  // A2: handler A's resume target
-	dut.u_regfile.isp     = 32'h0000_0600;
+	dut.u_cpu.u_regfile.areg[0] = 32'h0000_0407;  // A0: odd JMP target
+	dut.u_cpu.u_regfile.areg[1] = 32'h0000_040D;  // A1: odd JSR target
+	dut.u_cpu.u_regfile.areg[2] = 32'h0000_0408;  // A2: handler A's resume target
+	dut.u_cpu.u_regfile.isp     = 32'h0000_0600;
 
 	repeat ((PROG_WORDS + 140) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
@@ -235,9 +235,9 @@ initial begin
 	// The real point of this whole test: BOTH decrements are exactly 12
 	// (one format-$2 frame each), never 12+4 -- JSR's own push must have
 	// been skipped entirely, not attempted and then orphaned.
-	if (dut.u_regfile.isp !== 32'h0000_05E8) begin
+	if (dut.u_cpu.u_regfile.isp !== 32'h0000_05E8) begin
 		errors = errors + 1;
-		$display("FAIL: ISP = %h, expected 000005e8 (two format-$2 frames, -12 each, from $600 -- JSR's push must never have been attempted)", dut.u_regfile.isp);
+		$display("FAIL: ISP = %h, expected 000005e8 (two format-$2 frames, -12 each, from $600 -- JSR's push must never have been attempted)", dut.u_cpu.u_regfile.isp);
 	end
 
 	if (dbg_ccr[3:0] !== 4'b0000) begin

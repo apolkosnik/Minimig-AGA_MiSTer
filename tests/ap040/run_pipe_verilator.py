@@ -21,7 +21,8 @@ RTL = ROOT / "rtl/ap040_pipe"
 TB = HERE / "pipe"
 
 CORE = [RTL / n for n in (
-    "ap040_pipe_core.v", "ap040_inst_fetch.v", "ap040_decode.v",
+    "ap040_pipe_core.v", "ap040_pipe_cpu.v", "ap040_pipe_sys.v",
+    "ap040_pipe_membus.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
     "ap040_pipe_l1.v")]
