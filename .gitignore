@@ -49,7 +49,6 @@ tests/ap040/build/*
 !tests/ap040/build/*.hex
 !tests/ap040/build/*.v
 !tests/ap040/build/*.s
-!tests/ap040/build/cputest/
 __pycache__/
 
 # ModelSim flows under rtl/sim: run artefacts, and the one generated source
