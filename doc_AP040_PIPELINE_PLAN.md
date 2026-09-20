@@ -1661,6 +1661,31 @@ real MMU or bus-error path arrives, which is the same boundary
    bench covers a memory source. A register-only or immediate-only bench
    does not test the operand routing at all.
 
+   ### Milestone 68: MOVEM's control modes
+
+   `(An)` and `(d16,An)`, both directions. They differ from the
+   autoincrement modes in THREE ways at once, and all three belong to the
+   MODE rather than to the direction:
+
+   - no register writeback at all
+   - the address walks UPWARD, even for a store
+   - the mask is numbered bit 0 = D0, even for a store
+
+   Only the predecrement store reverses the numbering and walks downward.
+   **Milestone 50 tied both behaviours to "is a store"**, which was
+   indistinguishable from the truth while `-(An)` was the only store mode
+   that existed -- a correct implementation of an incomplete rule. The
+   sequencer now carries `mvm_down` and `mvm_wb` as properties of the mode.
+
+   Reverting either rule breaks the control-mode bench and leaves the
+   autoincrement one passing, so the old bench could not have caught it.
+
+   `(d16,An)` also gathers a second word after the mask, so `id_imm` now
+   carries `{mask, displacement}` for every MOVEM, with the displacement
+   zero where the mode has none.
+
+   Still not reached: the absolute and PC-relative MOVEM modes.
+
    ### Milestone 67: MOVEM.W
 
    `ir[6]` is the SIZE, so the shapes had pinned it and only the Long forms

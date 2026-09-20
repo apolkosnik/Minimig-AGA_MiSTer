@@ -284,6 +284,8 @@ module ap040_ea_fetch
 	input             eac_is_movem,
 	input             eac_movem_dir,
 	input             eac_movem_word,
+	input             eac_movem_down,
+	input             eac_movem_wb,
 	input             eac_is_chk,
 	input             eac_is_immsr,
 	input             eac_immsr_to_sr,
@@ -512,7 +514,8 @@ wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
 // instruction autoincrements, so there is no contention. Hoisted here so
 // every branch below assigns the same three wires instead of repeating a
 // ternary that now has three cases.
-wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk)) || mvm_fin;
+wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk)) ||
+                         (mvm_fin && mvm_wb);
 wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          eac_is_store ? eac_dest_reg : eac_src_reg;
@@ -541,6 +544,13 @@ reg  [15:0] mvm_mask;
 reg  [31:0] mvm_addr;
 reg         mvm_dir;        // 1 = memory -> registers
 reg         mvm_word;       // 1 = Word transfers, sign-extended on load
+// Only the PREDECREMENT store walks downward and reverses the mask; every
+// other mode, store or load, walks up with bit 0 = D0. And only -(An) and
+// (An)+ write the address register back at all. Milestone 50 tied both
+// behaviours to "is a store", which was indistinguishable from the truth
+// while -(An) was the only store mode there was.
+reg         mvm_down;
+reg         mvm_wb;
 reg         mvm_rd_pend;    // an address was driven last cycle; data is here now
 reg   [3:0] mvm_rd_reg;
 
@@ -563,12 +573,16 @@ wire  [3:0] mvm_bit  = mvm_mask[0]  ? 4'd0 :
                      mvm_mask[15]  ? 4'd15 :
                                      4'd0;
 wire [15:0] mvm_onehot = (16'd1 << mvm_bit);
-wire  [3:0] mvm_reg  = mvm_dir ? mvm_bit : (4'd15 - mvm_bit);
+wire  [3:0] mvm_reg  = mvm_down ? (4'd15 - mvm_bit) : mvm_bit;
 // Word transfers step by two and occupy the half-word the address names --
 // which for this L1 is the HIGH half of the longword pair, lanes 3 and 2,
 // exactly as a sized store already does.
 wire [31:0] mvm_step    = mvm_word ? 32'd2 : 32'd4;
-wire [31:0] mvm_st_addr = mvm_addr - mvm_step;
+// A downward walk decrements BEFORE the access and leaves the running
+// address there; an upward walk accesses first and advances after.
+wire [31:0] mvm_st_addr  = mvm_addr - mvm_step;
+wire [31:0] mvm_cur_addr = mvm_down ? mvm_st_addr : mvm_addr;
+wire [31:0] mvm_nxt_addr = mvm_down ? mvm_st_addr : (mvm_addr + mvm_step);
 
 // Wanting the port and getting it are separate, the same split exc_writing
 // and exc_beat_ack already use: wren_b is asserted while the request
@@ -904,7 +918,7 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = mvm_active   ? (mvm_dir ? mvm_addr : mvm_st_addr) :
+wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             eac_is_store ? (eac_is_abs    ? eac_imm :
                                                        eac_is_predec ? (an_base - an_step)
                                                                      : an_base) :
@@ -992,6 +1006,8 @@ always @(posedge clk) begin
 		mvm_addr       <= 32'h0;
 		mvm_dir        <= 1'b0;
 		mvm_word       <= 1'b0;
+		mvm_down       <= 1'b0;
+		mvm_wb         <= 1'b0;
 		mvm_rd_pend    <= 1'b0;
 		mvm_rd_reg     <= 4'h0;
 		exc_pend_divzero <= 1'b0;
@@ -1120,15 +1136,19 @@ always @(posedge clk) begin
 					mvm_active  <= 1'b1;
 					mvm_dir     <= eac_movem_dir;
 					mvm_word    <= eac_movem_word;
-					mvm_mask    <= eac_imm[15:0];
-					mvm_addr    <= operand_a;
+					mvm_down    <= eac_movem_down;
+					mvm_wb      <= eac_movem_wb;
+					// The mask is the HIGH half of eac_imm and the low half is a
+					// displacement, zero for every mode that has none.
+					mvm_mask    <= eac_imm[31:16];
+					mvm_addr    <= operand_a + {{16{eac_imm[15]}}, eac_imm[15:0]};
 					mvm_rd_pend <= 1'b0;
 					mvm_rd_reg  <= 4'h0;
 				end else if (mvm_ld_go) begin
 					// Address driven this cycle; l1_q_b has it next, and
 					// rf3_we commits it then.
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
-					mvm_addr    <= mvm_addr + mvm_step;
+					mvm_addr    <= mvm_nxt_addr;
 					mvm_rd_pend <= 1'b1;
 					mvm_rd_reg  <= mvm_reg;
 				end else if (mvm_rd_pend) begin
@@ -1137,7 +1157,7 @@ always @(posedge clk) begin
 					// Predecrementing: the beat wrote mvm_st_addr, which
 					// becomes the new running address.
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
-					mvm_addr    <= mvm_st_addr;
+					mvm_addr    <= mvm_nxt_addr;
 				end
 			end else if (exc_writing) begin
 				// Posting one beat of the exception frame -- see header.

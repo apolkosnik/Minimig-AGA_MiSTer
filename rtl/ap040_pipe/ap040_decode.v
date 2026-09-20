@@ -318,6 +318,8 @@ module ap040_decode
 	output reg        id_is_movem,
 	output reg        id_movem_dir,
 	output reg        id_movem_word,
+	output reg        id_movem_down,
+	output reg        id_movem_wb,
 	output reg        id_is_unlk,
 	output reg        id_is_bsr,
 	output reg        id_is_jsr,
@@ -662,9 +664,29 @@ wire is_muldiv_imm_signed = is_muldiv_imm && (if_opcode[8] == 1'b1);
 // into the whole 32-bit register rather than preserving the upper half,
 // which is the behaviour worth testing -- the store direction simply writes
 // the low half.
-wire is_movem_st = (if_opcode[15:7] == 9'b010010001) && (if_opcode[5:3] == 3'b100);
-wire is_movem_ld = (if_opcode[15:7] == 9'b010011001) && (if_opcode[5:3] == 3'b011);
+// The CONTROL modes (An) and (d16,An) join the autoincrement ones
+// (milestone 68). They differ from -(An)/(An)+ in three ways at once, and
+// all three are properties of the MODE rather than of the direction:
+//
+//   - no register writeback at all
+//   - the address walks UPWARD, even for a store
+//   - the mask is numbered bit 0 = D0, even for a store
+//
+// Only the PREDECREMENT store reverses the numbering and walks downward.
+// Milestone 50 tied both of those to "is a store", which was indistinguish-
+// able from the truth while -(An) was the only store mode.
+wire movem_shape_st = (if_opcode[15:7] == 9'b010010001);
+wire movem_shape_ld = (if_opcode[15:7] == 9'b010011001);
+wire movem_mode_ctl = (if_opcode[5:3] == 3'b010) || (if_opcode[5:3] == 3'b101);
+wire is_movem_st = movem_shape_st && ((if_opcode[5:3] == 3'b100) || movem_mode_ctl);
+wire is_movem_ld = movem_shape_ld && ((if_opcode[5:3] == 3'b011) || movem_mode_ctl);
 wire is_movem_w  = (if_opcode[6] == 1'b0);
+// (d16,An) gathers a SECOND word after the mask, so it is a long gather --
+// and id_imm then carries {mask, displacement} rather than the mask alone.
+wire is_movem_disp = (movem_shape_st || movem_shape_ld) && (if_opcode[5:3] == 3'b101);
+wire is_movem_down = movem_shape_st && (if_opcode[5:3] == 3'b100);
+wire is_movem_wb   = (movem_shape_st && (if_opcode[5:3] == 3'b100)) ||
+                     (movem_shape_ld && (if_opcode[5:3] == 3'b011));
 wire is_movem    = is_movem_st || is_movem_ld;
 
 wire is_link = (if_opcode[15:3] == 13'b0100111001010);
@@ -1535,6 +1557,8 @@ reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
 reg         held_is_movem;      // the eleventh kind: MOVEM.L
 reg         held_movem_dir;
 reg         held_movem_word;
+reg         held_movem_down;
+reg         held_movem_wb;
 reg         held_imm_div;       // this immediate form is a DIVIDE, not an ALU op
 reg         held_imm_divs;
 reg         held_lea_push;      // this LEA-shaped form pushes instead of writing An
@@ -1642,6 +1666,8 @@ always @(posedge clk) begin
 		id_is_movem     <= 1'b0;
 		id_movem_dir    <= 1'b0;
 		id_movem_word   <= 1'b0;
+		id_movem_down   <= 1'b0;
+		id_movem_wb     <= 1'b0;
 		id_is_unlk      <= 1'b0;
 		id_is_bsr       <= 1'b0;
 		id_is_jsr       <= 1'b0;
@@ -1691,6 +1717,8 @@ always @(posedge clk) begin
 		held_is_movem   <= 1'b0;
 		held_movem_dir  <= 1'b0;
 		held_movem_word <= 1'b0;
+		held_movem_down <= 1'b0;
+		held_movem_wb   <= 1'b0;
 		held_is_bsr     <= 1'b0;
 		held_is_jsr     <= 1'b0;
 		held_is_movec   <= 1'b0;
@@ -1764,7 +1792,9 @@ always @(posedge clk) begin
 					// ap040_execute.v extract both from eac_imm[3:0] rather
 					// than needing two more dedicated ports threaded through
 					// every stage.
-					id_imm          <= held_ea_indexed ? {16'd0, if_opcode} :
+					id_imm          <= held_is_movem ? (held_is_long ? gather_disp
+					                                                  : {if_opcode, 16'd0}) :
+					                   held_ea_indexed ? {16'd0, if_opcode} :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
 					                    held_is_imm || held_is_abs || held_is_stabs ||
@@ -1832,6 +1862,8 @@ always @(posedge clk) begin
 					id_is_movem     <= held_is_movem;
 					id_movem_dir    <= held_movem_dir;
 					id_movem_word   <= held_movem_word;
+					id_movem_down   <= held_movem_down;
+					id_movem_wb     <= held_movem_wb;
 					id_is_unlk      <= 1'b0;
 					id_is_bsr       <= held_is_bsr;
 					id_is_jsr       <= held_is_jsr;
@@ -1867,7 +1899,7 @@ always @(posedge clk) begin
 				                 (is_imm_alu && if_opcode[7:6] == 2'b10) ||
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
-				                 is_abs_alu_l || is_eaonly_abs_l;
+				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp;
 				held_is_imm      <= is_imm_alu || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm || is_chk_imm;
 				held_imm_chk     <= is_chk_imm;
@@ -1935,6 +1967,8 @@ always @(posedge clk) begin
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
 				held_movem_word<= is_movem_w;
+				held_movem_down<= is_movem_down;
+				held_movem_wb  <= is_movem_wb;
 				held_is_bsr   <= is_bsr_word || is_bsr_long;
 				held_is_jsr   <= is_jsr_disp;
 				held_is_movec <= is_movec_opcode;
@@ -1948,7 +1982,7 @@ always @(posedge clk) begin
 				                  (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
 				                  is_adda_imm_l || is_abs_alu_l ||
-				                  is_eaonly_abs_l) ? 2'd2 : 2'd1;
+				                  is_eaonly_abs_l || is_movem_disp) ? 2'd2 : 2'd1;
 			end else begin
 				id_valid        <= if_valid;
 				id_pc           <= if_pc;
@@ -2082,6 +2116,8 @@ always @(posedge clk) begin
 				id_is_movem     <= 1'b0;
 				id_movem_dir    <= 1'b0;
 				id_movem_word   <= 1'b0;
+				id_movem_down   <= 1'b0;
+				id_movem_wb     <= 1'b0;
 				id_is_unlk      <= if_valid && is_unlk;
 				id_is_bsr       <= if_valid && is_bsr_byte;
 				id_is_jsr       <= if_valid && is_jsr_an;
