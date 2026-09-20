@@ -54,7 +54,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d0;
+wire [31:0] dbg_d0, dbg_d1;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -74,7 +74,7 @@ ap040_pipe_core #(
 	.dbg_ex_valid (dbg_ex_valid),  .dbg_ex_pc (dbg_ex_pc),
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
-	.dbg_d0 (dbg_d0), .dbg_sr(dbg_sr),
+	.dbg_d0 (dbg_d0), .dbg_d1 (dbg_d1), .dbg_sr(dbg_sr),
 	.dbg_ccr(dbg_ccr)
 );
 
@@ -92,7 +92,8 @@ initial begin
 	dut.u_l1.mem[ 7] = 16'h5678;
 	dut.u_l1.mem[ 8] = 16'h46C0;   // MOVE D0,SR              (S -> 0)
 	dut.u_l1.mem[ 9] = 16'h4E71;   // NOP
-	dut.u_l1.mem[10] = 16'h4E71;   // NOP (drain)
+	dut.u_l1.mem[10] = 16'h220F;   // MOVE.L A7,D1  (user mode: reads USP)
+	dut.u_l1.mem[11] = 16'h4E71;   // NOP (drain)
 end
 
 initial begin
@@ -111,6 +112,11 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: USP = %h, expected 00000050 (12345678 here means the older A7 write was banked through the YOUNGER instruction's SR)",
 		         dut.u_cpu.u_regfile.usp);
+	end
+	if (dbg_d1 !== 32'h0000_0050) begin
+		errors = errors + 1;
+		$display("FAIL: D1 = %h, expected 00000050 (MOVE.L A7,D1 runs in USER mode and must read USP; 12345678 is the write-through bypass forwarding a write that went to a DIFFERENT bank of A7)",
+		         dbg_d1);
 	end
 	if (dbg_sr[13] !== 1'b0) begin
 		errors = errors + 1;
