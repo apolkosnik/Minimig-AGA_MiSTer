@@ -912,6 +912,18 @@ reg  exc_go;
 // selects the frame size the beat address is computed from. The SELECT
 // of the address mux had left the cone; its DATA had not.
 reg  exc_fmt2_r;
+// The vector and the stack bank, latched the same way (second fit after
+// exc_go). exc_vec_num is the fault-priority mux over the whole cone and
+// {exc_vec_num, 00} is the vector read's ADDRESS; sr_in[12] is the M bit
+// from the milestone-74 SR forward and selects the bank the frame's
+// address is computed from. Latching the shape and leaving these two live
+// left the cone on l1_addr_b through the vector -- the second fit's worst
+// path went ALU -> sr_resolved_ea -> eac_is_trapcc_trap -> exc_vec_num ->
+// l1_addr_b. With all three captured at the verdict, every exception
+// address is a register, a register minus a constant, or a mux of those
+// selected by a register.
+reg  [7:0] exc_vec_r;
+reg        exc_m_r;
 wire exc_writing   = exc_go && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && exc_fmt2_r));
@@ -1025,10 +1037,11 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // OWN state, read directly (same "fed straight from its real home"
 // precedent ap040_execute.v's MOVEC-read inputs already established),
 // completely bypassing whatever bank sr_s/sr_m currently have port B
-// pointed at. Recomputed live every cycle of the sequence rather than
-// latched once: eac_*/sr_in are frozen by exc_stall the whole time anyway
-// (nothing downstream can change them), so a latch would just be a
-// redundant copy.
+// pointed at. The bank SELECT is exc_m_r, the M bit as it stood at the
+// verdict (milestone 88): sr_in is the SR forward, so reading it live put
+// EX's flag result on the frame's address. The pointers themselves are
+// the committed isp_q/msp_q registers and are read live -- nothing
+// retires during the sequence (exc_stall), so they cannot move.
 //
 // exc_sr_word (simplified, milestone 15): no more synthesis -- sr_in IS a
 // real, live SR now (was a fixed system-byte constant over just CCR before
@@ -1039,7 +1052,7 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // format $0 is 8 (4 words) -- the ONLY difference in overall frame shape
 // this milestone introduces; everything else about the sequencer (which
 // stack, how M/S select it) is unchanged.
-wire [31:0] exc_sp_bank    = sr_in[12] ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
+wire [31:0] exc_sp_bank    = exc_m_r ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
 // Both sizes, subtracted in parallel, and the format picks one (milestone
 // 81). Written as `bank - (fmt2 ? 12 : 8)` the format select drives an
 // ADDER, and that adder is the last thing before the L1 address: the fit
@@ -1086,7 +1099,7 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
-wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_num, 2'b00};
+wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
 // Format $2's own extra "instruction address" longword. For an odd JMP/JSR
 // target it is the target itself, LSB cleared (ap040_core.v's own convention
 // for this field, identical for JMP and JSR despite their differing PC
@@ -1109,7 +1122,7 @@ wire [31:0] exc_wdata     = (exc_ph == EXC_BEAT0) ? {exc_sr_word, exc_pc_field[3
 // Vector table address: vector*4, used as an ABSOLUTE address fed through
 // the SAME PC_RESET-relative conversion below -- see header for why no
 // special-casing (a real VBR, a separate low-memory region) is needed.
-wire [31:0] exc_vec_addr = {22'd0, exc_vec_num, 2'b00};
+wire [31:0] exc_vec_addr = {22'd0, exc_vec_r, 2'b00};   // the latched vector (milestone 88), never the live mux
 
 // RTE's own two read-beat addresses: A7 (dword0), A7+4 (dword1) -- via
 // operand_a/port A, same as RTS's mem_issue/mem_complete reuse (decode set
@@ -1231,6 +1244,8 @@ always @(posedge clk) begin
 		exc_vec_pending <= 1'b0;
 		exc_go          <= 1'b0;
 		exc_fmt2_r      <= 1'b0;
+		exc_vec_r       <= 8'd0;
+		exc_m_r         <= 1'b0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 	end else if (ce) begin
@@ -1242,7 +1257,11 @@ always @(posedge clk) begin
 		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
 		else if (exc_active) begin
 			exc_go <= 1'b1;
-			if (!exc_go) exc_fmt2_r <= eac_is_fmt2;   // fixed at the verdict, not re-read per beat
+			if (!exc_go) begin   // fixed at the verdict, not re-read per beat
+				exc_fmt2_r <= eac_is_fmt2;
+				exc_vec_r  <= exc_vec_num;
+				exc_m_r    <= sr_in[12];
+			end
 		end
 
 		// Held from the cycle the divisor was seen until the exception has
