@@ -1726,6 +1726,10 @@ reg         held_is_abs;
 reg         held_imm_areg;
 reg         held_is_stabs;
 reg         held_st_disp;
+// A word or long form branch. It gathers like everything else and then
+// redirects, so nothing downstream needed its displacement until the
+// odd-target check did (milestone 97) -- and id_imm was handing it zero.
+reg         held_is_branch;
 // (d16,An) and absolute loads gather, so unlike (An)/(An)+/-(An) their size
 // cannot be read off if_opcode at the completing end -- it is held here.
 reg  [1:0]  held_mv_size;
@@ -1895,6 +1899,7 @@ always @(posedge clk) begin
 		held_imm_areg    <= 1'b0;
 		held_is_stabs    <= 1'b0;
 		held_st_disp     <= 1'b0;
+		held_is_branch   <= 1'b0;
 		held_mv_size     <= `AP040_SZ_L;
 		held_is_long    <= 1'b0;
 		held_is_xlong   <= 1'b0;
@@ -2024,7 +2029,10 @@ always @(posedge clk) begin
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
 					                    held_is_imm || held_is_abs || held_is_stabs || held_st_disp ||
-					                    held_is_immsr) ? gather_disp :
+					                    held_is_immsr ||
+					                    // ...and the branches, whose displacement EA-fetch
+					                    // needs to see whether the target is odd.
+					                    held_is_branch || held_is_bsr || held_is_dbcc) ? gather_disp :
 					                    held_is_movec ? {28'd0, held_movec_dir, movec_sel_code} : 32'h0;
 					id_alu_op       <= held_is_immsr    ? held_imm_op :
 					                   held_is_imm      ? held_imm_op :
@@ -2187,6 +2195,7 @@ always @(posedge clk) begin
 				held_abs_rmw     <= is_unary_abs && !is_tst_abs;
 				held_is_stabs    <= is_st_abs;
 				held_st_disp     <= is_move_st_disp;
+				held_is_branch   <= is_branch_word || is_branch_long;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
 				held_mv_size     <= is_abs_alu    ? add_op_size :

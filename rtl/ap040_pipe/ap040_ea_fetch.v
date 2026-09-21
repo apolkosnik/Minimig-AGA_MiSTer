@@ -688,7 +688,9 @@ reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
 localparam RET_BEAT0_E = 1'd0, RET_BEAT1_E = 1'd1;
 
 wire [31:0] br_target    = eac_pc + 32'd2 + eac_imm;
-wire eac_is_br_odd   = (eac_is_branch || eac_is_bsr) && br_target[0];
+// DBcc too: its target is the same sum, and like a conditional branch it
+// faults on an odd one whether or not the loop is taken.
+wire eac_is_br_odd   = (eac_is_branch || eac_is_bsr || eac_is_dbcc) && br_target[0];
 // The popped return address, checked in the cycle it arrives.
 wire eac_is_rts_odd  = eac_is_rts && mem_pending && l1_rvalid_b && mem_lane[0];
 // RTE's, assembled from dword0's low half and dword1's high half.

@@ -13,7 +13,10 @@
 // Four sources, four places to look:                                       //
 //                                                                          //
 //   BRA/Bcc  a displacement, which decode has already turned into a        //
-//   BSR      redirect -- but eac_pc + 2 + eac_imm is the same sum here     //
+//   BSR      redirect -- but eac_pc + 2 + eac_imm is the same sum here,    //
+//   DBcc     once decode actually puts the displacement there: for the     //
+//            WORD and LONG forms it was handing EA-fetch a zero, so the    //
+//            sum was the instruction's own address and never odd           //
 //   RTS      the longword just loaded, in mem_lane                         //
 //   RTE      the frame's own PC field, assembled from the two pops         //
 //                                                                          //
@@ -38,7 +41,7 @@
 
 module tb_ap040_pipe_oddtarget;
 
-localparam PROG_WORDS      = 110;
+localparam PROG_WORDS      = 170;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -59,7 +62,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d0, dbg_d1, dbg_d2, dbg_d3, dbg_d4, dbg_d5, dbg_d6;
+wire [31:0] dbg_d0, dbg_d1, dbg_d2, dbg_d3, dbg_d4, dbg_d5, dbg_d6, dbg_d7;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -80,7 +83,8 @@ ap040_pipe_core #(
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
 	.dbg_d0 (dbg_d0), .dbg_d1 (dbg_d1), .dbg_d2 (dbg_d2), .dbg_d3 (dbg_d3),
-	.dbg_d4 (dbg_d4), .dbg_d5 (dbg_d5), .dbg_d6 (dbg_d6), .dbg_sr (dbg_sr),
+	.dbg_d4 (dbg_d4), .dbg_d5 (dbg_d5), .dbg_d6 (dbg_d6), .dbg_d7 (dbg_d7),
+	.dbg_sr (dbg_sr),
 	.dbg_ccr(dbg_ccr)
 );
 
@@ -152,7 +156,30 @@ initial begin
 	dut.u_l1.mem[48] = 16'h4E71;
 	dut.u_l1.mem[49] = 16'h4E71;
 	dut.u_l1.mem[50] = 16'h7C44;   // MOVEQ #$44,D6   (resume 4)
-	dut.u_l1.mem[51] = 16'h4E71;   // NOP (drain)
+	// ---- BRA.W to an odd target: the gathered form, whose displacement
+	// ---- decode had been dropping on the floor
+	dut.u_l1.mem[51] = 16'h247C;   // MOVEA.L #$00000476,A2   (resume 5)
+	dut.u_l1.mem[52] = 16'h0000;
+	dut.u_l1.mem[53] = 16'h0476;
+	dut.u_l1.mem[54] = 16'h6000;   // BRA.W
+	dut.u_l1.mem[55] = 16'h0001;   //   -> $046F, odd
+	dut.u_l1.mem[56] = 16'h4E71;
+	dut.u_l1.mem[57] = 16'h4E71;
+	dut.u_l1.mem[58] = 16'h4E71;
+	dut.u_l1.mem[59] = 16'h7055;   // MOVEQ #$55,D0   (resume 5)
+
+	// ---- DBF to an odd target. It must not decrement its counter either.
+	dut.u_l1.mem[60] = 16'h247C;   // MOVEA.L #$0000048A,A2   (resume 6)
+	dut.u_l1.mem[61] = 16'h0000;
+	dut.u_l1.mem[62] = 16'h048A;
+	dut.u_l1.mem[63] = 16'h7E03;   // MOVEQ #3,D7   (the loop counter)
+	dut.u_l1.mem[64] = 16'h51CF;   // DBF D7,
+	dut.u_l1.mem[65] = 16'h0001;   //   -> $0483, odd
+	dut.u_l1.mem[66] = 16'h4E71;
+	dut.u_l1.mem[67] = 16'h4E71;
+	dut.u_l1.mem[68] = 16'h4E71;
+	dut.u_l1.mem[69] = 16'h7266;   // MOVEQ #$66,D1   (resume 6)
+	dut.u_l1.mem[70] = 16'h4E71;   // NOP (drain)
 
 	// Address-error handler @ word idx 384 (byte $700).
 	dut.u_l1.mem[384] = 16'h5482;  // ADDQ.L #2,D2   -- MOVEQ would clear D2
@@ -169,9 +196,9 @@ initial begin
 
 	repeat ((PROG_WORDS + 140) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dbg_d2 !== 32'h0000_0008) begin
+	if (dbg_d2 !== 32'h0000_000C) begin
 		errors = errors + 1;
-		$display("FAIL: the handler ran %0d times (counted in twos), expected 8 -- four address errors. An odd target must fault whichever instruction reached it, not only a JMP or a JSR.",
+		$display("FAIL: the handler ran %0d times (counted in twos), expected 12 -- six address errors. An odd target must fault whichever instruction reached it, not only a JMP or a JSR.",
 		         dbg_d2);
 	end
 	if (dbg_d3 !== 32'h0000_0011) begin
@@ -190,9 +217,21 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D6 = %h, expected 00000044 (RTE to an odd restored PC did not fault and return)", dbg_d6);
 	end
-	if (writes !== 15) begin
+	if (dbg_d0 !== 32'h0000_0055) begin
 		errors = errors + 1;
-		$display("FAIL: %0d writes posted, expected 15 (three setup pushes and four three-beat frames). 16 means the BSR pushed a return address for a subroutine it never entered.",
+		$display("FAIL: D0 = %h, expected 00000055 (BRA.W to an odd target did not fault and return; the WORD form's displacement reaches EA-fetch through id_imm, which was zero for it)", dbg_d0);
+	end
+	if (dbg_d1 !== 32'h0000_0066) begin
+		errors = errors + 1;
+		$display("FAIL: D1 = %h, expected 00000066 (DBF to an odd target did not fault and return)", dbg_d1);
+	end
+	if (dbg_d7 !== 32'h0000_0003) begin
+		errors = errors + 1;
+		$display("FAIL: D7 = %h, expected 00000003 (a DBcc that faults on its target must not have decremented its counter)", dbg_d7);
+	end
+	if (writes !== 21) begin
+		errors = errors + 1;
+		$display("FAIL: %0d writes posted, expected 21 (three setup pushes and six three-beat frames). 22 means the BSR pushed a return address for a subroutine it never entered.",
 		         writes);
 	end
 
