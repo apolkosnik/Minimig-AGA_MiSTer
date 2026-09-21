@@ -487,6 +487,10 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 wire [31:0] an_base = store_now ? operand_b : operand_a;
 // LINK reuses this as its own write address as well as An's new value.
 wire [31:0] push_addr = operand_b - 32'd4;
+// LINK A7,#d: the register being saved is the stack pointer itself, which
+// the push has already moved. eac_src_reg is An for a LINK; eac_dest_reg
+// is A7 for every one of them, so this is the only way to tell.
+wire        link_pushes_sp = (eac_src_reg == 4'd15);
 
 // The auto-increment step follows the operand size, with the 68000's stack
 // exception: a BYTE access through A7 steps by two, not one, so the stack
@@ -672,8 +676,17 @@ wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
 // divider ran with a zero divisor and the instruction after it executed
 // normally. Found while designing CHK, which has the same operand shape.
 wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
+// !stall_in for the REGISTER source (milestone 95). A divide holds EX for
+// thirty-two cycles and its forward shows an intermediate the whole time,
+// so a fault judged on it is judged on a number the program never
+// computes: 100/7 tripped divide-by-zero on the quotient it was still
+// building. TRAPcc's detector has carried this guard since milestone 74.
+// The MEMORY source keeps its own guard instead of gaining this one --
+// mem_lane is the loaded value, settled whatever EX is doing, and
+// mem_pending && l1_rvalid_b is true for exactly one cycle, so requiring
+// !stall_in there would DROP the fault rather than delay it.
 wire divzero_now = eac_valid && eac_is_div &&
-                   (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : 1'b1) &&
+                   (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                    (div_divisor[15:0] == 16'd0);
 
 // ...and it has to be LATCHED, not recomputed. mem_lane is l1_q_b, which
@@ -704,7 +717,7 @@ wire signed [15:0] chk_bound = chk_src[15:0];
 wire chk_negative = chk_value < 16'sd0;
 wire chk_over     = chk_value > chk_bound;
 wire chk_now = eac_valid && eac_is_chk &&
-               (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : 1'b1) &&
+               (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                (chk_negative || chk_over);
 reg exc_pend_chk;
 reg exc_pend_chk_n;
@@ -1136,7 +1149,12 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // the value from the PREVIOUS exception. A TRAP taken with M set then
 // built its frame from ISP and left MSP alone.
 wire  [1:0] exc_bank_sel   = sr_in[12] ? 2'd2 : 2'd1;   // S is 1 by construction here
-wire        exc_a7_self    = an_wr_any && (an_wr_reg == 4'd15) &&
+// ...and own_exc, because a TRACE entry belongs to the instruction that
+// just finished, not to the one held behind it (milestone 95). That held
+// instruction has executed nothing, so its A7 update must not move the
+// frame: a held MOVE.L (A7)+ moved it four bytes, which is exactly the
+// step it had not taken.
+wire        exc_a7_self    = own_exc && an_wr_any && (an_wr_reg == 4'd15) &&
                              (an_sp_sel == exc_bank_sel);
 wire [31:0] exc_sp_live    = exc_a7_self ? an_wr_data
                                          : (sr_in[12] ? msp_in : isp_in);
@@ -1291,7 +1309,14 @@ assign l1_data_b = mvm_st_want  ? operand_a :
                    exc_writing  ? exc_wdata :
                    store_now    ? (eac_st_disp ? operand_b : operand_a) :
                    eac_is_pea   ? ea_target :
-                   eac_is_link  ? operand_a : eac_next_pc;
+                   // LINK An,#d decrements the stack pointer BEFORE it
+                   // pushes An, so when An IS A7 the value that reaches
+                   // memory is the decremented one -- push_addr, the same
+                   // expression the write address already uses. For any
+                   // other An the two differ and the register's own value
+                   // is what gets saved (milestone 95).
+                   eac_is_link  ? (link_pushes_sp ? push_addr : operand_a)
+                                : eac_next_pc;
 
 always @(posedge clk) begin
 	if (!nreset) begin

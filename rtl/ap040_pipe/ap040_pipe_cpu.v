@@ -239,12 +239,15 @@ wire        ex_creg_sp;
 wire        ex_st_sup;
 // A write to A7 that has not landed in the register file yet: one in EX
 // through either port, or one committing this cycle, whose value the file
-// only shows from the NEXT cycle. MOVEC's auxiliary write counts too.
+// only shows from the NEXT cycle. MOVEC counts twice over -- aux_we is its
+// COMMIT, and ex_creg_sp is the cycle before that, while it is still in EX.
+// Listing only the commit left an exception one instruction behind a MOVEC
+// building its frame on the stack that MOVEC had just replaced.
 wire        a7_busy = (ex_fwd_valid  && (ex_fwd_dest  == 4'd15)) ||
                       (ex_fwd2_valid && (ex_fwd2_dest == 4'd15)) ||
                       (commit_reg    && (exe_dest_reg  == 4'd15)) ||
                       (commit_reg2   && (exe_dest_reg2 == 4'd15)) ||
-                      aux_we;
+                      aux_we || ex_creg_sp;
 wire        ex_fwd2_valid;
 wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;

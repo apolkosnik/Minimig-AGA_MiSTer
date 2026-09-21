@@ -41,6 +41,12 @@ def main():
                          "g++ step with no diagnostic at all -- which reads as a suite-wide "
                          "RTL regression. A FAILING bench keeps its directory either way, "
                          "since that is when the build and the binary are worth having.")
+    ap.add_argument("--ce-random", action="store_true",
+                    help="drive every bench's clock enable from a pseudo-random sequence "
+                         "instead of tying it high. ce is how the real system runs this core "
+                         "slower than its clock, so a cycle with it low is a cycle that did "
+                         "not happen -- and eight of the thirteen defects three rounds of "
+                         "external review found lived behind every bench tying it high.")
     ap.add_argument("--slow-l1", action="store_true",
                     help="build with AP040_PIPE_L1_SLOW: 0-3 extra cycles on every L1 read and "
                          "write-buffer drain, so the benches prove the pipeline waits for memory")
@@ -105,8 +111,14 @@ def main():
                  # Every bench's end-of-program wait is `repeat (N * AP040_PIPE_WAIT_SCALE)`:
                  # the slow L1 roughly triples the cycles a program takes, so the
                  # wait scales with it rather than each bench guessing.
-                 "-DAP040_PIPE_WAIT_SCALE=" + ("4" if args.slow_l1 else "1"),
-                 *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []), str(b)] + [str(s) for s in src],
+                 # Each mode roughly doubles or triples how long a program
+                 # takes, so the end-of-program wait scales with them rather
+                 # than every bench guessing.
+                 "-DAP040_PIPE_WAIT_SCALE=" + ("8" if (args.slow_l1 and args.ce_random)
+                                               else "4" if (args.slow_l1 or args.ce_random)
+                                               else "1"),
+                 *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []),
+                 *(["-DAP040_PIPE_CE_RANDOM"] if args.ce_random else []), str(b)] + [str(s) for s in src],
                 stdout=out, stderr=subprocess.STDOUT, env=env).returncode
             if rc == 0:
                 rc = subprocess.run([str(obj / ("V" + name))], stdout=out,

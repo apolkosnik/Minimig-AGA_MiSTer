@@ -1,33 +1,33 @@
 //--------------------------------------------------------------------------//
-// AP040_PIPE - MC68040-style pipelined core (milestone 93: one frame, one //
-// base)                                                                    //
+// AP040_PIPE - MC68040-style pipelined core (milestone 95: an exception   //
+// behind a MOVEC)                                                          //
 //                                                                          //
-// tb_ap040_pipe_excbase.v - an exception frame split across two stacks     //
+// tb_ap040_pipe_excmovec.v - the fourth way to change A7 before a frame    //
 //                                                                          //
-// The exception sequencer reads the stack pointer out of the register file //
-// live, once per beat, rather than resolving it once and keeping it. The   //
-// register file is not still while that happens: an OLDER instruction that //
-// writes A7 commits between one beat and the next, and the two halves of   //
-// the frame land 512 bytes apart.                                          //
+// Milestone 93 made the exception's verdict wait for an older write to A7  //
+// to reach the register file, and listed four ways such a write can be in  //
+// flight: either of EX's two result ports, either of their commits, and    //
+// MOVEC's auxiliary write AT ITS COMMIT. It missed the fifth: a MOVEC      //
+// still IN EX, one cycle before that commit.                               //
 //                                                                          //
-//   ISP = $1000 ; MOVEA.L #$1200,A7 ; TRAP #0                              //
+//   ISP = $1000 ; MOVEC D0,ISP with $1200 ; TRAP #0                        //
 //                                                                          //
-// The whole frame belongs at $11F8, eight bytes below the pointer the      //
-// MOVEA installed, and the final ISP is $11F8. What happens instead is     //
-// that beat 0 is written from the OLD pointer and beat 1 from the new one, //
-// so there is half a frame at $0FF8 and half at $11FC, and the RTE that    //
-// reads $11F8 gets whatever was already there.                             //
+// The frame belongs at $11F8 and ISP must end there. With the verdict      //
+// latching a cycle early it is built from $1000 instead, which puts it at  //
+// $0FF8 -- on a stack the program had just stopped using.                  //
 //                                                                          //
-// Both halves are checked, and so is the word at $0FF8, because a frame    //
-// that is merely in the wrong PLACE is a different defect from one that is //
-// in two places.                                                           //
+// An intervening NOP makes it pass, which is the signature of a missing    //
+// interlock rather than a wrong address: the value is not lost, the        //
+// exception just did not wait for it.                                      //
 //                                                                          //
-// The format and vector word pins it down: format $0, vector 32, so $0080. //
+// The first write's address is recorded rather than inferred from ISP, so  //
+// a frame that starts in the right place and a final pointer that happens  //
+// to match are two separate checks.                                        //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
 
-module tb_ap040_pipe_excbase;
+module tb_ap040_pipe_excmovec;
 
 localparam PROG_WORDS      = 40;
 localparam [31:0] PC_RESET = 32'h0000_0400;
@@ -39,12 +39,6 @@ reg ce = 1;
 always #5 clk = ~clk;
 
 `ifdef AP040_PIPE_CE_RANDOM
-// A pseudo-random clock enable (milestone 94). Every bench in this suite
-// tied ce high, and eight of the thirteen defects three rounds of external
-// review found lived behind that: a cycle with ce low is a cycle that did
-// not happen, and the core has to treat it that way. Driven on the falling
-// edge so it is stable across every rising one, and left high until reset
-// releases so the reset sequence itself is unchanged.
 reg [15:0] ce_lfsr = 16'hACE1;
 always @(negedge clk) if (nreset) begin
 	ce_lfsr <= {ce_lfsr[14:0], ce_lfsr[15] ^ ce_lfsr[13] ^ ce_lfsr[12] ^ ce_lfsr[10]};
@@ -56,7 +50,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d1, dbg_d2, dbg_d3;
+wire [31:0] dbg_d0, dbg_d1, dbg_d2, dbg_d3, dbg_d4;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -76,16 +70,24 @@ ap040_pipe_core #(
 	.dbg_ex_valid (dbg_ex_valid),  .dbg_ex_pc (dbg_ex_pc),
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
-	.dbg_d1 (dbg_d1), .dbg_d2 (dbg_d2), .dbg_d3 (dbg_d3), .dbg_sr (dbg_sr),
+	.dbg_d0 (dbg_d0), .dbg_d1 (dbg_d1), .dbg_d2 (dbg_d2), .dbg_d3 (dbg_d3),
+	.dbg_d4 (dbg_d4), .dbg_sr (dbg_sr),
 	.dbg_ccr(dbg_ccr)
 );
 
 integer errors = 0;
 
 integer writes = 0;
+// The address the core drove at the FIRST write it posted. For a program
+// whose only writes are an exception frame, that is where the frame begins
+// -- which is a different claim from where the stack pointer ends up, and
+// both are worth checking separately.
+integer first_wr_addr = -1;
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid)
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid) begin
+		if (first_wr_addr < 0) first_wr_addr = dut.u_cpu.l1_addr_b;
 		writes = writes + 1;
+	end
 
 initial begin
 	#1;
@@ -95,11 +97,13 @@ initial begin
 	dut.u_l1.mem[ 3] = 16'h1000;
 	dut.u_l1.mem[ 4] = 16'h4E7B;   // MOVEC D0,ISP    (ISP = $1000)
 	dut.u_l1.mem[ 5] = 16'h0804;
-	dut.u_l1.mem[ 6] = 16'h2E7C;   // MOVEA.L #$00001200,A7
+	dut.u_l1.mem[ 6] = 16'h203C;   // MOVE.L #$00001200,D0
 	dut.u_l1.mem[ 7] = 16'h0000;
 	dut.u_l1.mem[ 8] = 16'h1200;
-	dut.u_l1.mem[ 9] = 16'h4E40;   // TRAP #0
-	dut.u_l1.mem[10] = 16'h4E71;   // NOP (drain)
+	dut.u_l1.mem[ 9] = 16'h4E7B;   // MOVEC D0,ISP    (ISP = $1200)
+	dut.u_l1.mem[10] = 16'h0804;
+	dut.u_l1.mem[11] = 16'h4E40;   // TRAP #0   -- immediately behind it
+	dut.u_l1.mem[12] = 16'h4E71;   // NOP (drain)
 
 	// TRAP #0 handler @ word idx 384 (byte $700).
 	dut.u_l1.mem[384] = 16'h7633;  // MOVEQ #$33,D3
@@ -109,10 +113,8 @@ initial begin
 	dut.u_l1.mem[3648] = 16'h0000;
 	dut.u_l1.mem[3649] = 16'h0700;
 
-	// $11F8 and $11FC, where the frame belongs.
+	// $11F8, where the frame belongs, and $0FF8, where it went.
 	dut.u_l1.mem[1788] = 16'h9999;  dut.u_l1.mem[1789] = 16'h9999;
-	dut.u_l1.mem[1790] = 16'h9999;  dut.u_l1.mem[1791] = 16'h9999;
-	// $0FF8, where half of it went.
 	dut.u_l1.mem[1532] = 16'h6666;  dut.u_l1.mem[1533] = 16'h6666;
 end
 
@@ -127,28 +129,19 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D3 = %h, expected 00000033 (the TRAP handler must run)", dbg_d3);
 	end
+	if (first_wr_addr !== 32'h0000_11F8) begin
+		errors = errors + 1;
+		$display("FAIL: the frame began at %h, expected 000011f8. A MOVEC to the active stack pointer that is still in EX has not reached the register file, and the exception's verdict must wait for it exactly as it waits for the other four ways A7 can be in flight.",
+		         first_wr_addr);
+	end
 	if (dut.u_cpu.u_regfile.isp !== 32'h0000_11F8) begin
 		errors = errors + 1;
-		$display("FAIL: ISP = %h, expected 000011f8 (eight bytes below the pointer MOVEA installed)", dut.u_cpu.u_regfile.isp);
-	end
-	if (dut.u_l1.mem[1789] !== 16'h0000 || dut.u_l1.mem[1788] === 16'h9999) begin
-		errors = errors + 1;
-		$display("FAIL: frame word0 at $11F8 = %h%h, still the sentinel or wrong -- the first beat went somewhere else",
-		         dut.u_l1.mem[1788], dut.u_l1.mem[1789]);
-	end
-	if (dut.u_l1.mem[1790] !== 16'h0414 || dut.u_l1.mem[1791] !== 16'h0080) begin
-		errors = errors + 1;
-		$display("FAIL: frame word1 at $11FC = %h%h, expected 04140080 (the return address and format $0 vector 32)",
-		         dut.u_l1.mem[1790], dut.u_l1.mem[1791]);
+		$display("FAIL: ISP = %h, expected 000011f8", dut.u_cpu.u_regfile.isp);
 	end
 	if ({dut.u_l1.mem[1532], dut.u_l1.mem[1533]} !== 32'h6666_6666) begin
 		errors = errors + 1;
-		$display("FAIL: $0FF8 = %h%h, expected 66666666 -- a beat of the frame was written from the stack pointer as it stood BEFORE the older instruction committed",
+		$display("FAIL: $0FF8 = %h%h, expected 66666666 (the frame was built from the stack pointer MOVEC had just replaced)",
 		         dut.u_l1.mem[1532], dut.u_l1.mem[1533]);
-	end
-	if (writes !== 2) begin
-		errors = errors + 1;
-		$display("FAIL: %0d writes posted, expected 2 (a format $0 frame is two beats)", writes);
 	end
 
 	if (dbg_if_valid || dbg_id_valid || dbg_eac_valid ||
