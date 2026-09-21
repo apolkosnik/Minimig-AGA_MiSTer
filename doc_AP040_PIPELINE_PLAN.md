@@ -1688,6 +1688,109 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 93: five more, and four of them are milestone 92's
+
+   A third round of external review. Five defects, and the honest summary
+   is that four were milestone 92's own fixes not carried far enough. Each
+   had a bench that passed, and each of those benches was checking the
+   wrong thing.
+
+   **The hazard that held the wrong stages.** Milestone 92 gave EA-fetch a
+   hazard for a reader of A7 behind a MOVEC to a stack pointer, and put it
+   in `eaf_stall` -- which tells the stages BEHIND this one to wait. It
+   never stopped EA-fetch. The held instruction retired, and re-issued its
+   request, once per cycle of the hazard. The register-read check written
+   with it passed because the instruction ran TWICE and the last pass wrote
+   the right answer over the earlier ones. A push does not forgive that: it
+   pushed twice, through the stale pointer, into a word nothing had asked
+   it to touch.
+
+   It emits a bubble now, and that branch has to come FIRST in the retire
+   chain. Placed below the memory issue it set `mem_pending` for a read the
+   gate had already suppressed, and the stage then waited for a return
+   nobody had asked for -- bookkeeping without its request, which is the
+   defect milestone 92 was about, reintroduced by the fix for it.
+
+   **One frame, two stacks.** The exception sequencer read the stack
+   pointer out of the register file live, once per beat. `MOVEA.L
+   #$1200,A7` followed by `TRAP #0` put beat 0 at `$0FF8` and beat 1 at
+   `$11FC`: half a frame at each, 512 bytes apart, and the RTE reads
+   neither. The base is resolved once with the verdict now, and the verdict
+   waits for any older A7 write to reach the register file.
+
+   **Separate banks were not enough.** Milestone 92 gave the second write
+   port its own stack bank, which fixed the user-mode fault: there the
+   postincrement means USP and the exception's pointer means ISP. In
+   SUPERVISOR mode they are the same register and two banks achieve
+   nothing. Two things were wrong at once, and the reverts show both are
+   load-bearing: the frame's base has to be the pointer AFTER this
+   instruction's own increment when the two land on the same stack, and the
+   register file's second write port must not outrank the first on the same
+   physical register -- which is what the comment beside it always claimed
+   and the code never did.
+
+   **Two privileges, both read from the wrong place.** The first fetch of a
+   handler went out as a USER program access: the privilege came from the
+   committed status register, and the exception's switch to supervisor had
+   not reached the commit point when that fetch was issued. And EX, which
+   takes the memory's write port for address, size and data, did not take
+   it for privilege -- so a user-mode read-modify-write posted as
+   supervisor because the exception behind it was forcing supervisor for
+   its own frame.
+
+   **A defect the repository's memories cannot reach.** That last one
+   needs EX's store to WAIT, and neither memory here can make it: both
+   drain the write buffer before answering the read-modify-write's own
+   load, so the store is accepted in the cycle it appears -- one cycle
+   before the exception behind it has decided anything. Two benches were
+   written before this was understood and neither reproduced it. The one
+   that does, `tb_ap040_pipe_rmwsup.v`, drives `ap040_pipe_cpu.v` directly
+   with a memory that holds the port busy for seven cycles, which is what
+   a cache with a deeper queue does. The same unreachability is on record
+   against milestone 48's `rmw_wait`, and it is the second time a real
+   defect has been invisible to every memory model in the tree.
+
+   **A regression the suite caught, from the fix itself.** The frame's bank
+   select read `exc_m_r` in the very cycle `exc_m_r` was being latched, so
+   it saw the value left by the PREVIOUS exception. A TRAP taken with M set
+   built its frame from ISP and left MSP alone. Milestone 88's master-stack
+   phase failed on it, which is the only reason it was caught before the
+   milestone closed.
+
+   | revert | caught by |
+   |---|---|
+   | the bubble removed | `creghold`, six checks |
+   | the requests back on `stall_in` | `creghold`, the write count |
+   | the verdict no longer waiting | `excbase`, four checks |
+   | the base ignoring this instruction's increment | `faultpisup` |
+   | the second write port outranking the first | `faultpisup` |
+   | EX's store not carrying its privilege | `rmwsup` |
+   | the fetch privilege back on the committed register | `excfc` |
+   | the frame base latched rather than re-read | **nothing** |
+
+   The last is real but redundant: with the verdict waiting for older A7
+   writes, the base cannot move between beats anyway. It stays, because
+   "resolve once" is the property that was wrong and the wait is a reason
+   it happens to hold rather than a guarantee of it. That is the third such
+   guard on record here, and they are listed rather than quietly kept.
+
+   | run | result |
+   |---|---|
+   | control, all five benches on milestone 92's RTL | all five fail |
+   | full suite, normal build | 107/107 |
+   | full suite, slow build | 107/107 |
+   | standalone fit | +1.932 ns at 25 ns, 5,829 ALMs |
+
+   The fit is 0.49 ns below milestone 92's +2.426, which is a real cost
+   rather than placement noise: the exception's verdict now waits on a
+   condition computed from four forwarding comparators.
+
+   The rule this leaves: **a stall signal names who waits, and a fix has to
+   say which stage that is.** Three of these five are one stage's signal
+   used as though it were another's -- a stall that held the wrong stages,
+   a privilege read at the wrong end of the pipe, and a write port whose
+   owner changed for three of its four fields.
+
    ### Milestone 92: eight defects found from outside
 
    An external review of the core produced two rounds of four
