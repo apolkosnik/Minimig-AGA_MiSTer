@@ -29,6 +29,13 @@
 //                                                                          //
 // The user-mode fetch is counted too. Without it a run that never left     //
 // supervisor mode would pass the function-code check for the wrong reason. //
+//                                                                          //
+// The HANDLER's own first fetch is a separate case and a separate defect.  //
+// It is a supervisor-program access: the instruction it brings back runs   //
+// in supervisor mode, because that is what the exception just switched to. //
+// The fetch goes out before that switch reaches the commit point, so a     //
+// privilege read off the committed register calls it a user fetch -- the   //
+// handler's first instruction arriving from user space.                    //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -102,7 +109,7 @@ reg        active;
 wire [31:0] widx = mem_addr >> 1;
 
 integer fetches, data_reads, data_writes, size_bad;
-integer fetch_user, data_user, data_super;
+integer fetch_user, data_user, data_super, handler_fetches, handler_fc_bad;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -119,6 +126,11 @@ always @(posedge clk) begin
 			if (mem_instr) begin
 				fetches = fetches + 1;
 				if (mem_fc === `AP040_FC_USER_PROG)  fetch_user = fetch_user + 1;
+				if (mem_addr == 32'h0000_0900) begin
+					handler_fetches = handler_fetches + 1;
+					if (mem_fc !== `AP040_FC_SUPER_PROG)
+						handler_fc_bad = handler_fc_bad + 1;
+				end
 				if (mem_size !== `AP040_SZ_W)        size_bad = size_bad + 1;
 			end else begin
 				if (mem_fc === `AP040_FC_USER_DATA)  data_user  = data_user + 1;
@@ -179,7 +191,7 @@ endtask
 initial begin
 	for (i = 0; i < MEM_WORDS; i = i + 1) mem[i] = `AP040_OP_NOP;
 	fetches = 0; data_reads = 0; data_writes = 0; size_bad = 0;
-	fetch_user = 0; data_user = 0; data_super = 0;
+	fetch_user = 0; data_user = 0; data_super = 0; handler_fetches = 0; handler_fc_bad = 0;
 
 	poke(32'h0400, 16'h203C); poke(32'h0402, 16'h0000); poke(32'h0404, 16'h1000);
 	poke(32'h0406, 16'h4E7B); poke(32'h0408, 16'h0804);   // MOVEC D0,ISP
@@ -229,6 +241,15 @@ initial begin
 	if (data_writes !== 2) begin
 		errors = errors + 1;
 		$display("FAIL: %0d data writes reached the bus, expected 2 (the format $0 frame's two beats)", data_writes);
+	end
+	if (handler_fetches < 1) begin
+		errors = errors + 1;
+		$display("FAIL: the handler at $0900 was never fetched");
+	end
+	if (handler_fc_bad !== 0) begin
+		errors = errors + 1;
+		$display("FAIL: %0d fetches of the handler at $0900 went out with a user program function code. The handler runs in SUPERVISOR mode -- the exception switched to it -- and the fetch goes out before that switch reaches the committed register, so the privilege cannot be read from there.",
+		         handler_fc_bad);
 	end
 	if (data_reads !== 1) begin
 		errors = errors + 1;

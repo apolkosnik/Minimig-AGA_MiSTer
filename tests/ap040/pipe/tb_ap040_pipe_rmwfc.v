@@ -15,9 +15,16 @@
 // push. The older store then goes out on the bus as a supervisor access    //
 // although the instruction that made it was running in user mode.          //
 //                                                                          //
-//   ISP = $1000 ; MOVEA.L #$0800,A0 ; MOVEQ #0,D1 ; MOVE D1,SR             //
+//   ISP = $1000 ; A0 = $0800 ; A1 = $0810 ; D2 = 7 ; drop to user mode     //
+//   MOVE.L D2,(A1)    fills the write buffer, so the next store must wait  //
 //   ADDQ.L #1,(A0)    a user-mode read-modify-write, storing from EX       //
 //   TRAP #1           immediately behind it, forcing supervisor            //
+//                                                                          //
+// The store ahead of it is not decoration. Without backpressure EX's store //
+// is accepted in the cycle it is offered, before the exception behind it   //
+// has decided anything, and the window never opens. With the buffer        //
+// already full, EX waits -- and while it waits the TRAP reaches its own    //
+// verdict and starts forcing supervisor, so the store goes out under it.   //
 //                                                                          //
 // The write to $0800 must carry the user-data code. The frame's two beats  //
 // and the vector read must carry the supervisor-data one, which is         //
@@ -188,15 +195,19 @@ initial begin
 	poke(32'h0400, 16'h203C); poke(32'h0402, 16'h0000); poke(32'h0404, 16'h1000);
 	poke(32'h0406, 16'h4E7B); poke(32'h0408, 16'h0804);   // MOVEC D0,ISP
 	poke(32'h040A, 16'h207C); poke(32'h040C, 16'h0000); poke(32'h040E, 16'h0800);
-	poke(32'h0410, 16'h7200);                              // MOVEQ #0,D1
-	poke(32'h0412, 16'h46C1);                              // MOVE D1,SR  -> user
-	poke(32'h0414, 16'h5290);                              // ADDQ.L #1,(A0)
-	poke(32'h0416, 16'h4E41);                              // TRAP #1
-	poke(32'h0418, 16'h7466);                              // MOVEQ #$66,D2 (poison)
-	poke(32'h041A, 16'h4E71);
+	poke(32'h0410, 16'h227C); poke(32'h0412, 16'h0000); poke(32'h0414, 16'h0810);
+	poke(32'h0416, 16'h7407);                              // MOVEQ #7,D2
+	poke(32'h0418, 16'h7200);                              // MOVEQ #0,D1
+	poke(32'h041A, 16'h46C1);                              // MOVE D1,SR  -> user
+	poke(32'h041C, 16'h2282);                              // MOVE.L D2,(A1)
+	poke(32'h041E, 16'h5290);                              // ADDQ.L #1,(A0)
+	poke(32'h0420, 16'h4E41);                              // TRAP #1
+	poke(32'h0422, 16'h7866);                              // MOVEQ #$66,D4 (poison)
+	poke(32'h0424, 16'h4E71);
 
-	// The read-modify-write's target.
+	// The read-modify-write's target, and the filler store's.
 	poke(32'h0800, 16'h0000); poke(32'h0802, 16'h0041);
+	poke(32'h0810, 16'h0000); poke(32'h0812, 16'h0000);
 
 	poke(32'h0900, 16'h762A);                              // MOVEQ #$2A,D3
 	poke(32'h0902, 16'h4E71);                              // NOP
@@ -214,7 +225,7 @@ initial begin
 	repeat ((PROG_WORDS + 3000) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	check32("D3 (the TRAP handler ran)", dbg_d3, 32'h0000_002A);
-	check32("D2 (the instruction after the TRAP must not run)", dbg_d2, 32'h0000_0000);
+	check32("D4 (the instruction after the TRAP must not run)", dbg_d4, 32'h0000_0000);
 	check32("[$0800] (ADDQ.L #1 on 00000041)", {mem[32'h0800 >> 1], mem[32'h0802 >> 1]}, 32'h0000_0042);
 
 	if (fetch_user < 1) begin
@@ -233,9 +244,10 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: %0d data accesses carried the supervisor-data code, expected 3 (two frame beats and the vector read)", data_super);
 	end
-	if (data_user !== 2) begin
+	check32("[$0810] (the filler store)", {mem[32'h0810 >> 1], mem[32'h0812 >> 1]}, 32'h0000_0007);
+	if (data_user !== 3) begin
 		errors = errors + 1;
-		$display("FAIL: %0d data accesses carried the user-data code, expected 2 (the read-modify-write's load and its store)", data_user);
+		$display("FAIL: %0d data accesses carried the user-data code, expected 3 (the filler store, the read-modify-write's load and its store)", data_user);
 	end
 
 	if (errors == 0)
