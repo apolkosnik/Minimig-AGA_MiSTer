@@ -695,9 +695,17 @@ wire eac_is_br_odd   = (eac_is_branch || eac_is_bsr || eac_is_dbcc) && br_target
 wire eac_is_rts_odd  = eac_is_rts && mem_pending && l1_rvalid_b && mem_lane[0];
 // RTE's, assembled from dword0's low half and dword1's high half.
 wire [31:0] rte_pc_now = {ret_dword0[15:0], l1_q_b[31:16]};
+// ...and only when the frame is one this core accepts. A format nibble it
+// does not recognise is a FORMAT ERROR, vector 14 with a four-word frame,
+// and that outranks the odd address the same frame happens to carry: the
+// frame was never valid, so its PC field means nothing (milestone 98).
+// The nibble is read here rather than through fmterr_now because that
+// wire is built further down and this file keeps declarations ahead of use.
+wire rte_fmt_now_ok  = (l1_q_b[15:12] == 4'h0) || (l1_q_b[15:12] == 4'h2) ||
+                       (l1_q_b[15:12] == 4'h3);
 wire eac_is_rte_odd  = live && eac_is_rte && !eac_is_priv && !trace_hold &&
                        ret_pending && l1_rvalid_b && (ret_ph == RET_BEAT1_E) &&
-                       rte_pc_now[0];
+                       rte_fmt_now_ok && rte_pc_now[0];
 // Division by zero (milestone 52). Detected here rather than in
 // ap040_execute.v for the same reason an odd JMP target is: the operand is
 // already in hand, and this stage owns the frame push and the vector read.

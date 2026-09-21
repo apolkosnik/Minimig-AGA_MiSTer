@@ -41,7 +41,7 @@
 
 module tb_ap040_pipe_oddtarget;
 
-localparam PROG_WORDS      = 170;
+localparam PROG_WORDS      = 230;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -179,7 +179,37 @@ initial begin
 	dut.u_l1.mem[67] = 16'h4E71;
 	dut.u_l1.mem[68] = 16'h4E71;
 	dut.u_l1.mem[69] = 16'h7266;   // MOVEQ #$66,D1   (resume 6)
-	dut.u_l1.mem[70] = 16'h4E71;   // NOP (drain)
+	// ---- an RTE whose frame has BOTH a bad format and an odd PC. The
+	// ---- format error outranks the address error: the frame was never
+	// ---- valid, so the PC field in it means nothing.
+	dut.u_l1.mem[71] = 16'h247C;   // MOVEA.L #$000004AC,A2   (resume 7)
+	dut.u_l1.mem[72] = 16'h0000;
+	dut.u_l1.mem[73] = 16'h04AE;
+	dut.u_l1.mem[74] = 16'h203C;   // MOVE.L #$0601F000,D0  ({PC_lo, FmtVec})
+	dut.u_l1.mem[75] = 16'h0601;
+	dut.u_l1.mem[76] = 16'hF000;
+	dut.u_l1.mem[77] = 16'h2F00;   // MOVE.L D0,-(A7)
+	dut.u_l1.mem[78] = 16'h203C;   // MOVE.L #$27000000,D0  ({SR, PC_hi})
+	dut.u_l1.mem[79] = 16'h2700;
+	dut.u_l1.mem[80] = 16'h0000;
+	dut.u_l1.mem[81] = 16'h2F00;   // MOVE.L D0,-(A7)
+	dut.u_l1.mem[82] = 16'h7055;   // MOVEQ #$55,D0  -- D0 is phase 5's marker,
+	                               //   and building this frame borrowed it
+	dut.u_l1.mem[83] = 16'h4E73;   // RTE   -- format $F, PC $0601
+	dut.u_l1.mem[84] = 16'h4E71;
+	dut.u_l1.mem[85] = 16'h4E71;
+	dut.u_l1.mem[86] = 16'h4E71;
+	dut.u_l1.mem[87] = 16'h4E71;   // resume 7
+	dut.u_l1.mem[88] = 16'h4E71;   // NOP (drain)
+
+	// Format-error handler @ word idx 416 (byte $740). It adds ONE, so the
+	// count says which vector was taken: 13 is twelve address errors' worth
+	// plus this, and 14 would mean the address error won.
+	dut.u_l1.mem[416] = 16'h5282;  // ADDQ.L #1,D2
+	dut.u_l1.mem[417] = 16'h4ED2;  // JMP (A2)
+
+	// Vector 14 (format error) -> $740.
+	dut.u_l1.mem[3612] = 16'h0000;  dut.u_l1.mem[3613] = 16'h0740;
 
 	// Address-error handler @ word idx 384 (byte $700).
 	dut.u_l1.mem[384] = 16'h5482;  // ADDQ.L #2,D2   -- MOVEQ would clear D2
@@ -196,9 +226,9 @@ initial begin
 
 	repeat ((PROG_WORDS + 140) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dbg_d2 !== 32'h0000_000C) begin
+	if (dbg_d2 !== 32'h0000_000D) begin
 		errors = errors + 1;
-		$display("FAIL: the handler ran %0d times (counted in twos), expected 12 -- six address errors. An odd target must fault whichever instruction reached it, not only a JMP or a JSR.",
+		$display("FAIL: the handler count is %0d, expected 13 -- six address errors at two each, plus one format error. 14 means the last RTE took an address error on a frame whose format was never valid. An odd target must fault whichever instruction reached it, not only a JMP or a JSR.",
 		         dbg_d2);
 	end
 	if (dbg_d3 !== 32'h0000_0011) begin
@@ -229,9 +259,9 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: D7 = %h, expected 00000003 (a DBcc that faults on its target must not have decremented its counter)", dbg_d7);
 	end
-	if (writes !== 21) begin
+	if (writes !== 25) begin
 		errors = errors + 1;
-		$display("FAIL: %0d writes posted, expected 21 (three setup pushes and six three-beat frames). 22 means the BSR pushed a return address for a subroutine it never entered.",
+		$display("FAIL: %0d writes posted, expected 25 (five setup pushes, six three-beat address-error frames and one two-beat format-error frame). 26 means the BSR pushed a return address for a subroutine it never entered.",
 		         writes);
 	end
 
