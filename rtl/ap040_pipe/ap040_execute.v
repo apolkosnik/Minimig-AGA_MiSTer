@@ -604,10 +604,14 @@ wire [15:0] immsr_result = eaf_immsr_to_sr ? immsr_full
 
 wire        exe_writes_sr_c = eaf_valid && (eaf_is_movesr || eaf_is_rte || eaf_is_immsr ||
                                             exc_reaching_ex);
-wire [15:0] exe_sr_data_c   = exc_reaching_ex ? ((eaf_sr_snapshot & 16'h1FFF) | 16'h2000) :
+// Masked, all of them (milestone 95). RTE already applied it; MOVE to SR
+// and the ORI/ANDI/EORI immediates did not, so writing $2FFF to SR left
+// $2FFF where the architecture defines $271F, and ORI #$E0,CCR set bits
+// the condition-code register does not have.
+wire [15:0] exe_sr_data_c   = (exc_reaching_ex ? ((eaf_sr_snapshot & 16'h1FFF) | 16'h2000) :
                                eaf_is_rte      ? eaf_rte_sr_data :
                                eaf_is_immsr    ? immsr_result :
-                                                  eaf_operand_a[15:0];
+                                                  eaf_operand_a[15:0]) & `AP040_SR_MASK;
 
 // MOVEC's write direction (milestone 15, new): writes ONE of the seven
 // control registers ap040_pipe_core.v now owns, selected by eaf_movec_sel

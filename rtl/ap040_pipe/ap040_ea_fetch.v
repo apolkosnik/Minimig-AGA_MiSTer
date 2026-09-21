@@ -624,6 +624,7 @@ wire [31:0] mvm_step    = mvm_word ? 32'd2 : 32'd4;
 // A downward walk decrements BEFORE the access and leaves the running
 // address there; an upward walk accesses first and advances after.
 wire [31:0] mvm_st_addr  = mvm_addr - mvm_step;
+wire        mvm_base_self = mvm_down && (mvm_reg == eac_src_reg);
 wire [31:0] mvm_cur_addr = mvm_down ? mvm_st_addr : mvm_addr;
 wire [31:0] mvm_nxt_addr = mvm_down ? mvm_st_addr : (mvm_addr + mvm_step);
 
@@ -1172,10 +1173,23 @@ wire [31:0] exc_sp_bank    = exc_sp_r;
 wire [31:0] exc_sp_fmt0    = exc_sp_bank - 32'd8;
 wire [31:0] exc_sp_fmt2    = exc_sp_bank - 32'd12;
 wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
-wire [15:0] exc_sr_word    = (eac_is_chk_trap && !eac_is_trace)
+// The status register as of the fault, with the flag effects the fault
+// ITSELF has, resolved once (milestone 95). It used to be built here for
+// the stacked word alone, so the frame said one thing and the handler's
+// own SR another: a CHK on a negative operand stacked N set and entered
+// its handler with N clear. Everything that needs the faulting SR reads
+// this, including the snapshot EX turns into the entry SR.
+//
+// CHK sets N from the comparison, and a divide by zero clears C while
+// leaving X/N/Z/V alone -- both are what rtl/ap040/ap040_core.v does, and
+// it is the core that passes the corpus.
+wire [15:0] sr_faulted     = (eac_is_chk_trap && !eac_is_trace)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}
+                              : (eac_is_divzero && !eac_is_trace)
+                              ? {sr_in[15:1], 1'b0}
                               : sr_in;
+wire [15:0] exc_sr_word    = sr_faulted;
 // Illegal and privilege violation both stack the FAULTING instruction's OWN
 // address (go_illegal's/go_priv's shared pc_i convention -- you can't
 // "return past" either kind of fault); TRAP stacks the FOLLOWING
@@ -1305,7 +1319,14 @@ assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
 // LINK pushes the old An, and PEA pushes the effective address itself.
 // Right-aligned, by size -- so a MOVEM word beat and a sized store are the
 // same expression now.
-assign l1_data_b = mvm_st_want  ? operand_a :
+// A predecrement MOVEM whose list contains the BASE register stores that
+// register's initial value MINUS one operation size on the 68020 through
+// 68040 -- the 68000 and 68010 store it undecremented, and
+// rtl/ap040/ap040_core.v, which passes the cputest corpus, follows the
+// later rule. An is not written back until the sequence finishes, so
+// operand_a is still the initial value when this beat goes out.
+assign l1_data_b = mvm_st_want  ? (mvm_base_self ? (operand_a - mvm_step)
+                                                 : operand_a) :
                    exc_writing  ? exc_wdata :
                    store_now    ? (eac_st_disp ? operand_b : operand_a) :
                    eac_is_pea   ? ea_target :
@@ -1773,7 +1794,7 @@ always @(posedge clk) begin
 				// read), not re-read live one cycle later there, to avoid a
 				// combinational loop through EX's own SR forward -- see its
 				// header.
-				eaf_sr_snapshot <= sr_in;
+				eaf_sr_snapshot <= sr_faulted;
 				eaf_cond       <= eac_cond;
 				exc_ph          <= EXC_BEAT0;
 				exc_vec_pending <= 1'b0;
@@ -1884,7 +1905,7 @@ always @(posedge clk) begin
 				// reusing eaf_sr_snapshot (that one's a forwarded READ of
 				// the CURRENT live SR, not the value being ADOPTED).
 				eaf_rte_sr_data <= ret_dword0[31:16] & `AP040_SR_MASK;
-				eaf_sr_snapshot <= sr_in;
+				eaf_sr_snapshot <= sr_faulted;
 				eaf_cond        <= eac_cond;
 				ret_ph          <= RET_BEAT0;
 				ret_pending     <= 1'b0;
