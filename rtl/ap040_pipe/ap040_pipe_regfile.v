@@ -143,6 +143,8 @@ wire       a7_same  = (sp_sel_w   == sp_sel);
 wire       a7_same2 = (sp_sel2_w  == sp_sel);
 wire       we_fwd   = we  && (a7_same  || (waddr  != 4'd15));
 wire       we2_fwd  = we2 && (a7_same2 || (waddr2 != 4'd15));
+wire       w_collide = we && we2 && (waddr == waddr2) &&
+                       ((waddr != 4'd15) || (sp_sel_w == sp_sel2_w));
 
 // MOVEC writes a stack pointer through the auxiliary port, which bypasses
 // the A7 index entirely -- so a reader of A7 in that cycle saw the old
@@ -193,9 +195,17 @@ always @(posedge clk) begin
 				endcase
 			end
 		end
-		// Second port, same shape as the first, applied after it so port 1
-		// wins a same-register collision.
-		if (we2) begin
+		// Second port, same shape as the first. The comment here used to
+		// say port 1 wins a same-register collision; the code said the
+		// opposite, because this block is applied SECOND and the later
+		// assignment is the one that lands. It mattered the moment an
+		// instruction could write A7 twice on the same stack: a faulting
+		// (A7)+ in supervisor mode put the increment on top of the
+		// exception's own stack pointer (milestone 93). Now the guard
+		// makes the code match what was written -- and for A7 the two
+		// only collide when they name the same BANK, which is exactly
+		// the user-mode case that must keep BOTH writes.
+		if (we2 && !w_collide) begin
 			if (!waddr2[3])            dreg[waddr2[2:0]] <= wdata2;
 			else if (waddr2[2:0] != 7) areg[waddr2[2:0]] <= wdata2;
 			else begin

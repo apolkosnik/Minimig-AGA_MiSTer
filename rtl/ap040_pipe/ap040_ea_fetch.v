@@ -253,6 +253,12 @@ module ap040_ea_fetch
 	// A MOVEC to a stack pointer is in EX (milestone 92): its write lands
 	// through the register file's auxiliary port, which no forward reaches.
 	input             ex_creg_sp,
+	// An OLDER instruction's write to A7 has not reached the register file
+	// yet (milestone 93). The exception sequencer reads the stack pointer
+	// straight out of the file, so its frame base is stale until this
+	// clears -- and half a frame went to the old address and half to the
+	// new one when it did not wait.
+	input             a7_busy,
 	input             flush,      // EX detected a misprediction: force a bubble
 
 	input             eac_valid,
@@ -805,6 +811,28 @@ wire [5:0] shcnt_now = eac_shift_reg ? operand_a[5:0] : eac_shcnt;
 // the L1 from this stage on the instruction's behalf is gated by `live`.
 wire live         = eac_valid && !flush;
 
+// One cycle, and only for an instruction that actually reads A7. A MOVEC
+// to the active stack pointer commits through the register file's
+// auxiliary port, so a reader one instruction behind it reads the old
+// value -- it is not lost, it is late, which is why two NOPs "fixed" it.
+// Waiting puts the read in the commit cycle, where the auxiliary bypass
+// answers it. MOVEC to a stack pointer is setup code, so the cost is
+// nothing.
+wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
+wire creg_hazard  = live && ex_creg_sp && sp_read_a;
+
+// A hazard has to stop the stage it is IN. eaf_stall tells the stages
+// BEHIND this one to wait; on its own it left this instruction retiring,
+// and re-issuing its memory request, once per cycle of the hazard
+// (milestone 93). The register read self-corrected -- the last pass wrote
+// the right answer over the earlier ones -- but a push ran twice and
+// pushed twice. What it must NOT do is freeze this stage outright: the
+// instruction in EX is the MOVEC, and holding EA-fetch's output register
+// holds the MOVEC in EX for ever, which is a deadlock rather than a stall.
+// The hazard emits a BUBBLE instead -- the branch below -- and stall_self
+// keeps the held instruction's requests off the memory while it waits.
+wire stall_self = stall_in || creg_hazard;
+
 wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold;
 // ...unless this instruction has just turned out to be an exception. For a
 // memory-source fault the value that CAUSES the fault is the one the load
@@ -947,6 +975,7 @@ reg  exc_fmt2_r;
 // selected by a register.
 reg  [7:0] exc_vec_r;
 reg        exc_m_r;
+reg [31:0] exc_sp_r;
 wire exc_writing   = exc_go && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && exc_fmt2_r));
@@ -957,6 +986,9 @@ wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
 wire exc_vec_issue = exc_go && !exc_vec_pending && (exc_ph == EXC_VECRD);
 wire exc_vec_done  = exc_go && exc_vec_pending && l1_rvalid_b;
 wire exc_stall     = exc_active && !exc_vec_done;
+// ...and the frame cannot start until the base is trustworthy, which is
+// what a7_busy says. exc_go simply does not latch before then, and
+// exc_stall above already holds the instruction while it waits.
 
 // RTE (milestone 16, new): a genuinely supervisor RTE (eac_is_priv already
 // false means sr_in[13] was 1) gets its own 2-beat READ sequencer -- the
@@ -998,7 +1030,7 @@ wire ret_stall    = ret_active && !ret_done;
 // MOVE.L (A0),D1 issued thirty-four reads and one TRAP pushed its frame
 // eighteen times. The earlier fix gated the ordinary store alone, which was
 // the reported symptom rather than the defect.
-assign l1_rd_b = !stall_in &&
+assign l1_rd_b = !stall_self &&
                  (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go);
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
@@ -1026,9 +1058,6 @@ assign fmterr_now = ret_done && !ret_fmt_ok;
 // it is not lost, it is late, which is why two NOPs "fixed" it. Waiting
 // puts the read in the commit cycle, where the auxiliary bypass answers
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
-wire sp_read_a  = (raddr_a == 4'd15) || (raddr_b == 4'd15);
-wire creg_hazard = live && ex_creg_sp && sp_read_a;
-
 assign eaf_stall = stall_in || creg_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
@@ -1093,7 +1122,25 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // format $0 is 8 (4 words) -- the ONLY difference in overall frame shape
 // this milestone introduces; everything else about the sequencer (which
 // stack, how M/S select it) is unchanged.
-wire [31:0] exc_sp_bank    = exc_m_r ? msp_in : isp_in;   // M selects ISP vs MSP; S is irrelevant here
+// The exception's own bank, and the pointer it starts from. Two things
+// make the second harder than reading a register (milestone 93).
+//
+// If the FAULTING instruction also updates A7 -- a (A7)+ operand that
+// faulted -- the increment happens first architecturally, and the frame is
+// pushed from where it leaves the pointer. When that update lands on the
+// same stack the exception is about to use, the base is the UPDATED value;
+// when it does not (a user-mode (A7)+ faulting onto the supervisor stack)
+// the two are separate registers and the base is the bank's own.
+wire  [1:0] exc_bank_sel   = exc_m_r ? 2'd2 : 2'd1;   // S is 1 by construction here
+wire        exc_a7_self    = an_wr_any && (an_wr_reg == 4'd15) &&
+                             (an_sp_sel == exc_bank_sel);
+wire [31:0] exc_sp_live    = exc_a7_self ? an_wr_data
+                                         : (exc_m_r ? msp_in : isp_in);
+// ...and it is RESOLVED ONCE, with the verdict, not re-read per beat. The
+// register file is not still while the frame is being written: an older
+// instruction that writes A7 commits between one beat and the next, and
+// the two halves of the frame landed 512 bytes apart.
+wire [31:0] exc_sp_bank    = exc_sp_r;
 // Both sizes, subtracted in parallel, and the format picks one (milestone
 // 81). Written as `bank - (fmt2 ? 12 : 8)` the format select drives an
 // ADDER, and that adder is the last thing before the L1 address: the fit
@@ -1210,7 +1257,7 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // register does not work that way. The frame and MOVEM beats below carry
 // their own sequencer, which advances per accepted beat, so they post once
 // each without needing this.
-assign l1_wren_b = !stall_in &&
+assign l1_wren_b = !stall_self &&
                    ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want);
 // The privilege this access carries (milestone 92). An exception's frame
 // writes and vector read are SUPERVISOR accesses whatever mode the faulting
@@ -1316,6 +1363,7 @@ always @(posedge clk) begin
 		exc_fmt2_r      <= 1'b0;
 		exc_vec_r       <= 8'd0;
 		exc_m_r         <= 1'b0;
+		exc_sp_r        <= 32'd0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 	end else if (ce) begin
@@ -1325,12 +1373,13 @@ always @(posedge clk) begin
 		// lose it -- or with a flush, which kills the instruction it was
 		// set for.
 		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
-		else if (exc_active) begin
+		else if (exc_active && !a7_busy) begin
 			exc_go <= 1'b1;
 			if (!exc_go) begin   // fixed at the verdict, not re-read per beat
 				exc_fmt2_r <= eac_is_fmt2;
 				exc_vec_r  <= exc_vec_num;
 				exc_m_r    <= sr_in[12];
+				exc_sp_r   <= exc_sp_live;
 			end
 		end
 
@@ -1389,7 +1438,18 @@ always @(posedge clk) begin
 			ret_ph          <= RET_BEAT0;
 			ret_pending     <= 1'b0;
 		end else if (!stall_in) begin
-			if (mem_issue) begin
+			if (creg_hazard) begin
+				// The bubble, and it has to come FIRST. Below mem_issue it
+				// set mem_pending for a read that stall_self had already
+				// kept off the memory, and the stage then waited for a
+				// return that was never asked for -- bookkeeping without
+				// the request it records, which is the same shape as the
+				// defect this whole milestone is about. eaf_stall is
+				// holding eac_* in place, so the instruction is still here
+				// next cycle, by which time the MOVEC has committed and
+				// the auxiliary bypass answers its read.
+				eaf_valid      <= 1'b0;
+			end else if (mem_issue) begin
 				eaf_valid   <= 1'b0;
 				mem_pending <= 1'b1;
 			end else if (mem_complete) begin

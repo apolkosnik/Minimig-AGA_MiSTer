@@ -268,6 +268,11 @@ module ap040_execute
 	// commits through the register file's auxiliary port, which no forward
 	// reaches, so a reader of A7 one instruction behind has to wait for it.
 	output            ex_creg_sp,
+	// The privilege of EX's own memory write (milestone 93). When EX takes
+	// port B its address, size and data all come from here; the privilege
+	// used to come from EA-fetch, where a YOUNGER exception forces
+	// supervisor, so a user-mode read-modify-write posted as supervisor.
+	output            ex_st_sup,
 	output reg        exe_writes_creg,
 	output reg  [2:0] exe_creg_sel,
 	output reg [31:0] exe_creg_data
@@ -530,6 +535,7 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 // The raw alu_result is used rather than alu_sized: the size already
 // restricts what lands, and alu_sized would splice in eaf_operand_b, which
 // for an RMW is the value just read from that same memory.
+assign ex_st_sup  = eaf_sr_snapshot[13];
 assign ex_st_addr = eaf_ea_target;
 assign ex_st_size = eaf_size;
 assign ex_st_data = alu_result;

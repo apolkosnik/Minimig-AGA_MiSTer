@@ -172,8 +172,10 @@ module ap040_pipe_cpu
 	output [31:0] l1_addr_b,
 	output        l1_rd_b,
 	output        l1_wren_b,
-	// The privilege of the port-B access (milestone 92).
+	// The privilege of the port-B access (milestone 92), and of the
+	// instruction fetch (milestone 93).
 	output        l1_sup_b,
+	output        l1_sup_a,
 	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
 	input         l1_wr_busy,
@@ -234,6 +236,15 @@ wire [31:0] exe_result_data2;
 wire        exe_writes_reg2;
 wire  [1:0] exe_an_sel;
 wire        ex_creg_sp;
+wire        ex_st_sup;
+// A write to A7 that has not landed in the register file yet: one in EX
+// through either port, or one committing this cycle, whose value the file
+// only shows from the NEXT cycle. MOVEC's auxiliary write counts too.
+wire        a7_busy = (ex_fwd_valid  && (ex_fwd_dest  == 4'd15)) ||
+                      (ex_fwd2_valid && (ex_fwd2_dest == 4'd15)) ||
+                      (commit_reg    && (exe_dest_reg  == 4'd15)) ||
+                      (commit_reg2   && (exe_dest_reg2 == 4'd15)) ||
+                      aux_we;
 wire        ex_fwd2_valid;
 wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
@@ -590,6 +601,14 @@ wire      [31:0] eaf_l1_addr_b;
 // port from EA-fetch for its cycle (ex_st_req, which EA-fetch sees as
 // port_taken).
 wire eaf_l1_rd_b;
+wire eaf_l1_sup_b;
+// Whoever owns port B this cycle owns its privilege too (milestone 93).
+assign l1_sup_b  = ex_st_req ? ex_st_sup : eaf_l1_sup_b;
+// The fetch's privilege is the mode the fetched instruction will RUN in,
+// which for the first instruction of a handler is supervisor -- and the
+// exception's own SR write has not committed when that fetch goes out.
+// sr_resolved carries EX's pending write; the committed register does not.
+assign l1_sup_a  = sr_resolved[13];
 assign l1_rd_b   = ce && eaf_l1_rd_b;
 assign l1_addr_b = ex_st_req ? ex_st_addr : eaf_l1_addr_b;
 // Gated by ce, all of them (milestone 92). ap040_pipe_l1.v has no clock
@@ -934,7 +953,7 @@ ap040_ea_fetch #(
 	.l1_q_b           (l1_q_b),
 	.l1_rvalid_b      (l1_rvalid_b),
 	.l1_rd_b          (eaf_l1_rd_b),
-	.l1_sup_b         (l1_sup_b),
+	.l1_sup_b         (eaf_l1_sup_b),
 	.l1_wren_b        (eaf_l1_wren_b),
 	.l1_size_b          (eaf_l1_size_b),
 	.l1_data_b        (eaf_l1_data_b),
@@ -954,6 +973,7 @@ ap040_ea_fetch #(
 	.eaf_writes_an    (eaf_writes_an),
 	.eaf_an_sel       (eaf_an_sel),
 	.ex_creg_sp       (ex_creg_sp),
+	.a7_busy          (a7_busy),
 	.eaf_an_reg       (eaf_an_reg),
 	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),
@@ -1084,6 +1104,7 @@ ap040_execute u_ex
 	.exe_writes_sr    (exe_writes_sr),
 	.exe_sr_data      (exe_sr_data),
 	.ex_creg_sp       (ex_creg_sp),
+	.ex_st_sup        (ex_st_sup),
 	.exe_writes_creg  (exe_writes_creg),
 	.exe_creg_sel     (exe_creg_sel),
 	.exe_creg_data    (exe_creg_data)
