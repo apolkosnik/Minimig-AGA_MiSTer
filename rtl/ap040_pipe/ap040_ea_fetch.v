@@ -812,7 +812,14 @@ wire addrerr_now     = eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
                        eac_is_rts_odd || eac_is_rte_odd;
 reg        exc_pend_addrerr;
 reg [31:0] exc_pend_ae_target;
-wire eac_is_addrerr  = addrerr_now || exc_pend_addrerr;
+// The held verdict belongs to ONE instruction, and exc_go is what says
+// which: it is set for the faulting instruction and clears when that
+// instruction departs. Without that scope the flag outlived its owner --
+// the handler's own first instruction inherited it and took the same
+// address error a second time, with the same stale target, which a low
+// clock enable made routine by stretching the window (milestone 97).
+// addrerr_now covers the detection cycle itself, before exc_go is set.
+wire eac_is_addrerr  = addrerr_now || (exc_pend_addrerr && exc_go);
 // The target each of them referenced, which is what the format $2 frame's
 // address field carries -- with bit 0 cleared, as the reference does.
 wire [31:0] addrerr_live   = eac_is_br_odd  ? br_target :
@@ -1491,30 +1498,42 @@ always @(posedge clk) begin
 			end
 		end
 
-		// Held from the cycle the divisor was seen until the exception has
-		// fetched its vector; see the latch's own comment above.
-		if (exc_vec_done)      exc_pend_divzero <= 1'b0;
-		else if (divzero_now)  exc_pend_divzero <= 1'b1;
+		// Each of these holds a fault's verdict from the cycle it was seen
+		// until the exception has fetched its vector. Two things they all
+		// need, and did not have (milestone 97):
+		//
+		// They clear on the SAME condition exc_go does, exc_vec_done with
+		// the departure actually happening. Clearing on exc_vec_done alone
+		// dropped the verdict a cycle early, and if the departure was then
+		// delayed -- which a low clock enable does -- a LEVEL condition
+		// like an odd JMP target re-armed it and the instruction took its
+		// exception a second time, twelve more bytes of frame each time.
+		//
+		// And they arm only while exc_go is still low, so one instruction
+		// latches one verdict however long it is held. Conditions that are
+		// true for a single cycle, like a memory operand's, never needed
+		// that; the ones that stay true for as long as the operand does
+		// always did.
+		if (exc_vec_done && !stall_in)   exc_pend_divzero <= 1'b0;
+		else if (divzero_now && !exc_go) exc_pend_divzero <= 1'b1;
 
-		// Held from the cycle the odd target was seen, with the target
-		// itself -- RTS and RTE show theirs for one cycle only.
-		if (exc_vec_done)      exc_pend_addrerr <= 1'b0;
-		else if (addrerr_now) begin
+		if (exc_vec_done && !stall_in)   exc_pend_addrerr <= 1'b0;
+		else if (addrerr_now && !exc_go) begin
 			exc_pend_addrerr   <= 1'b1;
 			exc_pend_ae_target <= addrerr_live;
 		end
 
-		if (exc_vec_done)  exc_pend_chk <= 1'b0;
-		else if (chk_now) begin
+		if (exc_vec_done && !stall_in) exc_pend_chk <= 1'b0;
+		else if (chk_now && !exc_go) begin
 			exc_pend_chk   <= 1'b1;
 			exc_pend_chk_n <= chk_negative;
 		end
 
-		if (exc_vec_done)     exc_pend_trapcc <= 1'b0;
-		else if (trapcc_now)  exc_pend_trapcc <= 1'b1;
+		if (exc_vec_done && !stall_in)  exc_pend_trapcc <= 1'b0;
+		else if (trapcc_now && !exc_go) exc_pend_trapcc <= 1'b1;
 
-		if (exc_vec_done)     exc_pend_fmterr <= 1'b0;
-		else if (fmterr_now)  exc_pend_fmterr <= 1'b1;
+		if (exc_vec_done && !stall_in)  exc_pend_fmterr <= 1'b0;
+		else if (fmterr_now && !exc_go) exc_pend_fmterr <= 1'b1;
 
 		if (exc_vec_done)     exc_pend_trace <= 1'b0;
 		else if (trace_take)  exc_pend_trace <= 1'b1;
