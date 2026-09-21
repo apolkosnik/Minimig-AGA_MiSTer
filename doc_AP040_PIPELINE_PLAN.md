@@ -1688,6 +1688,128 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 92: eight defects found from outside
+
+   An external review of the core produced two rounds of four
+   reproducible defects each. All eight were confirmed, all eight are
+   fixed, and every one of them had gone unnoticed through ninety-one
+   milestones of benches for a single reason: **every bench in this suite
+   ran the core with `ce` tied high and memory answering in one cycle.**
+   That is not how the core will run.
+
+   **Round one.**
+
+   A store held behind a stalled EX was accepted again every time the
+   write buffer drained. The request is combinational off `eac_valid` and
+   says nothing about whether the instruction has had its turn -- right
+   while its own `wr_stall` holds it, wrong while anything else does. One
+   `MOVE.L D0,(A0)` behind a `DIVU.W` posted eighteen times. Every repeat
+   writes the same frozen operands to the same frozen address, so RAM ends
+   up correct and no value check can see it; a device register does not
+   work that way.
+
+   A commit pending when `ce` went low was dropped. `exe_fresh` was
+   computed as `ce && !ex_stall`, so it cleared during a disabled cycle
+   while EX's output registers, correctly gated on `ce`, held their value.
+   With `ce` alternating every cycle, a four-write program committed
+   **nothing at all**.
+
+   A write to A7 took its bank from the forwarded SR, which belongs to a
+   younger instruction. `MOVEA.L #$12345678,A7` followed by `MOVE D0,SR`
+   put the value in USP and left ISP at zero -- the exact pair a
+   supervisor uses to hand control to user code.
+
+   A redirect accepted in the cycle a fetch was acknowledged published the
+   abandoned word as valid and cleared the request for the new address.
+   The guard compared against `a_addr`, which is assigned non-blocking
+   earlier in the same block and still reads as the OLD address there, so
+   it never fired on a same-cycle redirect.
+
+   **Round two, and three of the four are the first round not finished.**
+
+   Gating the ordinary store on `!stall_in` fixed the reported symptom
+   rather than the defect. Every piece of bookkeeping that records a
+   request as having happened -- `mem_pending`, the exception sequencer's
+   phase, MOVEM's beat counter -- lives in the same `!stall_in` block, so
+   reads and frame beats repeated for exactly the same reason:
+   **thirty-four reads for one load, eighteen beats for one TRAP.** The
+   comment that exempted the frame beats because they carry a sequencer
+   was wrong, and said so in the source. Both request outputs now share
+   that one enable.
+
+   Giving the register file one write-side bank fixed the reported pair
+   and not the general case. One instruction can write A7 TWICE, and when
+   it faults the two writes mean different stacks: `DIVU.W (A7)+,D0` in
+   user mode with a zero divisor must update USP through the
+   autoincrement port and ISP through the exception's own result. With one
+   select they both went to ISP, and the postincrement landed on top of
+   the frame pointer. Port 2 now carries the bank the instruction itself
+   was running in.
+
+   MOVEC to a stack pointer commits through the register file's auxiliary
+   port, which no forward reaches: a reader of A7 one instruction behind
+   got the old value and caught up two instructions later. Two things were
+   needed, and the mutations show both are load-bearing -- a bypass on the
+   auxiliary write, and a one-cycle interlock so the read lands in the
+   commit cycle where that bypass answers it.
+
+   An exception's frame writes and vector read went out with USER function
+   codes when the faulting instruction was in user mode. They are
+   supervisor accesses whatever mode faulted. The privilege was read off
+   the committed SR at the far end of the bridge -- which still says user
+   while the frame is being pushed -- and read when the transaction was
+   SENT rather than when the request was accepted.
+
+   | revert | caught by | and not by |
+   |---|---|---|
+   | the store's `!stall_in` gate | `storeonce` | the other three |
+   | `exe_fresh`'s hold | `cepause` | the other three |
+   | the write-side bank | `a7bank` | the other three |
+   | the redirect guard | `busredirect` | the other three |
+   | port 2's own bank | `faultpi` | the other three |
+   | the read request's gate | `storeonce` (37 reads) | the other three |
+   | the frame beats' gate | `storeonce` (21 writes) | the other three |
+   | the auxiliary bypass | `movecsp` | the other three |
+   | the MOVEC interlock | `movecsp` | the other three |
+   | the exception's supervisor override | `excfc` | the other three |
+   | the A7 bypass's bank guard | **nothing** | all of them |
+   | capturing privilege with the request | **nothing** | all of them |
+
+   The last two are defence with no reachable trigger in the core as it
+   stands, and are kept rather than removed: both protect a condition that
+   is real and cheap to state, and the plan already records one such guard
+   under milestone 48. They are listed here so nobody mistakes them for
+   tested behaviour.
+
+   **The fit moved, and the cause was not isolated.** 5,822 ALMs, Fmax
+   44.3 MHz, slack **+2.426 ns** against milestone 91's +0.996, worst path
+   21.95 ns. Only four of the forty worst paths still end at the array,
+   where all of them used to, and the worst is now register-to-register
+   inside EA-fetch. Two fits of this RTL agree to the picosecond, so the
+   1.43 ns is real; which of the eight changes bought it was not measured,
+   and it is recorded as an observation rather than a claim.
+
+   **A second false regression, from a different disk.** Ten benches
+   failed at once with `g++` exiting and no diagnostic. `/tmp` is a 31 GB
+   tmpfs shared with everything else on this machine and it was at 100%.
+   Milestone 90 had the same failure from `/home`, and the rule it left --
+   check the machine before the RTL -- is what found it in one step this
+   time. Both the bench harness and the fit script now put their
+   temporaries in their own work directory.
+
+   | run | result |
+   |---|---|
+   | control, all eight benches on the RTL each was written against | all eight fail |
+   | full suite, normal build | 102/102 |
+   | full suite, slow build | 102/102 |
+   | standalone fit, twice | +2.426 ns at 25 ns, 5,822 ALMs, identical |
+
+   The rule this leaves: **a bench that only ever runs the core with the
+   clock enable high and memory answering instantly is not testing the
+   core that will be built.** Eight defects lived behind that one
+   assumption, and four of them are in the two signals every access
+   crosses.
+
    ### Milestone 91: a store with a displacement
 
    `MOVE.sz Dn,(d16,An)`. Destination mode 101 was the last one the MOVE
