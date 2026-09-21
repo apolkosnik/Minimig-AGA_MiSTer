@@ -120,6 +120,7 @@ module ap040_execute
 	input             eaf_writes_an,
 	input       [3:0] eaf_an_reg,
 	input      [31:0] eaf_an_data,
+	input       [1:0] eaf_an_sel,
 	input             eaf_writes_reg,
 	input             eaf_writes_ccr,
 	input             eaf_is_branch,
@@ -252,6 +253,7 @@ module ap040_execute
 	output reg  [3:0] exe_dest_reg2,
 	output reg [31:0] exe_result_data2,
 	output reg        exe_writes_reg2,
+	output reg  [1:0] exe_an_sel,
 	output reg        exe_writes_ccr,
 	output reg  [4:0] exe_result_flags,
 
@@ -262,6 +264,10 @@ module ap040_execute
 	// exclusive by construction).
 	output reg        exe_writes_sr,
 	output reg [15:0] exe_sr_data,
+	// A stack pointer is being written in EX THIS cycle (milestone 92). It
+	// commits through the register file's auxiliary port, which no forward
+	// reaches, so a reader of A7 one instruction behind has to wait for it.
+	output            ex_creg_sp,
 	output reg        exe_writes_creg,
 	output reg  [2:0] exe_creg_sel,
 	output reg [31:0] exe_creg_data
@@ -626,6 +632,10 @@ wire [15:0] exe_sr_data_c   = exc_reaching_ex ? ((eaf_sr_snapshot & 16'h1FFF) | 
 // established for the exception-entry push.
 wire exe_writes_creg_c = (eaf_valid && eaf_is_movec && eaf_movec_dir) ||
                           (eaf_valid && eaf_is_rte);
+assign ex_creg_sp = exe_writes_creg_c &&
+                    (exe_creg_sel_c == `AP040_CREG_USP ||
+                     exe_creg_sel_c == `AP040_CREG_ISP ||
+                     exe_creg_sel_c == `AP040_CREG_MSP);
 wire  [2:0] exe_creg_sel_c  = eaf_is_rte ? (eaf_sr_snapshot[12] ? `AP040_CREG_MSP : `AP040_CREG_ISP)
                                           : eaf_movec_sel;
 wire [31:0] exe_creg_data_c = eaf_is_rte ? eaf_operand_b : eaf_operand_a;
@@ -665,6 +675,7 @@ always @(posedge clk) begin
 		exe_dest_reg2    <= 4'h0;
 		exe_result_data2 <= 32'h0;
 		exe_writes_reg2  <= 1'b0;
+		exe_an_sel       <= 2'd0;
 		exe_writes_reg   <= 1'b0;
 		exe_writes_ccr   <= 1'b0;
 		exe_result_flags <= 5'h0;
@@ -680,6 +691,7 @@ always @(posedge clk) begin
 		exe_result_data  <= combined_result;
 		// The address update rides alongside, on its own gate -- see
 		// ap040_pipe_regfile.v's second write port.
+		exe_an_sel       <= eaf_an_sel;
 		exe_dest_reg2    <= eaf_an_reg;
 		exe_result_data2 <= eaf_an_data;
 		exe_writes_reg2  <= eaf_writes_an;

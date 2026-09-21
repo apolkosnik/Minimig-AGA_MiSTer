@@ -59,6 +59,7 @@ wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
+wire        l1_sup_b;
 
 ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
@@ -71,6 +72,7 @@ ap040_pipe_cpu #(
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
 
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
+	.l1_sup_b  (l1_sup_b),
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 
@@ -97,6 +99,7 @@ ap040_pipe_membus u_bus
 	.wr_busy  (l1_wr_busy), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
 
 	.sup      (dbg_sr[13]),
+	.sup_b    (l1_sup_b),
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),

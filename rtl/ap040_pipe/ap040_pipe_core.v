@@ -56,6 +56,7 @@ ap040_pipe_cpu #(
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
 
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
+	.l1_sup_b  (),   // the array has no function codes
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 	.dbg_if_valid  (dbg_if_valid),

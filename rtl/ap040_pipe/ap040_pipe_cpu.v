@@ -172,6 +172,8 @@ module ap040_pipe_cpu
 	output [31:0] l1_addr_b,
 	output        l1_rd_b,
 	output        l1_wren_b,
+	// The privilege of the port-B access (milestone 92).
+	output        l1_sup_b,
 	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
 	input         l1_wr_busy,
@@ -224,11 +226,14 @@ wire  [1:0] ex_st_size;
 wire        eac_is_abs;
 wire        eac_is_postinc, eac_is_predec;
 wire        eaf_writes_an;
+wire  [1:0] eaf_an_sel;
 wire  [3:0] eaf_an_reg;
 wire [31:0] eaf_an_data;
 wire  [3:0] exe_dest_reg2;
 wire [31:0] exe_result_data2;
 wire        exe_writes_reg2;
+wire  [1:0] exe_an_sel;
+wire        ex_creg_sp;
 wire        ex_fwd2_valid;
 wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
@@ -530,6 +535,7 @@ ap040_pipe_regfile u_regfile
 	// ...and the architectural view for the write side -- see the port's
 	// own comment in ap040_pipe_regfile.v (milestone 92).
 	.sr_s_w   (sr_base[13]),
+	.sp_sel2_w(exe_an_sel),
 	.sr_m_w   (sr_base[12]),
 
 	.we       (commit_reg),
@@ -928,6 +934,7 @@ ap040_ea_fetch #(
 	.l1_q_b           (l1_q_b),
 	.l1_rvalid_b      (l1_rvalid_b),
 	.l1_rd_b          (eaf_l1_rd_b),
+	.l1_sup_b         (l1_sup_b),
 	.l1_wren_b        (eaf_l1_wren_b),
 	.l1_size_b          (eaf_l1_size_b),
 	.l1_data_b        (eaf_l1_data_b),
@@ -945,6 +952,8 @@ ap040_ea_fetch #(
 	.eaf_size         (eaf_size),
 	.eaf_shcnt        (eaf_shcnt),
 	.eaf_writes_an    (eaf_writes_an),
+	.eaf_an_sel       (eaf_an_sel),
+	.ex_creg_sp       (ex_creg_sp),
 	.eaf_an_reg       (eaf_an_reg),
 	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),
@@ -988,6 +997,7 @@ ap040_execute u_ex
 	.eaf_size         (eaf_size),
 	.eaf_shcnt        (eaf_shcnt),
 	.eaf_writes_an    (eaf_writes_an),
+	.eaf_an_sel       (eaf_an_sel),
 	.eaf_an_reg       (eaf_an_reg),
 	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),
@@ -1067,11 +1077,13 @@ ap040_execute u_ex
 	.exe_dest_reg2    (exe_dest_reg2),
 	.exe_result_data2 (exe_result_data2),
 	.exe_writes_reg2  (exe_writes_reg2),
+	.exe_an_sel       (exe_an_sel),
 	.exe_writes_ccr   (exe_writes_ccr),
 	.exe_result_flags (exe_result_flags),
 
 	.exe_writes_sr    (exe_writes_sr),
 	.exe_sr_data      (exe_sr_data),
+	.ex_creg_sp       (ex_creg_sp),
 	.exe_writes_creg  (exe_writes_creg),
 	.exe_creg_sel     (exe_creg_sel),
 	.exe_creg_data    (exe_creg_data)

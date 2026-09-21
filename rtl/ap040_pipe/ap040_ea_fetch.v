@@ -250,6 +250,9 @@ module ap040_ea_fetch
 	input             nreset,
 	input             ce,
 	input             stall_in,   // EX cannot accept this cycle
+	// A MOVEC to a stack pointer is in EX (milestone 92): its write lands
+	// through the register file's auxiliary port, which no forward reaches.
+	input             ex_creg_sp,
 	input             flush,      // EX detected a misprediction: force a bubble
 
 	input             eac_valid,
@@ -354,6 +357,7 @@ module ap040_ea_fetch
 
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
+	output            l1_sup_b,
 	output     [31:0] l1_addr_b,
 	input        [31:0] l1_q_b,
 	input               l1_rvalid_b,   // l1_q_b is the return for the last l1_rd_b (milestone 80)
@@ -375,6 +379,12 @@ module ap040_ea_fetch
 	output reg  [1:0] eaf_size,
 	output reg  [5:0] eaf_shcnt,
 	output reg        eaf_writes_an,
+	// Which A7 that write means (milestone 92). An autoincrement through
+	// A7 belongs to the instruction, and if the instruction FAULTS the
+	// exception switches to supervisor before the write commits -- so a
+	// bank taken from the SR at commit sends it to the supervisor stack,
+	// on top of the frame pointer the exception just wrote there.
+	output reg  [1:0] eaf_an_sel,
 	output reg  [3:0] eaf_an_reg,
 	output reg [31:0] eaf_an_data,
 	output reg        eaf_writes_reg,
@@ -627,6 +637,9 @@ assign rf3_addr = mvm_rd_reg;
 // behaviour separating MOVEM.W's load from a pair of half-width writes.
 assign rf3_data = mvm_word ? {{16{l1_q_b[15]}}, l1_q_b[15:0]} : l1_q_b;
 wire        an_write = eac_valid && (eac_is_postinc || eac_is_predec);
+// The bank the address-register write means, as of THIS instruction --
+// before any exception it is about to take (milestone 92).
+wire  [1:0] an_sp_sel = !sr_in[13] ? 2'd0 : (sr_in[12] ? 2'd2 : 2'd1);
 
 // Address error on an odd JMP/JSR target (milestone 17, new): a SECOND
 // dynamic exception trigger, same reasoning as eac_is_priv below -- "this
@@ -977,7 +990,16 @@ wire ret_stall    = ret_active && !ret_done;
 // requesters are exclusive by construction (one instruction is never more
 // than one of them), and each waits for l1_rvalid_b before it looks at l1_q_b
 // (milestone 80): mem_complete, exc_vec_done, ret_complete, rf3_we.
-assign l1_rd_b = mem_issue || exc_vec_issue || ret_issue || mvm_ld_go;
+// Requests and bookkeeping share one enable (milestone 92). Everything
+// that records a request as having happened -- mem_pending for a read, the
+// exception sequencer's phase, MOVEM's beat counter -- lives in the
+// `!stall_in` block below, so a request asserted outside that window is one
+// the memory accepts and nothing remembers. Behind a divide, one
+// MOVE.L (A0),D1 issued thirty-four reads and one TRAP pushed its frame
+// eighteen times. The earlier fix gated the ordinary store alone, which was
+// the reported symptom rather than the defect.
+assign l1_rd_b = !stall_in &&
+                 (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go);
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
 // for everything but address error; $2 and $3 are the six-word frames ($3
@@ -998,7 +1020,16 @@ wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
 wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
 assign fmterr_now = ret_done && !ret_fmt_ok;
 
-assign eaf_stall = stall_in || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
+// One cycle, and only for an instruction that actually reads A7. A MOVEC
+// to the active stack pointer commits through the auxiliary port, so a
+// reader one instruction behind it reads the register file's old value --
+// it is not lost, it is late, which is why two NOPs "fixed" it. Waiting
+// puts the read in the commit cycle, where the auxiliary bypass answers
+// it. MOVEC to a stack pointer is setup code, so the cost is nothing.
+wire sp_read_a  = (raddr_a == 4'd15) || (raddr_b == 4'd15);
+wire creg_hazard = live && ex_creg_sp && sp_read_a;
+
+assign eaf_stall = stall_in || creg_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
@@ -1179,8 +1210,14 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // register does not work that way. The frame and MOVEM beats below carry
 // their own sequencer, which advances per accepted beat, so they post once
 // each without needing this.
-assign l1_wren_b = (live && !stall_in && (eac_is_push || store_now)) ||
-                   exc_writing || mvm_st_want;
+assign l1_wren_b = !stall_in &&
+                   ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want);
+// The privilege this access carries (milestone 92). An exception's frame
+// writes and vector read are SUPERVISOR accesses whatever mode the faulting
+// instruction ran in, and the switch to supervisor has not committed while
+// they are happening -- so it cannot be read off the status register at the
+// far end of the bridge.
+assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
 // The size of whatever access l1_addr_word above selected, in the same
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
@@ -1217,6 +1254,7 @@ always @(posedge clk) begin
 		eaf_size       <= `AP040_SZ_L;
 		eaf_shcnt      <= 6'd1;
 		eaf_writes_an  <= 1'b0;
+		eaf_an_sel     <= 2'd0;
 		eaf_an_reg     <= 4'd0;
 		eaf_an_data    <= 32'd0;
 		eaf_writes_reg <= 1'b0;
@@ -1395,6 +1433,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
+				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;
@@ -1587,7 +1626,8 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
-				eaf_writes_an  <= an_wr_any && own_exc;   // a trace entry runs none of the held instruction
+				eaf_writes_an  <= an_wr_any && own_exc;
+				eaf_an_sel     <= an_sp_sel;   // a trace entry runs none of the held instruction
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
@@ -1710,6 +1750,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
+				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				// NOT 1: RTE's A7 restore does NOT go through the normal
@@ -1806,6 +1847,7 @@ always @(posedge clk) begin
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
+				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;

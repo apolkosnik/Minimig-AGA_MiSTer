@@ -55,8 +55,12 @@ module ap040_pipe_membus
 	output reg [31:0] q_b,
 	output reg        rvalid_b,
 
-	// The supervisor bit, for the function code alone.
+	// The supervisor bit, for the function code alone. Two of them: port A
+	// is the instruction fetch's and port B is the data access's OWN, which
+	// an exception entry forces supervisor whatever the status register
+	// still says (milestone 92).
 	input             sup,
+	input             sup_b,
 
 	// ---- bus side: ap040_core.v's external memory port ----
 	output reg        mem_req,
@@ -84,6 +88,10 @@ reg  [1:0] b_size;
 reg        w_pend;      // a write has been accepted and has not been sent
 reg [31:0] w_addr, w_data;
 reg  [1:0] w_size;
+// Captured WITH each request, not read when the transaction is finally
+// sent: a posted write can sit here across the very commit that changes the
+// privilege, and would then go out under the wrong one.
+reg        a_sup, b_sup, w_sup;
 
 // The requester must hold its write until this drops -- as with the array's
 // one-entry buffer, the write is accepted the cycle wr_busy is low.
@@ -93,9 +101,10 @@ assign wr_busy = w_pend;
 // arrive: ap040_bus16_adapter.v splits whatever alignment they have.
 function [2:0] fc_of;
 	input is_instr;
+	input priv;
 	begin
-		fc_of = sup ? (is_instr ? `AP040_FC_SUPER_PROG : `AP040_FC_SUPER_DATA)
-		            : (is_instr ? `AP040_FC_USER_PROG  : `AP040_FC_USER_DATA);
+		fc_of = priv ? (is_instr ? `AP040_FC_SUPER_PROG : `AP040_FC_SUPER_DATA)
+		             : (is_instr ? `AP040_FC_USER_PROG  : `AP040_FC_USER_DATA);
 	end
 endfunction
 
@@ -104,6 +113,7 @@ always @(posedge clk) begin
 		busy <= 1'b0; who <= WHO_A; cur_addr_a <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
+		a_sup <= 1'b1; b_sup <= 1'b1; w_sup <= 1'b1;
 		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
 		rvalid_a <= 1'b0; rvalid_b <= 1'b0;
 		q_a <= 16'd0; q_b <= 32'd0;
@@ -114,12 +124,14 @@ always @(posedge clk) begin
 		// ---- new requests ----
 		if (en_a) begin
 			a_addr   <= {address_a[31:1], 1'b0};
+			a_sup    <= sup;
 			a_pend   <= 1'b1;
 			rvalid_a <= 1'b0;
 		end
 		if (rd_b) begin
 			b_addr   <= address_b;
 			b_size   <= size_b;
+			b_sup    <= sup_b;
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
 		end
@@ -127,6 +139,7 @@ always @(posedge clk) begin
 			w_addr <= address_b;
 			w_data <= data_b;
 			w_size <= size_b;
+			w_sup  <= sup_b;
 			w_pend <= 1'b1;
 		end
 
@@ -172,18 +185,18 @@ always @(posedge clk) begin
 			busy      <= 1'b1;  who <= WHO_BW;
 			mem_req   <= 1'b1;  mem_write <= 1'b1;  mem_instr <= 1'b0;
 			mem_size  <= w_size; mem_addr <= w_addr; mem_wdata <= w_data;
-			mem_fc    <= fc_of(1'b0);
+			mem_fc    <= fc_of(1'b0, w_sup);
 		end else if (b_pend) begin
 			busy      <= 1'b1;  who <= WHO_BR;
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
 			mem_size  <= b_size; mem_addr <= b_addr;
-			mem_fc    <= fc_of(1'b0);
+			mem_fc    <= fc_of(1'b0, b_sup);
 		end else if (a_pend) begin
 			busy       <= 1'b1;  who <= WHO_A;
 			cur_addr_a <= a_addr;
 			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;
 			mem_size   <= `AP040_SZ_W; mem_addr <= a_addr;
-			mem_fc     <= fc_of(1'b1);
+			mem_fc     <= fc_of(1'b1, a_sup);
 		end
 	end
 end
