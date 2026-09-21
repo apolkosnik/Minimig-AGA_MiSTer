@@ -37,6 +37,22 @@
 // third stands alone as the control: if the count is wrong for all three   //
 // the request is simply free-running, and if it is wrong only for the      //
 // first two it is the stall.                                              //
+//                                                                          //
+// A store is not the only request this happens to, and gating the store    //
+// alone is not the fix. Every piece of bookkeeping that records a request  //
+// having happened -- mem_pending for a read, the exception sequencer's     //
+// phase, MOVEM's beat counter -- lives in the same `!stall_in` block, so   //
+// a read and a frame beat repeat for exactly the same reason. Both are     //
+// counted here behind the same divide:                                     //
+//                                                                          //
+//   DIVU.W D2,D0 ; MOVE.L (A3),D6      one read, not one per stalled cycle //
+//   DIVU.W D2,D7 ; TRAP #0             two frame writes, not one per cycle //
+//                                                                          //
+// TRAP #0's frame is format $0, which is two 32-bit beats, and its         //
+// handler returns with RTE. The read total is four, not two: the load,     //
+// the vector fetch, and RTE's own two pops, which come back through the    //
+// same port. The first draft expected two and forgot the RTE -- the count  //
+// is only useful if it is the right count, so it is spelled out here.      //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -56,7 +72,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d0;
+wire [31:0] dbg_d0, dbg_d6;
 wire  [4:0] dbg_ccr;
 
 ap040_pipe_core #(
@@ -75,7 +91,7 @@ ap040_pipe_core #(
 	.dbg_ex_valid (dbg_ex_valid),  .dbg_ex_pc (dbg_ex_pc),
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
-	.dbg_d0 (dbg_d0),
+	.dbg_d0 (dbg_d0), .dbg_d6 (dbg_d6),
 	.dbg_ccr(dbg_ccr)
 );
 
@@ -87,6 +103,13 @@ integer writes = 0;
 always @(posedge clk)
 	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid)
 		writes = writes + 1;
+
+// Port B read requests. A correct core asserts one for exactly one cycle
+// per access, whatever the memory latency: mem_pending goes up behind it.
+integer reads = 0;
+always @(posedge clk)
+	if (nreset && dut.u_l1.rd_b)
+		reads = reads + 1;
 
 initial begin
 	#1;
@@ -112,7 +135,27 @@ initial begin
 	dut.u_l1.mem[19] = 16'h0490;
 	dut.u_l1.mem[20] = 16'h7A21;   // MOVEQ #$21,D5
 	dut.u_l1.mem[21] = 16'h2485;   // MOVE.L D5,(A2)   (the control: no stall)
-	dut.u_l1.mem[22] = 16'h4E71;   // NOP (drain)
+	dut.u_l1.mem[22] = 16'h267C;   // MOVEA.L #$00000498,A3
+	dut.u_l1.mem[23] = 16'h0000;
+	dut.u_l1.mem[24] = 16'h0498;
+	dut.u_l1.mem[25] = 16'h283C;   // MOVE.L #$000003E8,D4   (1000)
+	dut.u_l1.mem[26] = 16'h0000;
+	dut.u_l1.mem[27] = 16'h03E8;
+	dut.u_l1.mem[28] = 16'h88C2;   // DIVU.W D2,D4   (holds EX)
+	dut.u_l1.mem[29] = 16'h2C13;   // MOVE.L (A3),D6 -> $5A5A5A5A
+	dut.u_l1.mem[30] = 16'h2E3C;   // MOVE.L #$000003E8,D7
+	dut.u_l1.mem[31] = 16'h0000;
+	dut.u_l1.mem[32] = 16'h03E8;
+	dut.u_l1.mem[33] = 16'h8EC2;   // DIVU.W D2,D7   (holds EX)
+	dut.u_l1.mem[34] = 16'h4E40;   // TRAP #0        (frame, then RTE back)
+	dut.u_l1.mem[35] = 16'h4E71;   // NOP (drain)
+
+	// TRAP #0 handler @ word idx 256 (byte $600): straight back.
+	dut.u_l1.mem[256] = 16'h4E73;  // RTE
+
+	// Vector 32 (TRAP #0) -> $600. Word index as every exception bench uses.
+	dut.u_l1.mem[3648] = 16'h0000;
+	dut.u_l1.mem[3649] = 16'h0600;
 
 	dut.u_l1.mem[64] = 16'h0000;   // $0480
 	dut.u_l1.mem[65] = 16'h0000;
@@ -120,6 +163,8 @@ initial begin
 	dut.u_l1.mem[69] = 16'h0000;
 	dut.u_l1.mem[72] = 16'h0000;   // $0490
 	dut.u_l1.mem[73] = 16'h0000;
+	dut.u_l1.mem[76] = 16'h5A5A;   // $0498 = 5A5A5A5A
+	dut.u_l1.mem[77] = 16'h5A5A;
 end
 
 initial begin
@@ -144,9 +189,18 @@ initial begin
 		$display("FAIL: $0490 = %h%h, expected 00000021",
 		         dut.u_l1.mem[72], dut.u_l1.mem[73]);
 	end
-	if (writes !== 3) begin
+	if (dbg_d6 !== 32'h5A5A_5A5A) begin
 		errors = errors + 1;
-		$display("FAIL: %0d writes posted to the L1, expected 3 (one per store). A store held behind a stalled EX must not be accepted again every time the write buffer drains -- the value is right either way, so only the count can see it.",
+		$display("FAIL: D6 = %h, expected 5a5a5a5a (MOVE.L (A3),D6 behind a divide)", dbg_d6);
+	end
+	if (reads !== 4) begin
+		errors = errors + 1;
+		$display("FAIL: %0d read requests reached the L1, expected 4 (one load, one vector fetch, two RTE pops). A read held behind a stalled EX must not be re-issued every cycle -- mem_pending, which would stop it, is set in the same block the stall freezes.",
+		         reads);
+	end
+	if (writes !== 5) begin
+		errors = errors + 1;
+		$display("FAIL: %0d writes posted to the L1, expected 5 (three stores and TRAP #0's two frame beats). A store held behind a stalled EX must not be accepted again every time the write buffer drains -- the value is right either way, so only the count can see it.",
 		         writes);
 	end
 
