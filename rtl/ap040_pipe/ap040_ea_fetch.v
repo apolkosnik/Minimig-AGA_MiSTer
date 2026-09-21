@@ -1131,11 +1131,15 @@ wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
 // same stack the exception is about to use, the base is the UPDATED value;
 // when it does not (a user-mode (A7)+ faulting onto the supervisor stack)
 // the two are separate registers and the base is the bank's own.
-wire  [1:0] exc_bank_sel   = exc_m_r ? 2'd2 : 2'd1;   // S is 1 by construction here
+// Selected on the LIVE M bit, not the latched one: this wire is what gets
+// latched, in the same cycle exc_m_r does, so reading exc_m_r here reads
+// the value from the PREVIOUS exception. A TRAP taken with M set then
+// built its frame from ISP and left MSP alone.
+wire  [1:0] exc_bank_sel   = sr_in[12] ? 2'd2 : 2'd1;   // S is 1 by construction here
 wire        exc_a7_self    = an_wr_any && (an_wr_reg == 4'd15) &&
                              (an_sp_sel == exc_bank_sel);
 wire [31:0] exc_sp_live    = exc_a7_self ? an_wr_data
-                                         : (exc_m_r ? msp_in : isp_in);
+                                         : (sr_in[12] ? msp_in : isp_in);
 // ...and it is RESOLVED ONCE, with the verdict, not re-read per beat. The
 // register file is not still while the frame is being written: an older
 // instruction that writes A7 commits between one beat and the next, and
