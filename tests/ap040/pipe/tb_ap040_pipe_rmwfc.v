@@ -115,8 +115,12 @@ always @(posedge clk) begin
 		mem_ack <= 1'b0;
 		if (!active && mem_req && !mem_ack) begin
 			active <= 1'b1;
-			delay  <= lfsr[2:0];
-			lfsr   <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+			// A FIXED long delay, not the other bus benches' random one. The
+			// window under test needs the write buffer to be occupied when
+			// EX offers its store, and a memory that sometimes answers in
+			// one cycle sometimes closes the window before it opens. Seven
+			// cycles for every access makes it deterministic.
+			delay  <= 3'd7;
 			// The function code carried by each request, by class. The
 			// whole point of the bench: the code on the wire, not the
 			// effect it had in memory.
