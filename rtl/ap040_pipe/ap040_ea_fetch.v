@@ -662,6 +662,40 @@ wire  [1:0] an_sp_sel = !sr_in[13] ? 2'd0 : (sr_in[12] ? 2'd2 : 2'd1);
 // against ap040_core.v's own S_JMP1/S_JSR1, not guessed.
 wire eac_is_jmp_odd  = eac_is_jmp && ea_target[0];
 wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
+
+// ...and every OTHER way this core changes the program counter (milestone
+// 97). An instruction address must be even, and until now only the two
+// that compute an ea_target were checked. The other four take their target
+// from four different places:
+//
+//   BRA/Bcc/BSR  a displacement, which decode has already turned into a
+//                redirect -- but the same sum is available here, because
+//                eac_imm carries that displacement for every width and
+//                eac_pc is the instruction's own address.
+//   RTS          the longword just loaded, in mem_lane.
+//   RTE          the frame's own PC field, assembled from the two pops.
+//
+// A conditional branch faults on an odd target whether or not it is TAKEN,
+// which is why this does not consult the condition: the reference core's
+// finish_bcc raises the error before it decides. This stage could not
+// consult it anyway -- EX resolves branches.
+// RTE's own two-beat sequencer state, declared here rather than beside the
+// sequencer because the odd-target check below is now its first reader and
+// this file keeps declarations ahead of use.
+reg        ret_ph;
+reg        ret_pending;   // this beat's read is in flight; l1_q_b valid NEXT cycle -- same shape as mem_pending
+reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
+localparam RET_BEAT0_E = 1'd0, RET_BEAT1_E = 1'd1;
+
+wire [31:0] br_target    = eac_pc + 32'd2 + eac_imm;
+wire eac_is_br_odd   = (eac_is_branch || eac_is_bsr) && br_target[0];
+// The popped return address, checked in the cycle it arrives.
+wire eac_is_rts_odd  = eac_is_rts && mem_pending && l1_rvalid_b && mem_lane[0];
+// RTE's, assembled from dword0's low half and dword1's high half.
+wire [31:0] rte_pc_now = {ret_dword0[15:0], l1_q_b[31:16]};
+wire eac_is_rte_odd  = live && eac_is_rte && !eac_is_priv && !trace_hold &&
+                       ret_pending && l1_rvalid_b && (ret_ph == RET_BEAT1_E) &&
+                       rte_pc_now[0];
 // Division by zero (milestone 52). Detected here rather than in
 // ap040_execute.v for the same reason an odd JMP target is: the operand is
 // already in hand, and this stage owns the frame push and the vector read.
@@ -768,7 +802,23 @@ wire trapcc_now = eac_valid && eac_is_trapcc && !stall_in &&
 reg  exc_pend_trapcc;
 wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 
-wire eac_is_addrerr  = eac_is_jmp_odd || eac_is_jsr_odd;
+// RTS and RTE see their target for exactly ONE cycle -- the one their read
+// returns in -- so the verdict has to be latched, the same way the divisor
+// test and the CHK comparison already latch theirs (milestone 97). Without
+// it exc_active fell again the next cycle, exc_stall let the instruction
+// depart, and the frame push it had started was abandoned half-written.
+// The TARGET is latched with it, for the same reason and to the same rule.
+wire addrerr_now     = eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
+                       eac_is_rts_odd || eac_is_rte_odd;
+reg        exc_pend_addrerr;
+reg [31:0] exc_pend_ae_target;
+wire eac_is_addrerr  = addrerr_now || exc_pend_addrerr;
+// The target each of them referenced, which is what the format $2 frame's
+// address field carries -- with bit 0 cleared, as the reference does.
+wire [31:0] addrerr_live   = eac_is_br_odd  ? br_target :
+                             eac_is_rts_odd ? mem_lane  :
+                             eac_is_rte_odd ? rte_pc_now : ea_target;
+wire [31:0] addrerr_target = exc_pend_addrerr ? exc_pend_ae_target : addrerr_live;
 // The six-word frame (milestone 77): address error, and -- as on the 68040
 // and in ap040_core.v's exc(..., 4'd2, pc, pc_i) -- CHK, TRAPcc and zero
 // divide, whose extra longword is the faulting instruction's own address
@@ -865,7 +915,9 @@ wire mem_complete = mem_pending && l1_rvalid_b && !exc_active;
 // pushes at all, per ap040_core.v's own S_JSR1 -- it goes straight to the
 // address-error exception instead (below), the fault taken on the
 // INSTRUCTION FETCH at the odd target, not on the call itself.
-wire eac_is_push  = (eac_is_bsr || (eac_is_jsr && !eac_is_jsr_odd) || eac_is_link || eac_is_pea) && !trace_hold;
+wire eac_is_push  = ((eac_is_bsr && !eac_is_br_odd) ||
+                     (eac_is_jsr && !eac_is_jsr_odd) ||
+                     eac_is_link || eac_is_pea) && !trace_hold;
 wire wr_stall     = live && (eac_is_push || store_now) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
@@ -1022,12 +1074,14 @@ wire exc_stall     = exc_active && !exc_vec_done;
 wire eac_is_rte_active = eac_is_rte && !eac_is_priv && !trace_hold;
 
 localparam RET_BEAT0 = 1'd0, RET_BEAT1 = 1'd1;
-reg        ret_ph;
-reg        ret_pending;   // this beat's read is in flight; l1_q_b valid NEXT cycle -- same shape as mem_pending
-reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
 
 wire ret_active   = live && eac_is_rte_active;
-wire ret_issue    = ret_active && !ret_pending;
+// ...and not once the RTE has turned out to be an address error
+// (milestone 97). A memory-source fault yields the same way -- mem_issue's
+// own branch is guarded on exc_active -- because the sequencer that found
+// the fault must stop, or it keeps re-reading underneath the frame push
+// and the instruction never departs.
+wire ret_issue    = ret_active && !ret_pending && !exc_active;
 wire ret_complete = ret_active && ret_pending && l1_rvalid_b;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
@@ -1215,7 +1269,9 @@ wire [15:0] exc_sr_word    = sr_faulted;
 wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
                               eac_is_jmp_odd ? (eac_pc + 32'd2) :
                               eac_is_jsr_odd ? ea_target :
-                              (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc : eac_next_pc;
+                              (eac_is_illegal || eac_is_priv || eac_is_fmterr ||
+                               eac_is_br_odd || eac_is_rts_odd || eac_is_rte_odd ||
+                               exc_pend_addrerr) ? eac_pc : eac_next_pc;
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
@@ -1231,7 +1287,7 @@ wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00
 // instruction's own address (ap040_core.v passes pc_i), which is what a
 // handler needs to find the instruction its PC field has already stepped past.
 wire [31:0] exc_addr_field = eac_is_trace   ? trace_pc :
-                             eac_is_addrerr ? {ea_target[31:1], 1'b0} : eac_pc;
+                             eac_is_addrerr ? {addrerr_target[31:1], 1'b0} : eac_pc;
 
 // Beat0 @ exc_new_sp: SR, then PC's high word. Beat1 @ exc_new_sp+4: PC's
 // low word, then the format/vector-offset word. Beat2 @ exc_new_sp+8
@@ -1399,6 +1455,8 @@ always @(posedge clk) begin
 		mvm_rd_pend    <= 1'b0;
 		mvm_rd_reg     <= 4'h0;
 		exc_pend_divzero <= 1'b0;
+		exc_pend_addrerr <= 1'b0;
+		exc_pend_ae_target <= 32'd0;
 		exc_pend_chk     <= 1'b0;
 		exc_pend_chk_n   <= 1'b0;
 		exc_pend_trapcc  <= 1'b0;
@@ -1438,6 +1496,14 @@ always @(posedge clk) begin
 		if (exc_vec_done)      exc_pend_divzero <= 1'b0;
 		else if (divzero_now)  exc_pend_divzero <= 1'b1;
 
+		// Held from the cycle the odd target was seen, with the target
+		// itself -- RTS and RTE show theirs for one cycle only.
+		if (exc_vec_done)      exc_pend_addrerr <= 1'b0;
+		else if (addrerr_now) begin
+			exc_pend_addrerr   <= 1'b1;
+			exc_pend_ae_target <= addrerr_live;
+		end
+
 		if (exc_vec_done)  exc_pend_chk <= 1'b0;
 		else if (chk_now) begin
 			exc_pend_chk   <= 1'b1;
@@ -1467,6 +1533,7 @@ always @(posedge clk) begin
 			mvm_active      <= 1'b0;
 			mvm_rd_pend     <= 1'b0;
 			exc_pend_divzero <= 1'b0;
+			exc_pend_addrerr <= 1'b0;
 			exc_pend_chk     <= 1'b0;
 			exc_pend_trapcc  <= 1'b0;
 			exc_pend_fmterr  <= 1'b0;
