@@ -66,6 +66,12 @@ def main():
         src, inc = CORE, [RTL]
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
+        elif name.endswith("rmwsup"):
+            # ap040_pipe_cpu.v with the memory written in the bench, so the
+            # write port can be held busy -- see the bench's header.
+            src = [x for x in CORE if x.name not in
+                   ("ap040_pipe_core.v", "ap040_pipe_sys.v",
+                    "ap040_pipe_membus.v", "ap040_pipe_l1.v")]
         elif name.endswith("busredirect"):
             # ap040_pipe_membus.v standalone, same reason as l1_wbuf above:
             # the bench drives the wrapper's ports directly.
