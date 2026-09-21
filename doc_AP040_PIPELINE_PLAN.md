@@ -1688,6 +1688,85 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestones 94-96: the enable, the fourth review, and the fifth
+
+   **Milestone 94 is the systematic version of the lesson.** Every bench
+   in this suite tied `ce` high, and eight of the thirteen defects the
+   first three reviews found had been hiding behind that. The harness
+   gains `--ce-random` and every bench a conditional pseudo-random enable,
+   so the suite now runs in four combinations of that and `--slow-l1`.
+   `tb_ap040_pipe_nop.v` needed its lockstep snapshot gated on `ce`: taken
+   on every edge it advanced on cycles the core did not, which is the
+   bench making the same mistake the core had been making. Nothing else
+   changed, and the suite passes in all four modes.
+
+   **Milestone 95, the fourth review's four.** All confirmed.
+
+   `a7_busy` listed MOVEC's auxiliary write at its COMMIT and not the
+   cycle before, while the MOVEC is still in EX -- so an exception one
+   instruction behind a MOVEC to the active stack pointer built its frame
+   on the stack MOVEC had just replaced.
+
+   The CHK comparison and the divisor test judged whatever the iterative
+   divider was showing: `100/7` tripped divide-by-zero on the quotient it
+   was still building, and a CHK against a bound its operand was within
+   trapped. TRAPcc's detector had carried the guard since milestone 74 and
+   the other two never got it. They wait for the producer now -- for the
+   REGISTER source only, because the memory source's window is one cycle
+   wide and requiring `!stall_in` there would drop the fault rather than
+   delay it.
+
+   A trace entry belongs to the instruction that just finished, not the
+   one held behind it. Milestone 93 taught the frame's base to take the
+   instruction's own A7 update into account, which is right for a fault
+   and wrong for a trace: a held `MOVE.L (A7)+` moved the frame four
+   bytes, exactly the step it had not taken.
+
+   `LINK An,#d` decrements the stack pointer before it pushes An, so when
+   An IS A7 what reaches memory is the decremented value. The core pushed
+   the entry value.
+
+   **Milestone 96, four of the fifth review's five.** These are
+   architecture rather than pipeline: each is a place where this core and
+   `rtl/ap040/ap040_core.v` -- which passes the cputest corpus -- disagree.
+
+   A predecrement MOVEM whose list contains its own base register stores
+   the initial value minus one operation size on the 68020 through 68040.
+   This core stored it unchanged, which is the 68000's answer.
+
+   CHK's N and a divide by zero's cleared C are architectural results of
+   the fault. CHK's N was applied to the stacked word alone, so a negative
+   operand stacked `$2708` and entered its handler with `$2700`; a handler
+   that branches on its own flags and one that reads the frame would take
+   different paths. The divide cleared C in neither. The faulting status
+   register is resolved once now, and both readers take it from there.
+
+   MOVE to SR and the ORI/ANDI/EORI immediates did not apply the
+   architectural mask: `$2FFF` written to SR stayed `$2FFF` where the
+   register has only `$271F` of bits. RTE already masked.
+
+   | run | result |
+   |---|---|
+   | control, all eight benches on the RTL each was written against | all eight fail |
+   | full suite, normal build | 115/115 |
+   | full suite, slow build | 115/115 |
+   | full suite, random enable | 115/115 |
+   | full suite, random enable and slow build | 115/115 |
+   | standalone fit | +1.668 ns at 25 ns, 5,864 ALMs |
+
+   **What is NOT fixed.** The fifth review's remaining item is its only
+   P1: odd targets fault for JMP and JSR and for nothing else. RTS and RTE
+   returning to an odd address execute the instruction at the even one
+   below it, and BRA and BSR to an odd target do the same, with BSR
+   pushing a return address on the way. The check that exists reads
+   `ea_target`, which only those two instructions compute; RTS takes its
+   target from `mem_lane`, RTE from its own pop sequencer, and BRA and BSR
+   from a redirect decode issues before EA-fetch sees them at all. Four
+   different sources, and the frame each one stacks has its own bit-exact
+   PC convention -- the existing JMP/JSR case records that those were
+   "verified against ap040_core.v's own S_JMP1/S_JSR1, not guessed", and
+   the same is owed here. It is the next milestone, not a loose end.
+
    ### Milestone 93: five more, and four of them are milestone 92's
 
    A third round of external review. Five defects, and the honest summary
