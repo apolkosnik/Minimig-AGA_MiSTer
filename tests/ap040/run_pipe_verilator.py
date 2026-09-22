@@ -92,6 +92,12 @@ def main():
                     "ap040_mmu.v", "ap040_cache.v", "ap040_fpu.v")
             ] + [HERE / "sim_dpram.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
+        elif name.endswith("inject"):
+            # ap040_pipe_bus16.v, which brings the FSM core's adapter with it
+            # -- the same top the corpus replay would drive.
+            src = CORE + [RTL / "ap040_pipe_bus16.v",
+                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("bus16"):
             # ap040_pipe_bus16.v instantiates the FSM core's own 16-bit
             # adapter, so that file and its include directory come too.
