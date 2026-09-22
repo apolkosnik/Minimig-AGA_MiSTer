@@ -1688,6 +1688,57 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestones 100-101: the RTE's fault, and what a load inherits
+
+   **An RTE to an odd address faults after it returns.** It restores the
+   status register and pops its frame first, so the error frame carries
+   the RESTORED register and sits below the popped one, and a restored M
+   bit chooses the stack it lands on. That makes it an exception owed by a
+   COMPLETED instruction, which is what the trace machinery already is, so
+   it is built the same way: armed as the RTE departs with its address and
+   the odd target latched, held over the instruction behind it, taken once
+   EX and WB have drained.
+
+   The first attempt, backed out at milestone 99, had all of that and
+   still never fired. `ae_take` fires while the instruction behind the RTE
+   is held, and `own_exc` exists precisely to keep THAT instruction's
+   faults from being taken -- it masked the debt along with them. The
+   trace sits outside that mask for the same reason, and now so does this.
+   Starting the second attempt from a bench rather than from the RTL is
+   what made the difference: the bench carried the reviewer's exact
+   values, so every wrong answer named itself.
+
+   One mutation had no witness at first. Excluding the held instruction's
+   own faults passed, because the word at the odd address happened to be
+   harmless. It is a TRAP now, so the held instruction has an exception of
+   its own to wrongly take.
+
+   **A load inherited the previous instruction's flags.** EA-fetch retires
+   down two paths -- the general one, and `mem_complete` for anything that
+   waited on a load -- and a field one of them leaves alone keeps the
+   previous instruction's value. A load behind a LINK was retired as a
+   LINK and wrote no register; a load behind an ORI to SR rewrote the
+   status register with whatever it had loaded, which is tracing turned on
+   by a data word.
+
+   A review found three stale fields. Diffing the two branches'
+   assignments found EIGHT, and that diff is also the only way to know
+   there is not a ninth. Four of them have no program that reaches them --
+   their consumers in EX are gated on flags this stage also clears -- and
+   are fixed alongside rather than left for the next review.
+
+   The rule: **two retire paths for one stage is two lists that have to
+   agree, and the way to know they do is to diff them.** That is the third
+   time in this campaign a defect has been two lists drifting apart, after
+   milestone 89's extension-word count and milestone 97's branch
+   displacement.
+
+   | run | result |
+   |---|---|
+   | control, both benches on the RTL each was written against | both fail with the reported values |
+   | full suite, all four run modes | 119/119 |
+   | standalone fit | +0.779 ns at 25 ns, 6,030 ALMs |
+
    ### Milestone 99: two more of the odd-target work's own defects
 
    **A fault verdict needs a live instruction.** None of the five
