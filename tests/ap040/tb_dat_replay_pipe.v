@@ -186,6 +186,16 @@ reg [31:0] flags, test_idx, round_idx;
 // The corpus memory takes the core's writes, exactly as the sequential
 // driver's does.
 always @(posedge clk) begin
+	if (nreset && round_active && trace_bus) begin
+		if (dut.l1_wren_b)
+			$display("  L1WR  addr=%08x data=%08x", dut.l1_addr_b, dut.l1_data_b);
+		if (dut.mem_req)
+			$display("  MEMRQ addr=%08x write=%b instr=%b ack=%b",
+			         dut.mem_addr, dut.mem_write, dut.mem_instr, dut.mem_ack);
+	end
+	if (nreset && mem_ready && busstate == 2'b11 && trace_bus)
+		$display("BUSWR addr=%08x data=%04x uds=%b lds=%b in_low=%b in_test=%b",
+		         addr_out, data_write, !nuds, !nlds, in_low, in_test);
 	if (nreset && mem_ready && busstate == 2'b11) begin
 		if (!nuds) begin
 			if (in_low)  lmem[{addr_out[14:1], 1'b0}] <= data_write[15:8];
@@ -385,6 +395,24 @@ integer errors /* verilator public_flat_rw */;
 integer ran    /* verilator public_flat_rw */;
 integer mism   /* verilator public_flat_rw */;
 integer skipped, unreached, report_lim, timeout;
+// An opcode census of the rounds that failed because the core never decoded
+// the instruction at all.  The printed mismatch lines are capped, so counting
+// them undercounts and biases towards whatever slice printed first; this is
+// exact and one line per distinct opcode.  "Never decoded" is a round that
+// took vector 4 with nothing committed: the illegal-instruction handler ran
+// in place of the instruction under test.
+integer undec_cnt [0:65535];
+// and the other half of the worklist: rounds that DID decode and execute and
+// still got the wrong answer.  Ranking those by opcode separates "the core
+// cannot do this instruction at all" from "the core does it wrongly", which
+// are different milestones and want different benches.
+integer wrong_cnt [0:65535];
+integer undec_rounds, wrong_rounds, mism_at_round, drain;
+// +buswr follows one store from the CPU port through the membus to the bus.
+// Sampled once: $test$plusargs on every edge is not free.
+reg trace_bus;
+// its own index: ci belongs to the capture block, which runs every cycle
+reg [31:0] uo;
 reg [31:0] commits_at_start;
 integer k, n, fgot, lmfd, tmfd;
 reg [2047:0] job_file, lmem_file, tmem_file;
@@ -477,12 +505,20 @@ task inject_state;
 	end
 endtask
 
-// A7 is three registers; which one the final state means is the final SR's
-// business, not the injected one's.
+// A7 is three registers, but the corpus' regs[15] slot is not "whichever one
+// the final SR selects".  It is the serialized A7 image the native runner
+// entered the test with, and inject_state puts it in the USP: a supervisor
+// round runs on the ISP at i_ssp, which is a RELOCATED stack the runner's
+// entry RTE made active and which holds a copy of the same 32 bytes.  So the
+// bank a supervisor round modifies is the ISP, and the slot the oracle
+// serializes back is still the USP.  Selecting on the final SR reads the
+// relocated stack and reports every supervisor round as off by i_ssp -
+// i_regs[15].  tb_dat_replay.v reads the USP unconditionally for the same
+// reason; in user mode the USP is the active A7 anyway, so this is not a
+// special case, it is the only reading that is right in both modes.
 function [31:0] final_a7;
 	begin
-		final_a7 = !dbg_sr[13] ? dut.u_cpu.u_regfile.usp
-		         : (dbg_sr[12] ? dut.u_cpu.u_regfile.msp : dut.u_cpu.u_regfile.isp);
+		final_a7 = dut.u_cpu.u_regfile.usp;
 	end
 endfunction
 
@@ -491,6 +527,7 @@ task check_final;
 	reg [31:0] got;
 	reg [15:0] got_sr;
 	begin
+		mism_at_round = mism;
 		// An exception round is judged on the entry snapshot, which is the
 		// architectural state the corpus recorded; one that completed is
 		// judged on the live register file.
@@ -508,8 +545,29 @@ task check_final;
 		if (((got_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
 			mismatch("SR", e_sr, {16'd0, got_sr});
 		for (fi = 0; fi < em_cnt; fi = fi + 1)
-			if (read_value(em_a[fi], em_sz[fi]) !== em_v[fi])
+			if (read_value(em_a[fi], em_sz[fi]) !== em_v[fi]) begin
+				// which address disagreed, and where the three stack pointers
+				// stand, because a stack write landing at the relocated ISP
+				// instead of the corpus A7 looks exactly like a value bug.
+				if (mism < report_lim)
+					$display("  mem detail: addr=%08x sz=%0d a7=%08x usp=%08x isp=%08x i_ssp=%08x i_a7=%08x",
+					         em_a[fi], em_sz[fi], final_a7(),
+					         dut.u_cpu.u_regfile.usp, dut.u_cpu.u_regfile.isp,
+					         i_ssp, i_regs[15]);
 				mismatch("memory", em_v[fi], read_value(em_a[fi], em_sz[fi]));
+			end
+		if (mism > mism_at_round) begin
+			if (cap_done && cap_vec == 8'h04 &&
+			    (dbg_commits - commits_at_start) == 0) begin
+				undec_rounds = undec_rounds + 1;
+				undec_cnt[{rd8(i_pc), rd8(i_pc + 1)}] =
+					undec_cnt[{rd8(i_pc), rd8(i_pc + 1)}] + 1;
+			end else begin
+				wrong_rounds = wrong_rounds + 1;
+				wrong_cnt[{rd8(i_pc), rd8(i_pc + 1)}] =
+					wrong_cnt[{rd8(i_pc), rd8(i_pc + 1)}] + 1;
+			end
+		end
 	end
 endtask
 
@@ -551,8 +609,22 @@ task run_round;
 		       !(dbg_wb_valid && dbg_wb_pc == i_pc && ce)) begin
 			@(posedge clk); timeout = timeout + 1;
 		end
-		if (!cap_done) repeat (4) @(posedge clk);
+		// Freeze the CPU first so no younger instruction runs, then drain the
+		// store.  A store leaves the pipeline long before its bytes reach
+		// memory: the CPU posts it to the membus, which may be in the middle
+		// of an instruction fetch and only starts the write cycles afterwards.
+		// Waiting for the 16-bit bus to be idle is NOT enough, because it is
+		// already idle while the write sits queued -- that is exactly how BSR
+		// and PEA came to read back as if they had never pushed.  What has to
+		// go quiet is l1_wr_busy, the membus' own "a write is outstanding",
+		// which is the same signal the core stalls on.  clkena_in is not
+		// gated by ce, so this drains with the core held still.
 		ce = 0;
+		drain = 0;
+		while (drain < 1024 && (dut.l1_wr_busy || busstate != 2'b01)) begin
+			@(posedge clk); drain = drain + 1;
+		end
+		repeat (2) @(posedge clk);
 		if (timeout >= EXEC_TIMEOUT) begin
 			unreached = unreached + 1;
 			if (unreached <= report_lim)
@@ -571,6 +643,11 @@ initial begin
 	hold_fetch = 0; round_active = 0; cur_pc = 0; boot_pc = 0; boot_msp = 0;
 	nreset = 0; errors = 0; ran = 0; mism = 0;
 	skipped = 0; unreached = 0; report_lim = 40; trace_round = -1;
+	undec_rounds = 0; wrong_rounds = 0;
+	trace_bus = $test$plusargs("buswr");
+	for (uo = 0; uo < 65536; uo = uo + 1) begin
+		undec_cnt[uo] = 0; wrong_cnt[uo] = 0;
+	end
 	patch_addr = 0;
 	for (k = 0; k < 32768; k = k + 1) lmem[k] = 0;
 	for (k = 0; k < TMEM_MAX; k = k + 1) tmem[k] = 0;
@@ -670,6 +747,18 @@ initial begin
 	// with excludes almost all of them, and reporting that as a pass would
 	// be the same vacuous green this campaign has had to correct twice
 	// already.
+	if (undec_rounds != 0) begin
+		$display("pipe undecoded: %0d rounds took vector 4 with nothing committed", undec_rounds);
+		for (uo = 0; uo < 65536; uo = uo + 1)
+			if (undec_cnt[uo] != 0)
+				$display("UNDECODED %04x %0d", uo[15:0], undec_cnt[uo]);
+	end
+	if (wrong_rounds != 0) begin
+		$display("pipe wrong: %0d rounds executed and disagreed", wrong_rounds);
+		for (uo = 0; uo < 65536; uo = uo + 1)
+			if (wrong_cnt[uo] != 0)
+				$display("WRONG %04x %0d", uo[15:0], wrong_cnt[uo]);
+	end
 	if (ran == 0)
 		$display("TEST FAILED: nothing judged -- %0d rounds all fell outside this driver's scope", skipped);
 	else if (mism == 0 && unreached == 0 && errors == 0) $display("ALL TESTS PASSED");
