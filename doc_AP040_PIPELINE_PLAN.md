@@ -1688,6 +1688,38 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 104: the corpus judges rounds, and names its own bug first
+
+   Following an exception was the thing that made the driver worth running,
+   so it now does: `exc_go` is this core's `S_EXC0`, and the snapshot is
+   taken the cycle after it rises, once the frame's latched fields have
+   settled. **89 of 323 smoke rounds judged**, against none at milestone
+   103.
+
+   **And the first thing those rounds found was the driver's own
+   completion boundary.** 143 mismatches, every one of them the injected
+   input state read straight back, with zero commits. The sequential driver
+   stops a round when the core asks memory for the instruction the oracle
+   names next -- which on a machine that executes one instruction at a time
+   means the previous one has finished. On a six-stage pipeline that fetch
+   happens five stages ahead of the tested instruction retiring, so every
+   round was being read with the instruction still in flight. It is the
+   cleanest example this campaign has produced of a testing assumption that
+   is true of one microarchitecture and false of another.
+
+   A round completes now when the writeback stage names the tested
+   instruction's own address, or when an exception entry is captured. The
+   Basic slice went from 143 mismatches to 24, and what is left is one
+   repeated pattern rather than a scattering: a single address register,
+   expected `$43800400` and read as `$43800800`, exactly `$400` apart in
+   every round. That is which of the three stack pointers the readback
+   selects, and it is the next thing to chase.
+
+   | run | result |
+   |---|---|
+   | smoke set, six slices | 89 rounds judged, 24 mismatches, 0 unreached, 234 skipped |
+   | what is still skipped | trace, interrupt and FPU oracles |
+
    ### Milestone 103: the corpus driver runs, and measures its own scope
 
    `tb_dat_replay_pipe.v` replays the cputest corpus against this core, and
