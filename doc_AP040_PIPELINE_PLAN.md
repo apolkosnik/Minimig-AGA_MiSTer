@@ -1688,6 +1688,58 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 99: two more of the odd-target work's own defects
+
+   **A fault verdict needs a live instruction.** None of the five
+   odd-target terms checked `eac_valid` on its own -- `eac_is_jmp_odd` is
+   `eac_is_jmp` AND an address bit -- so whatever the stage held after a
+   flush could re-arm the pending latch, and the next instruction to take
+   ANY exception inherited the dead one's address. A TRAP stacked the
+   wrong return address, and returning from it would have run the TRAP
+   again. That is the second defect this latch has produced since
+   milestone 97 introduced it, and both were about scope: who a held
+   verdict belongs to, and whether there is anyone to belong to at all.
+
+   **An indexed JMP stacks pc + 6.** It has resolved its extension word
+   against the program counter before it faults, so the counter has moved
+   past that word. `rtl/ap040/ap040_core.v` gives ea mode 110 and the
+   PC-indexed form `pc_i + 6` and everything else `pc_i + 2`, and says
+   those values are what its own corpus group records.
+
+   **The milestone-98 regression was the bench.** `tb_ap040_pipe_oddtarget`
+   ended in a tail of NOPs, and by then the stack had walked down through
+   seven frames: the fetcher ran off the end of the program straight into
+   them, which is an illegal instruction inside the frames and an eighth
+   exception. It ends in a terminal loop now. The reviewer who found it
+   diagnosed it, which is worth recording -- the failure was committed
+   visible and unexplained, and being visible is what got it explained.
+
+   | run | result |
+   |---|---|
+   | control, the indexed-JMP bench on the previous RTL | stacks $0416, needs $041A |
+   | full suite, normal build | 117/117 |
+   | full suite, random enable and slow build | 117/117 |
+   | standalone fit | +0.704 ns at 25 ns, 5,988 ALMs |
+
+   **Two remain, and they are one shape.** Both are exceptions raised by
+   the COMPLETION of something else rather than by a stage refusing to let
+   an instruction retire, which is how every dynamic fault here works
+   today.
+
+   An RTE with an odd restored PC must restore its SR and finish popping
+   BEFORE it faults, so the error frame carries the RESTORED status
+   register and sits below the popped frame rather than twelve bytes below
+   where it started. A restored M bit selects the stack it lands on.
+
+   An odd EXCEPTION VECTOR is the same thing one level further in. The
+   reference's rule, extracted and recorded here so the next attempt does
+   not have to find it again: an odd handler address for vector 2 or 3 is
+   a double fault and halts; any other odd handler address becomes an
+   address error whose frame's PC field is `4 * vector` WITHOUT the vector
+   base register -- "offset, not vbr + offset" -- and whose address field
+   is the handler address with bit 0 cleared. This core has no halt, so
+   the first of those needs a decision before the second can be written.
+
    ### Milestones 97-98: odd targets, and what the enable found in them
 
    Milestone 17 made an odd JMP or JSR target take an address error, and
