@@ -1740,6 +1740,28 @@ real MMU or bus-error path arrives, which is the same boundary
    is the handler address with bit 0 cleared. This core has no halt, so
    the first of those needs a decision before the second can be written.
 
+   **A first attempt at the RTE case, reverted, and what it established.**
+   The design is the trace machinery's: `rte_odd_now` (the old detection,
+   renamed) ARMS a flag as the RTE departs instead of faulting it, with
+   the RTE's own address and the odd target latched beside it; `ae_hold`
+   holds the instruction behind the RTE and `own_exc` excludes that
+   instruction's faults exactly as `trace_hold` does; `ae_take` fires once
+   EX and WB have drained, by which time the restore has committed; and
+   the address error is then raised with the latched fields. The arm must
+   NOT clear on a flush -- the RTE's own redirect is one -- and clearing
+   it on `exc_vec_done` hung the pipeline, so it clears the moment the
+   exception is taken. With all of that in place six of
+   `tb_ap040_pipe_oddtarget`'s seven exceptions happened and the seventh
+   did not, and the discrepancy was not diagnosed before the change was
+   backed out: that bench's phases 4 and 7 encode the OLD placement of the
+   RTE's frame, twelve bytes below where the RTE started rather than below
+   where it finished, and need rewriting for the new one. The next attempt
+   needs a dedicated bench first, with the reviewer's values -- ISP `$1000`,
+   a format-0 frame restoring SR `$0015` and PC `$0601`, an error frame at
+   `$0FFC` stacking `$0015` -- and the frame fields unified into one
+   `addrerr_pc_live` select, which the attempt also did and which is worth
+   keeping when it is redone.
+
    ### Milestones 97-98: odd targets, and what the enable found in them
 
    Milestone 17 made an odd JMP or JSR target take an address error, and
