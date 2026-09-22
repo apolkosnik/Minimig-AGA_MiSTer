@@ -1688,6 +1688,109 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 105: the corpus at scale, and two driver bugs between it and the truth
+
+   The stack-pointer pattern milestone 104 left open was the driver's, not
+   the core's. `final_a7()` picked the bank the FINAL SR selects. But the
+   corpus' `regs[15]` is not "whichever A7 is live" -- it is the serialized
+   A7 image the native runner entered with, and `inject_state` puts it in
+   the USP, because a supervisor round runs on a RELOCATED ISP at `i_ssp`
+   holding a copy of the same 32 bytes. So a supervisor round modifies the
+   ISP while the slot the oracle serializes back is still the USP, and
+   selecting on the final SR reports every such round as off by exactly
+   `i_ssp - i_regs[15]` -- the `$400` that showed up in every mismatch.
+   `tb_dat_replay.v` has read the USP unconditionally all along, which is
+   why the sequential core never saw this. In user mode the USP *is* the
+   live A7, so this is not a special case; it is the only reading right in
+   both modes.
+
+   **Then running more than one slice found the second one.** A store leaves
+   this pipeline long before its bytes reach memory: the CPU posts it to the
+   membus, which may be midway through an instruction fetch and only starts
+   the write cycles afterwards. The round was being compared in between.
+   `+buswr` follows one BSR through all three: the CPU posts
+   `L1WR addr=438003fc data=43900002`, correct address and correct return
+   address, and the `MEMRQ ... write=1` that carries it to the bus does not
+   appear until after `$finish`. Waiting for the 16-bit bus to go idle does
+   NOT fix it -- the bus is already idle while the write sits queued, which
+   is why the first attempt changed nothing. What has to go quiet is
+   `l1_wr_busy`, the membus' own "a write is outstanding", the same signal
+   the core stalls on. That alone took the executed-but-wrong rounds from
+   273,940 to 10,460.
+
+   Both are the milestone 104 lesson again, which is now worth stating as a
+   rule: **a testing assumption imported from the sequential driver has to
+   be re-derived on a machine that retires out from under its own stores.**
+   Completion, stack-pointer identity and store visibility were all three
+   true there and false here.
+
+   The driver now also keeps a two-axis opcode census, because counting
+   printed mismatch lines counts the report cap rather than the population
+   -- sampling the capped lines put "never decoded" at 93% of mismatches
+   where the exact count is 61%. Every round that disagrees is now charged
+   to one of two columns, exactly, by opcode: **not decoded** (vector 4 with
+   nothing committed -- the illegal-instruction handler ran in place of the
+   instruction) and **executed and wrong**. They are different milestones
+   and want different benches.
+
+   | run | result |
+   |---|---|
+   | control: ABCD.B/0001, A7 fix | 48 judged both ways, 24 mismatches -> 0, skipped unchanged at 16 |
+   | control: BSR.B, drain fix | 11,110 judged both ways, all mismatching -> 0 |
+   | mutation: USP writes dropped | BSR.B 0 -> 11,110 mismatches, both slices |
+   | mutation: `eac_is_push` forced low | BSR.B 0 -> 22,220 mismatches; the longer drain cannot pass a missing store |
+   | smoke set, six slices | 150 judged, 0 mismatches; the three FPU/IRQ/odd-vector slices judge nothing and report FAILED, as they should |
+   | **sequential core, 658 Basic slices** | **658/658 slices, 20,875,528 rounds, 0 mismatches** |
+   | **pipelined core, same 658 slices** | 175/658 slices, 16,366,274 judged, 4,963,709 skipped |
+   | of which not decoded | 7,609,521 rounds, 14,259 opcodes, 128 families |
+   | of which executed and wrong | 10,460 rounds, 105 opcodes, 10 families |
+   | milestone bench suite | 120/120 under Verilator, on the clean re-run |
+
+   The sequential baseline is the point of that table: same corpus, same
+   oracle, same driver structure, zero mismatches. Nothing left to blame but
+   this core.
+
+   No RTL changed in this milestone -- `git diff` touches
+   `tests/ap040/tb_dat_replay_pipe.v` and nothing else -- so there is no fit
+   to quote. The +0.704 ns at 25 ns from the last milestone that moved RTL
+   still stands, and the bench suite was re-run only to prove the worktree
+   was left as it was found.
+
+   **The worklist, ranked, and it is short at the wrong end.** Not decoded,
+   by weight: `Scc.B` to memory (2,561,872 rounds -- `50f9` is ST (xxx).L),
+   `STOP` (1,048,576, the single opcode `4e72`), `ILLEGAL` (240,544),
+   MOVE.W/L/B in the EA forms the decoder has never had (641,772 together),
+   CHK.L/W, MOVEA.W, the MUL/DIV group. The shapes are missing, not the
+   operations: `unary_mem_shape` admits modes 010/011/100 only, so
+   `4a2e` -- TST.B (d16,A6) -- is an illegal instruction to this core.
+
+   Executed and wrong, the whole list: CHK.W 5,668 (`459f`, `45a7`: the
+   `(A7)+` and `-(A7)` forms), JMP 1,280 (`4ef9`/`4ef8`, absolute),
+   ADDA/SUBA .L/.W 624 each (`dfdf` is ADDA.L (A7)+,A7 -- the EA register is
+   also the destination), NEGX.L/W/B 992 together (memory forms), MOVEC2 24.
+   Two clusters and two strays: predecrement/postincrement where the address
+   register is A7 or is the destination, and NEGX to memory.
+
+   **A rule this milestone paid for: never mutate the worktree while a suite
+   is running.** The first suite run here reported 119/120 with
+   `tb_ap040_pipe_bsr` failing, and the cause was not the RTL -- it was that
+   the `eac_is_push` mutation above was applied while that bench was being
+   compiled, so it built against mutated sources. The same worktree cannot
+   serve a mutation and a regression run at once. Either finish the
+   mutations first, or give the mutation its own copy. The suite result
+   below is the clean re-run.
+
+   The full ranked inventories are evidence, not repo content:
+   `/home/adam/ap040-audit4/cputest-pipe17/undecoded_by_opcode.txt` and
+   `wrong_by_opcode.txt` beside it, each opcode under its family with a
+   round count. Regenerate them from any run's logs with the `UNDECODED`
+   and `WRONG` lines the driver now prints.
+
+   Correction to milestone 104's table: the driver as committed there judges
+   **150** of the 323 smoke rounds, not 89. The 89 was measured mid-milestone
+   and the entry recorded it after the driver had moved on; the control run
+   here reproduces 150 on that exact commit.
+
    ### Milestone 104: the corpus judges rounds, and names its own bug first
 
    Following an exception was the thing that made the driver worth running,
