@@ -26,6 +26,13 @@
 // and its address field is the target with bit 0 cleared. The handler     //
 // counts and returns through JMP (A2), so the second case runs after the   //
 // first without an RTE of its own.                                         //
+//                                                                          //
+// The word at $0600 -- the one an odd fetch of $0601 brings back -- is a   //
+// TRAP #0. That instruction is held behind the completed RTE while the     //
+// debt is collected, and it must not be allowed to take ITS exception:     //
+// the fault belongs to the RTE. A vector-32 handler poisons D1 if it ever  //
+// runs. Without this word the held instruction is a harmless NOP and the   //
+// exclusion has nothing to be right about.                                 //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -122,6 +129,13 @@ initial begin
 	// Vector 3 -> $700.
 	dut.u_l1.mem[3590] = 16'h0000;  dut.u_l1.mem[3591] = 16'h0700;
 
+	// What the odd fetch brings back: TRAP #0 at $0600, and its handler at
+	// $0780 poisons D1. Vector 32 -> $780.
+	dut.u_l1.mem[256]  = 16'h4E40;  // TRAP #0
+	dut.u_l1.mem[448]  = 16'h7255;  // MOVEQ #$55,D1
+	dut.u_l1.mem[449]  = 16'h4ED2;  // JMP (A2)
+	dut.u_l1.mem[3648] = 16'h0000;  dut.u_l1.mem[3649] = 16'h0780;
+
 	// The first frame, at $1000: SR $0015, PC $00000601, format $0.
 	dut.u_l1.mem[1536] = 16'h0015;  dut.u_l1.mem[1537] = 16'h0000;
 	dut.u_l1.mem[1538] = 16'h0601;  dut.u_l1.mem[1539] = 16'h0000;
@@ -149,6 +163,11 @@ initial begin
 	if (dbg_d3 !== 32'h0000_0002) begin
 		errors = errors + 1;
 		$display("FAIL: the handler ran %0d times, expected 2 (one address error per RTE)", dbg_d3);
+	end
+	if (dbg_d1 !== 32'h0000_0000) begin
+		errors = errors + 1;
+		$display("FAIL: D1 = %h, expected 00000000. The TRAP at the odd address was fetched and held while the RTE's address error was collected, and it took ITS exception instead of, or as well as, the RTE's.",
+		         dbg_d1);
 	end
 	if (dbg_d2 !== 32'h0000_0000 || dbg_d4 !== 32'h0000_0000) begin
 		errors = errors + 1;
