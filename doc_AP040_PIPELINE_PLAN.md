@@ -1688,6 +1688,49 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 102: groundwork for running the real corpus
+
+   Eight rounds of external review have found more than twenty defects,
+   and nearly all of them are what the WinUAE cputest corpus tests: frame
+   contents, stacked program counters, condition codes after a fault,
+   which stack a frame lands on. `tests/ap040/run_cputest.py` already
+   replays that corpus against the SEQUENTIAL core, which passes 3,797 of
+   3,801 slices. Running it against this one is worth more than any
+   further bench written by hand.
+
+   **What is already shared.** The corpus tooling takes a slice and writes
+   three files -- a job, a low-memory image and a test-memory image --
+   which the replay driver reads through plusargs. None of that cares
+   which core is underneath. `ap040_pipe_bus16.v` drives the same
+   sixteen-bit port the sequential core's compatibility top does, so the
+   driver's memory model needs no changes either. 4,494 slices are
+   unpacked under `tests/ap040/build/cputest/unpacked`, and the group
+   naming makes them v24.
+
+   **What is not.** `tb_dat_replay.v` reaches into the sequential core in
+   about sixty places. It writes each slice's registers into
+   `regfile.bank_a`/`bank_b`/`rf_written`, captures results through
+   `pend_we`/`pend_wdata`, and watches `core.state` to know an instruction
+   retired. This core has `dreg`/`areg`/`usp`/`isp`/`msp` and a writeback
+   stage, so the poke and the capture have to be rewritten. It also has no
+   floating-point unit, no memory management unit and no caches, which
+   puts the `4_F*` groups, the transparent translation registers and the
+   address translation cache out of scope, and no interrupt path, which
+   rules out `4_IRQ`. The integer groups are the target: Default, BASIC,
+   EXTSRC, EXTDST, AE, ODDEXC, ODDSTK.
+
+   **The one thing that could have sunk it.** The sequential core fetches
+   a reset vector and can therefore be started anywhere. This one begins
+   at `PC_RESET`, a parameter fixed at elaboration, and every slice picks
+   its own start address. `tb_ap040_pipe_inject.v` settles it: the core is
+   elaborated at `$1000`, `$2000` is written into the fetch stage's own
+   program counter with a register value alongside, and the instruction at
+   `$2000` runs while the register survives the release. Both halves of
+   what a slice needs are therefore available at run time.
+
+   That bench is the milestone. The replay driver itself is the next one,
+   and it starts from a known-good injection rather than from a guess.
+
    ### Milestones 100-101: the RTE's fault, and what a load inherits
 
    **An RTE to an odd address faults after it returns.** It restores the
