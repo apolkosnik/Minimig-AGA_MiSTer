@@ -1688,6 +1688,40 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 103: the corpus driver runs, and measures its own scope
+
+   `tb_dat_replay_pipe.v` replays the cputest corpus against this core, and
+   `run_cputest.py --core pipe` drives it. Everything about the corpus is
+   shared verbatim with the sequential driver -- the APR2 parsing, the
+   memory images, the patch and toggle streams, the value helpers -- and
+   `ap040_pipe_bus16.v` presents the same sixteen-bit port, so the memory
+   model came over too. What is new is the round: this core has no reset
+   vector, so a round writes the slice's start address into the fetch stage
+   and its registers into `dreg`/`areg`/`usp`/`isp`/`msp` while `ce` holds
+   the core, then releases and runs to the address the oracle names next.
+
+   **It runs end to end on the first try, and judged nothing.** Across the
+   harness's six smoke slices, **0 of 323 rounds** fell inside the scope it
+   started with: no expected exception, no trace, no interrupt, no FPU
+   state. That is not a tuning problem. A cputest round ends in an
+   exception by construction -- the generator closes every test with a
+   terminal ILLEGAL -- so "no expected exception" excludes nearly the whole
+   corpus. Following an exception to its frame is not a refinement to add
+   later; it is the thing that makes the driver worth running, and it is
+   the next milestone.
+
+   **And it reported ALL TESTS PASSED on zero rounds.** Six slices, six
+   passes, nothing judged. That is the third vacuous green this campaign
+   has produced, after milestone 89's branch marker that ran either way and
+   milestone 92's mutation that memory could not see -- and the first where
+   the HARNESS was the thing at fault rather than a bench. A slice with
+   nothing judged now reports FAILED, which is how the number above came to
+   be measured at all.
+
+   The rule, which is the same one three times over: **a green result is
+   worth exactly as much as the count of things it actually checked, and a
+   harness that does not report that count can hide the difference.**
+
    ### Milestone 102: groundwork for running the real corpus
 
    Eight rounds of external review have found more than twenty defects,
