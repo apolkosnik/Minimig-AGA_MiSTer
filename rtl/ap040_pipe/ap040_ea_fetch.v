@@ -703,9 +703,23 @@ wire [31:0] rte_pc_now = {ret_dword0[15:0], l1_q_b[31:16]};
 // wire is built further down and this file keeps declarations ahead of use.
 wire rte_fmt_now_ok  = (l1_q_b[15:12] == 4'h0) || (l1_q_b[15:12] == 4'h2) ||
                        (l1_q_b[15:12] == 4'h3);
-wire eac_is_rte_odd  = live && eac_is_rte && !eac_is_priv && !trace_hold &&
+// An RTE with an odd restored PC faults AFTER it has finished, not instead
+// of finishing (milestone 100). It restores the status register and pops
+// its frame first, so the error frame carries the RESTORED status register
+// and sits below the popped one -- and a restored M bit chooses the stack
+// it lands on. rtl/ap040/ap040_core.v says so in as many words.
+//
+// That makes it an exception OWED by a completed instruction, which is
+// what the trace machinery below already is, so it is built the same way:
+// armed as the RTE departs, held over the instruction behind it, and taken
+// once EX and WB have drained -- by which time the restore has committed
+// and the stage reads the state the frame needs.
+wire rte_odd_now     = live && eac_is_rte && !eac_is_priv && !trace_hold &&
                        ret_pending && l1_rvalid_b && (ret_ph == RET_BEAT1_E) &&
                        rte_fmt_now_ok && rte_pc_now[0];
+reg        ae_arm;
+reg [31:0] ae_pc_r;    // the RTE's own address, which the frame's PC field carries
+reg [31:0] ae_tgt_r;   // the odd address it tried to return to
 // Division by zero (milestone 52). Detected here rather than in
 // ap040_execute.v for the same reason an odd JMP target is: the operand is
 // already in hand, and this stage owns the frame push and the vector read.
@@ -824,10 +838,13 @@ wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 // latch, and the next instruction to take ANY exception inherited the dead
 // one's address. A TRAP then stacked the wrong return address, and
 // returning from it would have run the TRAP again.
-wire addrerr_now     = live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
-                                eac_is_rts_odd || eac_is_rte_odd);
+wire ae_hold         = eac_valid && ae_arm;
+wire ae_take         = ae_hold && !eaf_valid && !wb_busy && !stall_in;
+wire addrerr_now     = (live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
+                                 eac_is_rts_odd)) || ae_take;
 reg        exc_pend_addrerr;
 reg [31:0] exc_pend_ae_target;
+reg [31:0] exc_pend_ae_pc;
 // The held verdict belongs to ONE instruction, and exc_go is what says
 // which: it is set for the faulting instruction and clears when that
 // instruction departs. Without that scope the flag outlived its owner --
@@ -838,10 +855,15 @@ reg [31:0] exc_pend_ae_target;
 wire eac_is_addrerr  = addrerr_now || (exc_pend_addrerr && exc_go);
 // The target each of them referenced, which is what the format $2 frame's
 // address field carries -- with bit 0 cleared, as the reference does.
-wire [31:0] addrerr_live   = eac_is_br_odd  ? br_target :
-                             eac_is_rts_odd ? mem_lane  :
-                             eac_is_rte_odd ? rte_pc_now : ea_target;
+wire [31:0] addrerr_live   = ae_take        ? ae_tgt_r  :
+                             eac_is_br_odd  ? br_target :
+                             eac_is_rts_odd ? mem_lane  : ea_target;
 wire [31:0] addrerr_target = exc_pend_addrerr ? exc_pend_ae_target : addrerr_live;
+// ...and the PC field the frame carries, which differs per source and is
+// latched with the verdict for the same reason the target is.
+wire [31:0] addrerr_pc_live = ae_take        ? ae_pc_r :
+                              eac_is_jmp_odd ? (eac_pc + (eac_ea_indexed ? 32'd6 : 32'd2)) :
+                              eac_is_jsr_odd ? ea_target : eac_pc;
 // The six-word frame (milestone 77): address error, and -- as on the 68040
 // and in ap040_core.v's exc(..., 4'd2, pc, pc_i) -- CHK, TRAPcc and zero
 // divide, whose extra longword is the faulting instruction's own address
@@ -996,7 +1018,7 @@ reg         exc_pend_trace;
 wire trace_hold   = eac_valid && trace_arm;
 wire trace_take   = trace_hold && !eaf_valid && !wb_busy && !stall_in;
 wire eac_is_trace = trace_take || exc_pend_trace;
-wire own_exc      = !trace_hold;   // the held instruction's own faults are not taken
+wire own_exc      = !trace_hold && !ae_hold;   // the held instruction's own faults are not taken
 
 // T0, trace on change of flow (milestone 79). The arm is taken by the
 // instructions the 68040 defines as changes of flow: taken branches and
@@ -1023,7 +1045,12 @@ reg  trace_arm_cond;
 // address with the store's lanes.
 wire store_now    = eac_is_store && !trace_hold;
 
-wire eac_is_exc    = eac_is_trace ||
+// ae_take sits beside eac_is_trace and OUTSIDE own_exc for the same reason
+// the trace does: both fire while the instruction behind the completed one
+// is held, and own_exc exists precisely to keep THAT instruction's faults
+// from being taken. The debt is the completed instruction's, not the held
+// one's (milestone 100).
+wire eac_is_exc    = eac_is_trace || ae_take ||
                      (own_exc && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
                                   eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr));
 wire exc_active    = live && eac_is_exc;
@@ -1289,19 +1316,15 @@ wire [15:0] exc_sr_word    = sr_faulted;
 //         call site. This is also why JSR's push never happens for this
 //         case (see eac_is_push above) -- there is no return address to
 //         protect if the call itself never completes.
+// An address error's PC field differs per source -- an indexed JMP reads
+// two words further on than any other mode, a JSR reads its own target,
+// an armed RTE reads the RTE's address -- so it is built once in
+// addrerr_pc_live above and latched with the verdict (milestone 100).
 wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
-                              // An indexed JMP has resolved its extension
-                              // word against the real PC before it faults,
-                              // so the frame reads two words further on --
-                              // pc + 6 rather than pc + 2. That is what
-                              // rtl/ap040/ap040_core.v records for ea mode
-                              // 110 and for PC-indexed, and only for those
-                              // (milestone 99).
-                              eac_is_jmp_odd ? (eac_pc + (eac_ea_indexed ? 32'd6 : 32'd2)) :
-                              eac_is_jsr_odd ? ea_target :
-                              (eac_is_illegal || eac_is_priv || eac_is_fmterr ||
-                               eac_is_br_odd || eac_is_rts_odd || eac_is_rte_odd ||
-                               exc_pend_addrerr) ? eac_pc : eac_next_pc;
+                              eac_is_addrerr ? (exc_pend_addrerr ? exc_pend_ae_pc
+                                                                 : addrerr_pc_live) :
+                              (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc
+                                                                               : eac_next_pc;
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
@@ -1487,6 +1510,10 @@ always @(posedge clk) begin
 		exc_pend_divzero <= 1'b0;
 		exc_pend_addrerr <= 1'b0;
 		exc_pend_ae_target <= 32'd0;
+		exc_pend_ae_pc     <= 32'd0;
+		ae_arm             <= 1'b0;
+		ae_pc_r            <= 32'd0;
+		ae_tgt_r           <= 32'd0;
 		exc_pend_chk     <= 1'b0;
 		exc_pend_chk_n   <= 1'b0;
 		exc_pend_trapcc  <= 1'b0;
@@ -1540,10 +1567,23 @@ always @(posedge clk) begin
 		if (exc_vec_done && !stall_in)   exc_pend_divzero <= 1'b0;
 		else if (divzero_now && !exc_go) exc_pend_divzero <= 1'b1;
 
+		// Armed as the RTE departs. NOT cleared by a flush -- the RTE's own
+		// redirect is one, and the debt survives it exactly as the trace
+		// arm does -- and cleared the moment the exception is TAKEN: from
+		// then exc_pend_addrerr carries it, and leaving the arm up would
+		// hold every instruction behind it for ever.
+		if (ae_take) ae_arm <= 1'b0;
+		else if (rte_odd_now) begin
+			ae_arm   <= 1'b1;
+			ae_pc_r  <= eac_pc;
+			ae_tgt_r <= rte_pc_now;
+		end
+
 		if (exc_vec_done && !stall_in)   exc_pend_addrerr <= 1'b0;
 		else if (addrerr_now && !exc_go) begin
 			exc_pend_addrerr   <= 1'b1;
 			exc_pend_ae_target <= addrerr_live;
+			exc_pend_ae_pc     <= addrerr_pc_live;
 		end
 
 		if (exc_vec_done && !stall_in) exc_pend_chk <= 1'b0;
