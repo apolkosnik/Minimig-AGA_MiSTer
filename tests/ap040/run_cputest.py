@@ -47,6 +47,24 @@ from dat_parser import Header, DataFile, walk_stream  # noqa: E402
 from replay_gen import generate  # noqa: E402
 
 RTL = REPO / "rtl" / "ap040"
+PIPE = REPO / "rtl" / "ap040_pipe"
+# The pipelined core, replayed by its own driver. It presents the same
+# sixteen-bit port through ap040_pipe_bus16.v, which brings the sequential
+# core's adapter with it, so the corpus plumbing above is unchanged; what
+# differs is the driver, and the scope -- see tb_dat_replay_pipe.v's header.
+PIPE_SOURCES = [
+    PIPE / "ap040_pipe_cpu.v",
+    PIPE / "ap040_pipe_bus16.v",
+    RTL / "ap040_bus16_adapter.v",
+    PIPE / "ap040_inst_fetch.v",
+    PIPE / "ap040_decode.v",
+    PIPE / "ap040_ea_calc.v",
+    PIPE / "ap040_ea_fetch.v",
+    PIPE / "ap040_execute.v",
+    PIPE / "ap040_writeback.v",
+    PIPE / "ap040_pipe_alu.v",
+    PIPE / "ap040_pipe_regfile.v",
+]
 RTL_SOURCES = [
     RTL / "ap040_tg68k_compat.v",
     RTL / "ap040_core.v",
@@ -237,13 +255,16 @@ def discover(root: Path, args) -> list[dict]:
     return slices
 
 
-def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params=()) -> Path:
-    sources = [HERE / "tb_dat_replay.v", *RTL_SOURCES]
+def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params=(),
+                core="seq") -> Path:
+    top = "tb_dat_replay" if core == "seq" else "tb_dat_replay_pipe"
+    sources = ([HERE / "tb_dat_replay.v", *RTL_SOURCES] if core == "seq"
+               else [HERE / "tb_dat_replay_pipe.v", *PIPE_SOURCES])
     if params:
         force = True   # a different parameter set is a different simulator
     if simulator != "verilator":
         raise ValueError("unknown simulator %s" % simulator)
-    sim = work / "obj_dir" / "tb_dat_replay"
+    sim = work / "obj_dir" / top
     if (not force and sim.exists() and
             sim.stat().st_mtime >= max(p.stat().st_mtime for p in sources)):
         return sim
@@ -252,14 +273,14 @@ def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params
         jobs = build_jobs or min(os.cpu_count() or 1, 16)
         cmd = [
             "verilator", "--binary", "--timing",
-            "--top-module", "tb_dat_replay",
+            "--top-module", top,
             "--Mdir", str(sim.parent), "-o", sim.name,
             "--build-jobs", str(jobs),
             "--output-split", "20000", "--output-split-cfuncs", "500",
             "-CFLAGS", "-O3 -march=native",
             "-Wno-fatal", "-Wno-PINMISSING",
             "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC",
-            "-I" + str(RTL),
+            "-I" + str(RTL), "-I" + str(PIPE),
         ]
         cmd += ["-G" + p for p in params]
         cmd += [str(p) for p in sources]
@@ -509,6 +530,11 @@ def parser():
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--param", action="append", default=[],
                     help="top-level PARAM=VALUE for tb_dat_replay (e.g. POST_STORES=1)")
+    ap.add_argument("--core", choices=("seq", "pipe"), default="seq",
+                    help="which core to replay against: rtl/ap040's sequential core "
+                         "(the default, which passes the corpus) or rtl/ap040_pipe's "
+                         "pipelined one. The pipelined driver judges only rounds whose "
+                         "oracle is an instruction that completes -- see its header.")
     return ap
 
 
@@ -540,7 +566,7 @@ def main(argv=None):
             # subdirectory, which is where --resume looks for them.
             run_work = args.work / "verilator"
             run_work.mkdir(parents=True, exist_ok=True)
-            sim = compile_rtl(run_work, args.simulator, force=args.rebuild,
+            sim = compile_rtl(run_work, args.simulator, core=args.core, force=args.rebuild,
                               build_jobs=args.build_jobs, params=args.param)
             if args.compile_only:
                 print("simulator:", sim)
