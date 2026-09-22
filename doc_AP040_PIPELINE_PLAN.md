@@ -1688,6 +1688,59 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestones 97-98: odd targets, and what the enable found in them
+
+   Milestone 17 made an odd JMP or JSR target take an address error, and
+   the check it added reads `ea_target` -- the only target those two
+   instructions have, and the only one no other instruction does. So BRA,
+   Bcc, BSR, DBcc, RTS and RTE walked into odd addresses and executed
+   whatever sat at the even one below.
+
+   Four sources, four places to look. A branch's target is
+   `eac_pc + 2 + eac_imm`, the same sum decode turns into its redirect, and
+   it is checked whether or not the branch is taken -- the reference core's
+   `finish_bcc` raises the error before it decides, and this stage could
+   not consult the condition anyway. RTS takes its target from the loaded
+   longword, RTE from the frame's own PC field. An odd BSR no longer
+   pushes, for the reason an odd JSR has not since milestone 17.
+
+   **The gathered forms needed decode changed too.** A word or long form
+   branch gathers its displacement and then redirects, so nothing
+   downstream had ever needed it and `id_imm` was handing EA-fetch a zero.
+   The target checked was therefore the instruction's own address, which is
+   never odd, and `BRA.W` to an odd target sailed through. That is the
+   third time a field defaulting to zero has been the whole defect.
+
+   **Three things the random clock enable found, in this milestone's own
+   work.** RTS and RTE see their target for exactly one cycle, so the
+   verdict has to be latched -- and latching it let it outlive its owner:
+   the handler's first instruction inherited the verdict and took the same
+   address error again with the same stale target. `exc_go` is what says
+   which instruction a verdict belongs to, so the held flag only applies
+   while it is set. The other four fault latches had the same defect
+   waiting in them and now clear on the same condition `exc_go` does.
+
+   **What is NOT fixed, and it is not a loose end.**
+
+   An RTE with an odd restored PC must restore its SR and finish popping
+   BEFORE it faults -- the reference says so in as many words, because the
+   error frame then carries the RESTORED status register and sits below the
+   popped one. This core faults first, so the frame lands twelve bytes low
+   and stacks the pre-RTE SR, and a restored M bit selects the wrong stack
+   besides. Faulting after the fact is a different shape from every other
+   dynamic fault here: the instruction has to complete and the error be
+   raised by what it produced.
+
+   And `tb_ap040_pipe_oddtarget.v` FAILS in the random-enable build, on a
+   defect this milestone introduced and has not explained. The seven
+   exceptions it expects all happen, in order and with the right vectors --
+   the probe confirms six vector 3 and one vector 14 -- and then an eighth
+   arrives: an illegal instruction at `$05A2`, which is inside the stack
+   region the frames have been walking down. Execution reaches memory it
+   was never sent to, after the format-error handler returns. The bench is
+   committed failing rather than trimmed to pass, because a bench that is
+   quiet about a defect is worse than one that is loud about it.
+
    ### Milestones 94-96: the enable, the fourth review, and the fifth
 
    **Milestone 94 is the systematic version of the lesson.** Every bench
