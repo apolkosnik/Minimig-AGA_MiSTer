@@ -200,7 +200,12 @@ initial begin
 	dut.u_l1.mem[85] = 16'h4E71;
 	dut.u_l1.mem[86] = 16'h4E71;
 	dut.u_l1.mem[87] = 16'h4E71;   // resume 7
-	dut.u_l1.mem[88] = 16'h4E71;   // NOP (drain)
+	// A terminal loop, not a NOP tail. The stack has been walking down
+	// through seven frames by now, and a tail of NOPs let the fetcher run
+	// off the end of the program and straight into them -- which is an
+	// illegal instruction inside the frames, an eighth exception, and a
+	// failure that looks like the core's and is the bench's.
+	dut.u_l1.mem[88] = 16'h60FE;   // BRA.B -2, to itself
 
 	// Format-error handler @ word idx 416 (byte $740). It adds ONE, so the
 	// count says which vector was taken: 13 is twelve address errors' worth

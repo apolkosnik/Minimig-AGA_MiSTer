@@ -818,8 +818,14 @@ wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 // it exc_active fell again the next cycle, exc_stall let the instruction
 // depart, and the frame push it had started was abandoned half-written.
 // The TARGET is latched with it, for the same reason and to the same rule.
-wire addrerr_now     = eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
-                       eac_is_rts_odd || eac_is_rte_odd;
+// `live` gates the whole thing (milestone 99). None of the five terms
+// checks eac_valid on its own -- eac_is_jmp_odd is eac_is_jmp AND an
+// address bit -- so whatever the stage held after a flush could re-arm the
+// latch, and the next instruction to take ANY exception inherited the dead
+// one's address. A TRAP then stacked the wrong return address, and
+// returning from it would have run the TRAP again.
+wire addrerr_now     = live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
+                                eac_is_rts_odd || eac_is_rte_odd);
 reg        exc_pend_addrerr;
 reg [31:0] exc_pend_ae_target;
 // The held verdict belongs to ONE instruction, and exc_go is what says
@@ -1284,7 +1290,14 @@ wire [15:0] exc_sr_word    = sr_faulted;
 //         case (see eac_is_push above) -- there is no return address to
 //         protect if the call itself never completes.
 wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
-                              eac_is_jmp_odd ? (eac_pc + 32'd2) :
+                              // An indexed JMP has resolved its extension
+                              // word against the real PC before it faults,
+                              // so the frame reads two words further on --
+                              // pc + 6 rather than pc + 2. That is what
+                              // rtl/ap040/ap040_core.v records for ea mode
+                              // 110 and for PC-indexed, and only for those
+                              // (milestone 99).
+                              eac_is_jmp_odd ? (eac_pc + (eac_ea_indexed ? 32'd6 : 32'd2)) :
                               eac_is_jsr_odd ? ea_target :
                               (eac_is_illegal || eac_is_priv || eac_is_fmterr ||
                                eac_is_br_odd || eac_is_rts_odd || eac_is_rte_odd ||
