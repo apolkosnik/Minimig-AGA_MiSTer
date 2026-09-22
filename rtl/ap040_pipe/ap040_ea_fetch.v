@@ -1673,6 +1673,24 @@ always @(posedge clk) begin
 				// this form (milestone 89).
 				eaf_operand_a  <= eac_immrmw ? eac_imm   :
 				                  eac_is_rmw ? operand_b : mem_lane;
+				// Every classification flag this stage exports, because a
+				// path that leaves one alone hands the NEXT instruction the
+				// previous one's (milestone 101). A load behind a LINK
+				// carried eaf_is_link and wrote no register; behind an
+				// ORI-to-SR it carried eaf_is_immsr and quietly rewrote the
+				// status register with whatever it had loaded. Eight were
+				// stale, of which a review found three; the rest came out
+				// of diffing this branch's assignments against the general
+				// one's, which is the only way to be sure there is not a
+				// ninth.
+				eaf_immsr_to_sr<= eac_immsr_to_sr;
+				eaf_is_chk     <= 1'b0;
+				eaf_is_immsr   <= eac_is_immsr;
+				eaf_is_link    <= eac_is_link;
+				eaf_is_pea     <= eac_is_pea;
+				eaf_is_trapcc  <= 1'b0;
+				eaf_movec_dir  <= eac_imm[3];
+				eaf_movec_sel  <= eac_imm[2:0];
 				// The store half needs the address again a stage later, and
 				// eac_* will have moved on by then.
 				eaf_is_rmw     <= eac_is_rmw;
