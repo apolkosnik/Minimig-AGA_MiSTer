@@ -385,6 +385,7 @@ integer errors /* verilator public_flat_rw */;
 integer ran    /* verilator public_flat_rw */;
 integer mism   /* verilator public_flat_rw */;
 integer skipped, unreached, report_lim, timeout;
+reg [31:0] commits_at_start;
 integer k, n, fgot, lmfd, tmfd;
 reg [2047:0] job_file, lmem_file, tmem_file;
 reg [31:0] limit, start_record;
@@ -393,14 +394,54 @@ reg [31:0] toggle_a, toggle_v;
 reg [7:0]  toggle_kind;
 integer trace_round;
 
+//--------------------------------------------------------------------------
+// Exception-entry snapshot.
+//
+// exc_go is this core's equivalent of the sequential core's S_EXC0: the
+// cycle the fault's verdict registers, before any frame beat is written.
+// The frame's own fields -- its size, its vector, the stack it lands on --
+// are latched on that same edge, so everything is sampled the cycle AFTER
+// the rise, when those latches have settled and the faulting instruction's
+// own commits have landed.
+//--------------------------------------------------------------------------
+reg        p_exc_go, cap_pend, cap_done;
+reg [7:0]  cap_vec;
+reg [15:0] cap_sr;
+reg [31:0] cap_sp;
+reg [31:0] cap_regs [0:15];
+integer    ci;
+
+always @(posedge clk) begin
+	if (!nreset || !round_active) begin
+		p_exc_go <= 0; cap_pend <= 0;
+	end else if (ce) begin
+		p_exc_go <= dut.u_cpu.u_eaf.exc_go;
+		if (dut.u_cpu.u_eaf.exc_go && !p_exc_go && !cap_done)
+			cap_pend <= 1;
+		else if (cap_pend) begin
+			cap_pend <= 0;
+			cap_done <= 1;
+			cap_vec  <= dut.u_cpu.u_eaf.exc_vec_r;
+			cap_sr   <= dut.u_cpu.u_eaf.sr_faulted;
+			cap_sp   <= dut.u_cpu.u_eaf.exc_new_sp;
+			for (ci = 0; ci < 8; ci = ci + 1) begin
+				cap_regs[ci]   <= dut.u_cpu.u_regfile.dreg[ci];
+				cap_regs[8+ci] <= (ci == 7) ? final_a7() : dut.u_cpu.u_regfile.areg[ci];
+			end
+		end
+	end
+end
+
 task mismatch;
 	input [255:0] what;
 	input [31:0] want, got;
 	begin
 		mism = mism + 1;
 		if (mism <= report_lim)
-			$display("MISMATCH j%0d t%0d r%0d %0s: expected %08x got %08x (pc=%08x)",
-			         jr, test_idx, round_idx, what, want, got, i_pc);
+			$display("MISMATCH j%0d t%0d r%0d %0s: expected %08x got %08x (pc=%08x op=%02x%02x vec=%0d/%0d commits=%0d)",
+			         jr, test_idx, round_idx, what, want, got, i_pc,
+			         rd8(i_pc), rd8(i_pc+1), cap_vec, e_exc,
+			         dbg_commits - commits_at_start);
 	end
 endtask
 
@@ -448,16 +489,24 @@ endfunction
 task check_final;
 	integer fi;
 	reg [31:0] got;
+	reg [15:0] got_sr;
 	begin
+		// An exception round is judged on the entry snapshot, which is the
+		// architectural state the corpus recorded; one that completed is
+		// judged on the live register file.
+		if (cap_done && cap_vec !== e_exc)
+			mismatch("exception vector", {24'd0, e_exc}, {24'd0, cap_vec});
 		for (fi = 0; fi < 16; fi = fi + 1) begin
-			got = (fi < 8)  ? dut.u_cpu.u_regfile.dreg[fi]
+			got = cap_done ? cap_regs[fi]
+			    : (fi < 8)  ? dut.u_cpu.u_regfile.dreg[fi]
 			    : (fi < 15) ? dut.u_cpu.u_regfile.areg[fi-8]
 			                : final_a7();
 			if (got !== e_regs[fi])
 				mismatch(fi < 8 ? "D register" : "A register", e_regs[fi], got);
 		end
-		if (((dbg_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
-			mismatch("SR", e_sr, {16'd0, dbg_sr});
+		got_sr = cap_done ? cap_sr : dbg_sr;
+		if (((got_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
+			mismatch("SR", e_sr, {16'd0, got_sr});
 		for (fi = 0; fi < em_cnt; fi = fi + 1)
 			if (read_value(em_a[fi], em_sz[fi]) !== em_v[fi])
 				mismatch("memory", em_v[fi], read_value(em_a[fi], em_sz[fi]));
@@ -470,6 +519,7 @@ endtask
 task run_round;
 	begin
 		ran = ran + 1;
+		cap_done = 0; cap_pend = 0; cap_vec = 8'hff; p_exc_go = 0;
 		boot_pc = i_pc; boot_msp = i_msp; cur_pc = i_pc;
 		hold_fetch = 0; round_active = 1;
 		ce = 0;
@@ -478,19 +528,30 @@ task run_round;
 		nreset = 1;
 		@(posedge clk);
 		inject_state;
+		commits_at_start = dbg_commits;
 		@(posedge clk);
 		ce = 1;
 
-		// The completion boundary: the core asking for the instruction the
-		// oracle says comes next. A round that never gets there is reported
-		// as unreached rather than compared -- for this core that usually
-		// means an opcode it does not implement, which is a real gap but a
-		// different one from a wrong answer.
+		// The completion boundary, and it is NOT the one the sequential
+		// driver uses. That driver waits for the core to ask memory for the
+		// instruction the oracle says comes next, which on a machine that
+		// executes one instruction at a time means the previous one has
+		// finished. Here the fetch of the next address happens five stages
+		// ahead of the tested instruction retiring: waiting for it stopped
+		// every round with the instruction still in flight and nothing
+		// committed, which is how the first run produced 143 mismatches
+		// that were all the injected input state read back.
+		//
+		// What completes a round on this core is the tested instruction
+		// RETIRING -- the writeback stage naming its address -- or an
+		// exception entry being captured. A few cycles afterwards let its
+		// commits land before anything is read.
 		timeout = 0;
-		while (timeout < EXEC_TIMEOUT &&
-		       !(busstate == 2'b00 && addr_out == e_pc && mem_ready)) begin
+		while (timeout < EXEC_TIMEOUT && !(cap_done && !cap_pend) &&
+		       !(dbg_wb_valid && dbg_wb_pc == i_pc && ce)) begin
 			@(posedge clk); timeout = timeout + 1;
 		end
+		if (!cap_done) repeat (4) @(posedge clk);
 		ce = 0;
 		if (timeout >= EXEC_TIMEOUT) begin
 			unreached = unreached + 1;
@@ -591,7 +652,7 @@ initial begin
 		// Judged only if the oracle is an instruction that completes. The
 		// rest are counted here rather than guessed at.
 		if ((flags & F_FPU) || (flags & F_IGNORE_EXC) ||
-		    e_exc != 0 || e_trace != 0 || i_level != 0 ||
+		    e_trace != 0 || i_level != 0 ||
 		    odd_vector != 0 || jr < start_record) begin
 			skipped = skipped + 1;
 			apply_deferred;
