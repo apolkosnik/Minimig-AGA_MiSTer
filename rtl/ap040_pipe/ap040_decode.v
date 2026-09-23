@@ -2057,10 +2057,19 @@ always @(posedge clk) begin
 					// creg path, not commit_reg) -- and an invalid selector
 					// writes nothing either, having already become illegal
 					// above.
-					// An absolute store writes memory, not a register.
+					// An absolute store writes memory, not a register, and an
+					// absolute JMP writes neither: the address it gathered is
+					// where it goes, not a result. held_abs_jmp has to be
+					// excluded by name, the way id_writes_ccr below excludes
+					// it -- a JMP is not an ALU operation, so held_abs_alu is
+					// 0 and the term after it is true for free. Without this
+					// the absolute path's own destination, the opcode's bits
+					// [11:9], took the target: JMP fixes those at 111, so
+					// both forms wrote D7 (milestone 106).
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr ||
 					                    (held_is_abs && held_abs_jsr) ||
-					                    (held_is_abs && (!held_abs_alu || !held_alu_nowrite)) ||
+					                    (held_is_abs && !held_abs_jmp &&
+					                     (!held_abs_alu || !held_alu_nowrite)) ||
 					                    (held_is_imm && !held_imm_nowrite && !held_imm_mem) ||
 					                    (held_is_alu_disp && !held_alu_nowrite) || held_is_lea || held_is_link ||
 					                    (held_is_movec && !held_movec_dir && !movec_illegal_gather);
