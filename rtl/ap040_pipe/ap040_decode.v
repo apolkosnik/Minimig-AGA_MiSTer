@@ -713,6 +713,14 @@ wire is_mul    = mul_shape && mul_mode_ok;
 wire is_muls   = is_mul && (if_opcode[8] == 1'b1);
 wire is_mul_mem = is_mul && (if_opcode[5:3] != 3'b000);
 wire is_mul_pi = is_mul && (if_opcode[5:3] == 3'b011);
+// MUL/DIV with an ABSOLUTE source (milestone 111). mul_mode_ok admits
+// 000/010/011/100 only, and the corpus' MULS/MULU/DIVS/DIVU slices are
+// dominated by mode 111 reg 001 -- 372,692 rounds between the four.
+wire is_mul_abs    = mul_shape && abs_mode;
+wire is_div_abs    = div_shape && abs_mode;
+wire is_muldiv_abs = is_mul_abs || is_div_abs;
+wire is_muldiv_abs_l = is_muldiv_abs && abs_long;
+wire is_muldiv_abs_signed = is_muldiv_abs && (if_opcode[8] == 1'b1);
 wire is_mul_pd = is_mul && (if_opcode[5:3] == 3'b100);
 
 // MULU/MULS/DIVU/DIVS with an IMMEDIATE source (milestone 53), mode 111
@@ -1656,6 +1664,13 @@ wire is_move_st_disp = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00
 // MOVEA sets NO condition codes, unlike every other MOVE. That is the one
 // thing about it that is easy to get wrong and invisible in a register
 // check, so it has its own assertion in the testbench.
+// MOVEA with an ABSOLUTE source (milestone 111): 190,018 corpus rounds
+// between the Word and Long forms. Like MOVEA everywhere else it writes An,
+// sets no condition codes, and the Word form sign-extends to all 32 bits.
+wire is_movea_abs   = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+                      (if_opcode[8:6] == 3'b001) && abs_mode;
+wire is_movea_abs_w = is_movea_abs && (if_opcode[13:12] == 2'b11);
+wire is_movea_absl  = is_movea_abs && abs_long;
 wire is_movea_rr  = (if_opcode[15:12] == 4'b0010) && (if_opcode[8:6] == 3'b001) &&
                     (if_opcode[5:3] == 3'b000);
 // MOVE.L Dn,(xxx).W and MOVE.L Dn,(xxx).L (milestone 34): an absolute
@@ -1832,7 +1847,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 wire is_aline = (if_opcode[15:12] == 4'hA);
 wire is_fline = (if_opcode[15:12] == 4'hF);
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
-                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
+                   !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_muldiv_abs && !is_movea_abs && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an &&
@@ -1877,7 +1892,11 @@ reg         held_abs_push;      // absolute, pushing the address
 reg         held_abs_jmp;       // absolute, and the address is a JMP target
 reg         held_abs_jsr;       // absolute, and the address is a JSR target
 reg         held_abs_alu;       // this absolute form carries an operation, not just a MOVE
-reg         held_abs_rmw;       // ...and writes its result back to that address
+reg         held_abs_rmw;
+reg         held_abs_div;      // this absolute form is a DIVU/DIVS
+reg         held_abs_divs;     // ...and it is the signed one
+reg         held_abs_sxt;      // its word operand sign-extends to 32 bits
+reg         held_abs_areg;     // ...and its destination is An (MOVEA)       // ...and writes its result back to that address
 reg         held_is_abs;
 reg         held_imm_areg;
 reg         held_is_stabs;
@@ -2066,6 +2085,10 @@ always @(posedge clk) begin
 		held_abs_jsr     <= 1'b0;
 		held_abs_alu     <= 1'b0;
 		held_abs_rmw     <= 1'b0;
+		held_abs_div     <= 1'b0;
+		held_abs_divs    <= 1'b0;
+		held_abs_sxt     <= 1'b0;
+		held_abs_areg    <= 1'b0;
 		held_is_abs      <= 1'b0;
 		held_imm_areg    <= 1'b0;
 		held_is_stabs    <= 1'b0;
@@ -2143,6 +2166,7 @@ always @(posedge clk) begin
 					id_dest_reg     <= held_st_disp ? {1'b0, held_reg} :
 					                    (held_is_abs && (held_abs_push || held_abs_jsr)) ? 4'd15 :
 					                    (held_is_abs && held_abs_lea)  ? {1'b1, held_dest_reg} :
+					                    (held_is_abs && held_abs_areg) ? {1'b1, held_dest_reg} :
 					                    held_is_abs  ? {1'b0, held_dest_reg} :
 					                    (held_is_imm && held_imm_mem) ? 4'd0 :
 					                    held_is_imm  ? (held_imm_dest9 ? {held_imm_areg, held_dest_reg}
@@ -2259,7 +2283,8 @@ always @(posedge clk) begin
 					// MOVEA sets no condition codes.
 					id_writes_ccr   <= held_is_move_disp || (held_is_alu_disp && held_alu_ccr) ||
 					                    (held_is_abs && !held_abs_lea && !held_abs_push &&
-					                     !held_abs_jmp && !held_abs_jsr) || held_is_stabs || held_st_disp ||
+					                     !held_abs_jmp && !held_abs_jsr && !held_abs_areg) ||
+					                    held_is_stabs || held_st_disp ||
 					                    (held_is_imm && held_imm_ccr);
 					id_is_branch    <= !held_is_dbcc && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
 					                    !held_is_link && !held_is_movem && !held_is_jmp &&
@@ -2290,7 +2315,8 @@ always @(posedge clk) begin
 					id_is_predec    <= held_imm_mem_pd;
 					id_is_jmp       <= held_is_jmp || (held_is_abs && held_abs_jmp);
 					id_is_lea       <= (held_is_lea && !held_lea_push) || (held_is_abs && held_abs_lea);
-					id_sxt_w        <= held_is_alu_disp && held_alu_sxt;
+					id_sxt_w        <= (held_is_alu_disp && held_alu_sxt) ||
+					                   (held_is_abs && held_abs_sxt);
 					id_st_disp      <= held_st_disp;
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw ||
 					                    (held_imm_mem && !held_imm_nowrite) || held_is_scc_mem;
@@ -2305,8 +2331,10 @@ always @(posedge clk) begin
 					id_immsr_to_sr  <= held_immsr_sr;
 					id_is_stop      <= held_is_stop;
 					id_is_link      <= held_is_link;
-					id_is_div       <= held_is_imm && held_imm_div;
-					id_div_signed   <= held_is_imm && held_imm_divs;
+					id_is_div       <= (held_is_imm && held_imm_div) ||
+					                   (held_is_abs && held_abs_div);
+					id_div_signed   <= (held_is_imm && held_imm_divs) ||
+					                   (held_is_abs && held_abs_divs);
 					id_is_movem     <= held_is_movem;
 					id_movem_dir    <= held_movem_dir;
 					id_movem_word   <= held_movem_word;
@@ -2337,7 +2365,8 @@ always @(posedge clk) begin
 			              is_st_abs || is_move_st_disp || is_alu_disp || is_lea_disp || is_adda_imm ||
 			              is_adda_disp || is_link || is_movem || is_muldiv_imm ||
 			              is_alu_dst_disp || is_alu_dst_idx || is_unary_gather || is_move_idx || is_alu_idx || is_lea_idx ||
-			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
+			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu || is_muldiv_abs ||
+			              is_movea_abs ||
 			              is_pea_gather || is_eaonly_abs || is_immsr || is_chk_imm ||
 			              is_jmp_idx || is_jmp_pcrel || is_jsr_idx || is_jsr_pcrel ||
 			              is_jmpjsr_abs || is_trapcc_gather || is_scc_mem_gather ||
@@ -2356,7 +2385,7 @@ always @(posedge clk) begin
 				                 (is_move_imm && if_opcode[13:12] == 2'b10) ||
 				                 is_move_abs_l || is_movea_imm || is_st_abs_l || is_adda_imm_l ||
 				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp ||
-				                 is_jmpjsr_abs_l || is_trapcc_l ||
+				                 is_jmpjsr_abs_l || is_trapcc_l || is_muldiv_abs_l || is_movea_absl ||
 				                 (is_scc_mem_gather && ea_is_absl);
 				held_is_imm      <= is_alu_immsrc || is_imm_alu || is_immmem || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_muldiv_imm || is_chk_imm;
@@ -2394,22 +2423,28 @@ always @(posedge clk) begin
 				                     is_muldiv_imm || is_alu_immsrc) && !is_chk_imm;
 				held_imm_div     <= is_div_imm;
 				held_imm_divs    <= is_div_imm && is_muldiv_imm_signed;
-				held_is_abs      <= is_move_abs || is_abs_alu || is_eaonly_abs || is_jmpjsr_abs;
+				held_is_abs      <= is_move_abs || is_abs_alu || is_eaonly_abs || is_jmpjsr_abs ||
+				                    is_muldiv_abs || is_movea_abs;
 				held_abs_jmp     <= is_jmp_abs;
 				held_abs_jsr     <= is_jsr_abs;
 				held_abs_lea     <= is_lea_abs;
 				held_abs_push    <= is_pea_abs;
-				held_abs_alu     <= is_abs_alu;
+				held_abs_alu     <= is_abs_alu || is_mul_abs;
 				// TST reads without writing; everything else in the unary
 				// group writes its result back, and the binary family's
 				// destination is a register, not the address.
 				held_abs_rmw     <= (is_unary_abs && !is_tst_abs) || is_alu_dst_abs;
+				held_abs_div     <= is_div_abs;
+				held_abs_divs    <= is_div_abs && is_muldiv_abs_signed;
+				held_abs_sxt     <= is_muldiv_abs || is_movea_abs_w;
+				held_abs_areg    <= is_movea_abs;
 				held_is_stabs    <= is_st_abs;
 				held_st_disp     <= is_move_st_disp;
 				held_is_branch   <= is_branch_word || is_branch_long;
 				// The ALU family takes its size from ir[7:6]; MOVE's lives in
 				// ir[13:12] with a different encoding, hence two wires.
-				held_mv_size     <= is_abs_alu    ? add_op_size :
+				held_mv_size     <= (is_muldiv_abs || is_movea_abs) ? `AP040_SZ_L :
+				                    is_abs_alu    ? add_op_size :
 				                    is_adda_disp ? `AP040_SZ_L :
 				                    (is_alu_disp || is_alu_dst_disp || is_alu_idx ||
 				                     is_alu_pcrel || is_alu_dst_idx ||
@@ -2429,7 +2464,9 @@ always @(posedge clk) begin
 				                     is_alu_pcrel || is_alu_dst_idx || is_unary_gather;
 				// The ir[8]=1 direction has its own op map: nibble 1011 is
 				// EOR there, not CMP.
-				held_alu_op       <= is_unary_abs     ? unary_abs_op   :
+				held_alu_op       <= is_mul_abs       ? (is_muldiv_abs_signed ? `AP040_ALU_MULS
+				                                                              : `AP040_ALU_MULU) :
+				                     is_unary_abs     ? unary_abs_op   :
 				                     is_unary_gather  ? unary_mem_op   :
 				                     (is_alu_dst_disp || is_alu_dst_idx ||
 				                      is_alu_dst_abs) ? alu_nib_dst_op : alu_nib_op;
@@ -2472,7 +2509,7 @@ always @(posedge clk) begin
 				                  is_move_abs_l || is_movea_imm || is_st_abs_l ||
 				                  is_adda_imm_l || is_abs_alu_l ||
 				                  is_eaonly_abs_l || is_movem_disp ||
-				                  is_jmpjsr_abs_l || is_trapcc_l ||
+				                  is_jmpjsr_abs_l || is_trapcc_l || is_muldiv_abs_l || is_movea_absl ||
 				                  // Scc asks the shared classifier instead of adding
 				                  // a name to this list. This assignment and
 				                  // held_is_long above are the two lists milestone 89
