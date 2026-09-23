@@ -868,7 +868,13 @@ wire ae_hold         = eac_valid && ae_arm;
 wire ae_busy         = eac_valid && ae_susp;
 wire ae_take         = ae_hold && !eaf_valid && !wb_busy && !stall_in;
 wire addrerr_now     = (live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
-                                 eac_is_rts_odd)) || ae_take;
+                                 eac_is_rts_odd)) || ae_take || vecodd_pend;
+// The second address error the first entry's own vector read produces. It
+// cannot ride exc_pend_addrerr directly: that is qualified by exc_go, which
+// clears on exc_vec_done, so it would never raise anything. This feeds
+// addrerr_now instead, the same door ae_take uses.
+reg        vecodd_pend;
+reg [31:0] vecodd_pc_r, vecodd_tgt_r;
 reg        exc_pend_addrerr;
 reg [31:0] exc_pend_ae_target;
 reg [31:0] exc_pend_ae_pc;
@@ -882,13 +888,15 @@ reg [31:0] exc_pend_ae_pc;
 wire eac_is_addrerr  = addrerr_now || (exc_pend_addrerr && exc_go);
 // The target each of them referenced, which is what the format $2 frame's
 // address field carries -- with bit 0 cleared, as the reference does.
-wire [31:0] addrerr_live   = ae_take        ? ae_tgt_r  :
+wire [31:0] addrerr_live   = vecodd_pend    ? vecodd_tgt_r :
+                             ae_take        ? ae_tgt_r  :
                              eac_is_br_odd  ? br_target :
                              eac_is_rts_odd ? mem_lane  : ea_target;
 wire [31:0] addrerr_target = exc_pend_addrerr ? exc_pend_ae_target : addrerr_live;
 // ...and the PC field the frame carries, which differs per source and is
 // latched with the verdict for the same reason the target is.
-wire [31:0] addrerr_pc_live = ae_take        ? ae_pc_r :
+wire [31:0] addrerr_pc_live = vecodd_pend    ? vecodd_pc_r :
+                              ae_take        ? ae_pc_r :
                               eac_is_jmp_odd ? (eac_pc + (eac_ea_indexed ? 32'd6 : 32'd2)) :
                               eac_is_jsr_odd ? ea_target : eac_pc;
 // The six-word frame (milestone 77): address error, and -- as on the 68040
@@ -1144,6 +1152,16 @@ wire exc_writing   = exc_go && !exc_vec_pending &&
 wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
 wire exc_vec_issue = exc_go && !exc_vec_pending && (exc_ph == EXC_VECRD);
 wire exc_vec_done  = exc_go && exc_vec_pending && l1_rvalid_b;
+// An odd exception VECTOR (milestone 110). The handler address read out of
+// the vector table must be even. The reference's rule, recorded in the plan
+// since milestone 99 and blocked until milestone 108 gave this core a halt:
+// an odd handler for vector 2 or 3 is a DOUBLE FAULT and halts; any other
+// odd handler becomes an address error whose frame's PC field is 4 * vector
+// WITHOUT the vector base register -- "offset, not vbr + offset" -- and
+// whose address field is the handler with bit 0 cleared.
+wire exc_vec_odd_now = exc_vec_done && l1_q_b[0];
+wire exc_vec_dbl     = exc_vec_odd_now &&
+                       ((exc_vec_r == 8'd2) || (exc_vec_r == 8'd3));
 wire exc_stall     = exc_active && !exc_vec_done;
 // ...and the frame cannot start until the base is trustworthy, which is
 // what a7_busy says. exc_go simply does not latch before then, and
@@ -1565,6 +1583,9 @@ always @(posedge clk) begin
 		exc_pend_ae_pc     <= 32'd0;
 		ae_arm             <= 1'b0;
 		ae_susp            <= 1'b0;
+		vecodd_pend        <= 1'b0;
+		vecodd_pc_r        <= 32'h0;
+		vecodd_tgt_r       <= 32'h0;
 		ae_pc_r            <= 32'd0;
 		ae_tgt_r           <= 32'd0;
 		exc_pend_chk     <= 1'b0;
@@ -1643,6 +1664,16 @@ always @(posedge clk) begin
 		// this window exists for has finished reading its vector.
 		if (exc_vec_done && !stall_in) ae_susp <= 1'b0;
 		else if (rte_odd_now)          ae_susp <= 1'b1;
+
+		// The odd-vector re-entry. Set when the vector arrives odd and is
+		// not a double fault; cleared when the entry it asks for actually
+		// departs, which is the same condition exc_go latches a verdict on.
+		if (exc_vec_odd_now && !exc_vec_dbl && !stall_in) begin
+			vecodd_pend  <= 1'b1;
+			// 4 * vector, and deliberately NOT vbr + 4 * vector.
+			vecodd_pc_r  <= {22'd0, exc_vec_r, 2'b00};
+			vecodd_tgt_r <= {l1_q_b[31:1], 1'b0};
+		end else if (exc_active && !a7_busy && !exc_go) vecodd_pend <= 1'b0;
 
 		if (exc_vec_done && !stall_in) exc_pend_chk <= 1'b0;
 		else if (chk_now && !exc_go) begin
@@ -1950,7 +1981,10 @@ always @(posedge clk) begin
 				// this was latent until milestone 52: the frame pushed and
 				// the vector read correctly, and then the redirect went to
 				// $00000000.
-				eaf_operand_a  <= l1_q_b;
+				// An odd handler never becomes a target: the even address is
+				// what the frame's address field carries and what anything
+				// fetched before the second entry supersedes it uses.
+				eaf_operand_a  <= exc_vec_odd_now ? {l1_q_b[31:1], 1'b0} : l1_q_b;
 				eaf_operand_b  <= exc_new_sp;
 				// An exception entry is the traced instruction's completion
 				// (a traced TRAP is traced on its handler's first
@@ -1984,7 +2018,8 @@ always @(posedge clk) begin
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
-				eaf_is_stop    <= 1'b0;
+				// ...except a double fault, which halts (milestone 110).
+				eaf_is_stop    <= exc_vec_dbl;
 				eaf_is_chk     <= eac_is_chk_trap && own_exc;
 				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
 				eaf_is_div     <= 1'b0;
