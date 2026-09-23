@@ -859,6 +859,12 @@ wire ae_hold         = eac_valid && ae_arm;
 // (milestone 109). It is deliberately NOT folded into own_exc: own_exc has
 // to be TRUE when the deferred entry retires, because the exception branch
 // latches eaf_is_addrerr <= eac_is_addrerr && own_exc.
+//
+// The gates below are the whole fix. A hold BRANCH beside the trace's own
+// -- parking the instruction so it cannot retire -- was written first and
+// then removed: with the requests and the address update gated, no mutation
+// and none of the review's twenty-eight scenarios could tell whether it was
+// there, for a store, a MOVEM, an ILLEGAL or a plain MOVEQ target alike.
 wire ae_busy         = eac_valid && ae_susp;
 wire ae_take         = ae_hold && !eaf_valid && !wb_busy && !stall_in;
 wire addrerr_now     = (live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
@@ -1813,19 +1819,6 @@ always @(posedge clk) begin
 				// nothing, until EX and WB are empty; then trace_take turns
 				// it into the trace entry (exc_writing, above in this chain
 				// on the next pass).
-				eaf_valid       <= 1'b0;
-			end else if (ae_busy && !exc_active) begin
-				// The same thing for the instruction at an odd RTE target,
-				// which never had it (milestone 109). Without this branch it
-				// simply RETIRED: the deferred address error suppressed its
-				// exception trigger through own_exc and nothing else, so its
-				// store went out, its MOVEM ran the sequencer, its register
-				// writes committed, and ae_take merely waited a cycle for
-				// eaf_valid to drop before entering on top of the damage.
-				// Parking it here is what makes the whole instruction not
-				// happen; the !ae_busy gates on store_now, mem_issue and
-				// eac_is_push above stop the REQUESTS, which are driven off
-				// eac_* and do not care which branch this chain takes.
 				eaf_valid       <= 1'b0;
 			end else if (eac_valid && eac_is_movem && !mvm_fin && !trace_hold && !ae_busy) begin
 				// Start, then one beat per cycle. eac_* is frozen by
