@@ -36,6 +36,12 @@
 // else". The three frame words are checked at their proper addresses for    //
 // the same reason in reverse.                                              //
 //                                                                          //
+// The target is (A0)+ rather than (A0) so that it has a REGISTER result as  //
+// well as a memory one. With the request gates in place but no hold branch  //
+// the store is suppressed and a plain (A0) form then looks entirely         //
+// innocent -- a mutation proved it -- while the instruction has in fact     //
+// still retired. A0 is what notices.                                       //
+//                                                                          //
 // D4 proves the vector-3 handler ran; D3 proves no OTHER vector's handler   //
 // did, which is what the sibling defect in the vector mux would cause.      //
 //--------------------------------------------------------------------------//
@@ -117,7 +123,7 @@ initial begin
 	dut.u_l1.mem[11] = 16'h4E73;   // RTE   -- restores PC $601, which is ODD
 
 	// $600: the instruction at the odd target. It must never execute.
-	dut.u_l1.mem[256] = 16'h2080;  // MOVE.L D0,(A0)
+	dut.u_l1.mem[256] = 16'h20C0;  // MOVE.L D0,(A0)+
 	dut.u_l1.mem[257] = 16'h60FE;  // BRA.B -2
 
 	// $700: the address-error (vector 3) handler.
@@ -162,6 +168,14 @@ initial begin
 	if (dbg_d3 !== 32'h0000_0000) begin
 		errors = errors + 1;
 		$display("FAIL: D3 = %h, expected 00000000 (no other vector's handler may run)", dbg_d3);
+	end
+
+	// ...nor its postincrement, which is what proves the instruction did not
+	// merely have its memory request suppressed but never ran at all.
+	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0800) begin
+		errors = errors + 1;
+		$display("FAIL: A0 = %h, expected 00000800 (the (A0)+ at the odd target must not step; 00000804 means the instruction retired with its store gated)",
+		         dut.u_cpu.u_regfile.areg[0]);
 	end
 
 	// The store must not have happened.
