@@ -1688,6 +1688,95 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 107: the sequential core's EA classification, and Scc to memory
+
+   The user's observation, and it was the right one: `ap040_core.v` is in this
+   same worktree as the corpus oracle, it passes all 658 Basic slices, and it
+   already knows everything this decoder keeps re-deriving per family. Its
+   `ea_start`/`S_EA_DISP` (ap040_core.v:1764, :2648) is one `case` over the
+   mode field that every instruction enters with a return state, and
+   `dst_not_alt`/`src_not_data` (ap040_core.v:940) are the two 68k mode
+   CLASSES that say which modes an instruction may use.
+
+   The pipelined decoder had none of that. 29 `*_shape` wires testing
+   `if_opcode[5:3]` in 92 places, each family hand-enumerating its own subset,
+   and a SECOND enumeration listing every instruction that gathers extension
+   words at all. What transfers is the classification, not the sequencing --
+   a six-stage pipeline cannot call an EA subroutine and return -- so
+   `ea_is_*`, `ea_not_alt`, `ea_not_data` and `ea_ext_words` are now
+   combinational wires, lifted and cited rather than re-derived.
+
+   **Scc is the first family written against them**, and it was the largest
+   single gap in the core: 2,561,872 corpus rounds, 33.4% of everything the
+   decoder could not read. It existed only as `Scc Dn`. It is now "the
+   0101 cccc 11 space, not Dn, and alterable" -- one line, where `ea_not_alt`
+   excludes DBcc's mode 001 and TRAPcc's three mode-7 encodings by
+   construction. The family says what it takes instead of listing what it
+   must avoid.
+
+   The memory form rides the read-modify-write store path, because its byte
+   is not known until EX where the condition is evaluated. Like CLR it
+   performs a read its result does not need; the 68040 does not, and that is
+   noted rather than left silent.
+
+   **Four things the corpus found on the way, none of them about Scc:**
+
+   1. `id_imm` defaults to the sign-extended opcode low byte. For a family
+      with no displacement that default becomes one, and the store landed at
+      `An + sign_extend(opcode[7:0])`.
+   2. The gather block's `id_is_branch` is a NEGATIVE list: anything gathered
+      and not named there IS a branch, and its `id_imm` is read as a branch
+      displacement. An Scc left off it had its destination checked for an odd
+      branch target and raised an address error on every gathered form
+      landing on an odd byte.
+   3. `redirect_from_gather` is the same shape, and redirected the fetch to
+      the Scc's own displacement.
+   4. The extension-word count lives in BOTH `held_is_long` and
+      `ext_pending`. Adding Scc to one and not the other is milestone 89
+      exactly, and it happened again: `(xxx).L` gathered one word, so the
+      second half of the address executed as the next instruction. `ext_pending`
+      now asks `ea_ext_words` instead of carrying another name.
+
+   Three of those four are the shape-by-shape structure charging rent, which
+   is the argument for the classifier rather than an aside about it.
+
+   | run | result |
+   |---|---|
+   | control: `tb_ap040_pipe_sccmem` | FAILS 14 checks on the prior RTL |
+   | mutation: `ea_not_alt` dropped | caught -- the reserved mode-7 encoding stopped being illegal |
+   | mutation: `ea_ext_words` term dropped | caught -- `(xxx).L` short by a word, D3 never runs |
+   | mutation: byte size -> word | caught by the neighbour checks, all five |
+   | mutation: condition ignored, always true | caught by SF and SNE, all three |
+   | corpus: Basic/Scc.B | 83/83 slices, 0 undecoded, 0 wrong (was 0/83) |
+   | corpus: all 658 Basic slices | **260/658 slices** (was 177); undecoded 7,674,801 -> **5,112,929**; wrong unchanged at 5,164 |
+   | bench suite, four build modes | 123/123 each |
+   | fit at 25 ns | +0.724 ns, 41.19 MHz, 6,048.5 ALMs |
+
+   On the fit: the last three milestones measured +0.704, +1.344 and
+   +0.724 ns, all inside the ~0.6 ns placement band of each other. There is
+   no trend in that, and reading the middle one as a gain or this one as a
+   loss would be reading noise. +26 ALMs is small for a whole instruction
+   family, which is the number worth quoting.
+
+   The wrong column not moving is the point of quoting it: 2.56M rounds
+   changed from "cannot decode" to "decoded and correct" without a single
+   round changing from correct to wrong.
+
+   **A mutation worth recording for what it did NOT catch.** Dropping
+   `ea_not_alt` entirely left `tb_ap040_pipe_dbcc` and `tb_ap040_pipe_trapcc`
+   passing, because their own decode wires win the ternary chains before the
+   Scc arm is reached. The class predicate earns its place here only on the
+   reserved mode-7 values, which must stay illegal, and nothing tested those
+   until the bench grew an `ST` with a reserved destination. A mode class is
+   worth having for what it excludes silently, and that is exactly what a
+   bench does not see unless it looks.
+
+   And a bench lesson: `PROG_WORDS` is an instruction ISSUE budget, not an
+   address bound. At 40 the fetch ran out before the handler could run, and
+   the symptom -- a correct frame pushed, a correct vector table, a correct
+   handler, and a PC frozen on the instruction after the trap -- reads
+   exactly like a broken exception redirect.
+
    ### Milestone 106: a bench that passed, and the defect it found anyway
 
    The worklist milestone 105 produced put "executed and wrong" ahead of
