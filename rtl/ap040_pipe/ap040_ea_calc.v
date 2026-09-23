@@ -113,6 +113,7 @@ module ap040_ea_calc
 	input      [15:0] id_movem_mask,
 	input             id_is_trapcc,
 	input             id_is_chk,
+	input             id_chk_long,
 	input             id_is_immsr,
 	input             id_is_stop,
 	input             id_immsr_to_sr,
@@ -123,6 +124,7 @@ module ap040_ea_calc
 	input             id_is_jsr,
 	input             id_is_trap,
 	input             id_is_illegal,
+	input       [1:0] id_illegal_kind,
 	input             id_is_movesr,
 	input             id_is_movec,
 	input             id_is_rts,
@@ -173,6 +175,7 @@ module ap040_ea_calc
 	output reg [15:0] eac_movem_mask,
 	output reg        eac_is_trapcc,
 	output reg        eac_is_chk,
+	output reg        eac_chk_long,
 	output reg        eac_is_immsr,
 	output reg        eac_is_stop,
 	output reg        eac_immsr_to_sr,
@@ -183,6 +186,7 @@ module ap040_ea_calc
 	output reg        eac_is_jsr,
 	output reg        eac_is_trap,
 	output reg        eac_is_illegal,
+	output reg  [1:0] eac_illegal_kind,
 	output reg        eac_is_movesr,
 	output reg        eac_is_movec,
 	output reg        eac_is_rts,
@@ -236,6 +240,7 @@ always @(posedge clk) begin
 		eac_movem_mask   <= 16'h0;
 		eac_is_trapcc    <= 1'b0;
 		eac_is_chk       <= 1'b0;
+		eac_chk_long     <= 1'b0;
 		eac_is_immsr     <= 1'b0;
 		eac_is_stop      <= 1'b0;
 		eac_immsr_to_sr  <= 1'b0;
@@ -246,6 +251,7 @@ always @(posedge clk) begin
 		eac_is_jsr       <= 1'b0;
 		eac_is_trap      <= 1'b0;
 		eac_is_illegal   <= 1'b0;
+		eac_illegal_kind <= 2'd0;
 		eac_is_movesr    <= 1'b0;
 		eac_is_movec     <= 1'b0;
 		eac_is_rts       <= 1'b0;
@@ -297,6 +303,7 @@ always @(posedge clk) begin
 			eac_movem_mask   <= id_movem_mask;
 			eac_is_trapcc    <= id_is_trapcc;
 			eac_is_chk       <= id_is_chk;
+			eac_chk_long     <= id_chk_long;
 			eac_is_immsr     <= id_is_immsr;
 			eac_is_stop      <= id_is_stop;
 			eac_immsr_to_sr  <= id_immsr_to_sr;
@@ -307,6 +314,7 @@ always @(posedge clk) begin
 			eac_is_jsr       <= id_is_jsr;
 			eac_is_trap      <= id_is_trap;
 			eac_is_illegal   <= id_is_illegal;
+			eac_illegal_kind <= id_illegal_kind;
 			eac_is_movesr    <= id_is_movesr;
 			eac_is_movec     <= id_is_movec;
 			eac_is_rts       <= id_is_rts;

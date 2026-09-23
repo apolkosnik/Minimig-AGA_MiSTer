@@ -302,6 +302,7 @@ module ap040_ea_fetch
 	input      [15:0] eac_movem_mask,
 	input             eac_is_trapcc,
 	input             eac_is_chk,
+	input             eac_chk_long,
 	input             eac_is_immsr,
 	input             eac_is_stop,
 	input             eac_immsr_to_sr,
@@ -321,6 +322,7 @@ module ap040_ea_fetch
 	input             eac_is_jsr,
 	input             eac_is_trap,
 	input             eac_is_illegal,
+	input       [1:0] eac_illegal_kind,
 	input             eac_is_movesr,
 	input             eac_is_movec,
 	input             eac_is_rts,
@@ -785,8 +787,14 @@ wire eac_is_divzero = divzero_now || exc_pend_divzero;
 wire signed [15:0] chk_value = operand_b[15:0];
 wire [31:0]        chk_src   = eac_is_mem_src ? mem_lane : operand_a;
 wire signed [15:0] chk_bound = chk_src[15:0];
-wire chk_negative = chk_value < 16'sd0;
-wire chk_over     = chk_value > chk_bound;
+// CHK.L compares the full 32 bits (milestone 111). The word form's operands
+// are the low halves, sign-extended by their own reads; the long form's are
+// the registers themselves.
+wire signed [31:0] chk_value_l = operand_b;
+wire signed [31:0] chk_bound_l = chk_src;
+wire chk_long     = eac_chk_long;
+wire chk_negative = chk_long ? (chk_value_l < 32'sd0) : (chk_value < 16'sd0);
+wire chk_over     = chk_long ? (chk_value_l > chk_bound_l) : (chk_value > chk_bound);
 wire chk_now = eac_valid && eac_is_chk &&
                (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                (chk_negative || chk_over);
@@ -1396,7 +1404,14 @@ wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the 
 // legitimately be both (milestone 109).
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_addrerr ? 8'd3 :
-                              eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
+                              // 10 A-line, 11 F-line, 4 illegal -- literals
+                              // like every other vector in this mux, because
+                              // AP040_VEC_* lives in rtl/ap040's defs and the
+                              // bench build does not include that directory.
+                              eac_is_illegal ? (eac_illegal_kind == 2'd1 ? 8'd10 :
+                                                eac_illegal_kind == 2'd2 ? 8'd11 :
+                                                                           8'd4) :
+                              eac_is_priv ? 8'd8 :
                               eac_is_divzero ? 8'd5 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :

@@ -316,6 +316,10 @@ module ap040_decode
 	output reg        id_st_disp,
 	output reg        id_is_trapcc,
 	output reg        id_is_chk,
+	// CHK.L rather than CHK.W. Not derivable downstream: id_size is Long for
+	// BOTH forms because the word read is forced through id_sxt_w instead,
+	// and the gathered CHK #imm sets neither.
+	output reg        id_chk_long,
 	output reg        id_is_immsr,
 	output reg        id_is_stop,
 	output reg        id_immsr_to_sr,
@@ -336,6 +340,11 @@ module ap040_decode
 	output reg        id_is_jsr,
 	output reg        id_is_trap,
 	output reg        id_is_illegal,
+	// Which unimplemented-opcode vector this is: 0 illegal (4), 1 A-line
+	// (10), 2 F-line (11). ap040_core.v:6318 raises A-line with the same
+	// format-0 frame and stacked PC an illegal instruction gets, so the
+	// whole path is shared and only the vector number differs.
+	output reg  [1:0] id_illegal_kind,
 	output reg        id_is_movesr,
 	output reg        id_is_movec,
 	output reg        id_is_rts,
@@ -1437,6 +1446,14 @@ wire is_lea_pcrel = lea_shape && ea_pcrel_mode;
 // the STACKED SR rather than the live one, which is what the handler
 // actually observes. In the non-trapping case the 68k leaves N, Z, V and C
 // undefined; this core leaves them unchanged.
+// CHK.W is opmode 110 and CHK.L, which the 68020 added, is opmode 100.
+// Only the word form was decoded -- 131,280 corpus rounds (milestone 111).
+wire chk_is_long = (if_opcode[8:6] == 3'b100);
+// ...and CHK.L is NOT enabled yet. The decode and the size-aware comparison
+// are in place and plumbed (eac_chk_long), but turning it on trades 131,280
+// undecoded rounds for 4,860 that decode and compute the wrong answer, which
+// is the wrong direction. The gathered CHK #imm forms are where it goes
+// wrong. Flip the opmode 100 term back on once that is understood.
 wire chk_shape = (if_opcode[15:12] == 4'b0100) && (if_opcode[8:6] == 3'b110);
 wire is_chk     = chk_shape && ((if_opcode[5:3] == 3'b000) || (if_opcode[5:3] == 3'b010) ||
                                 (if_opcode[5:3] == 3'b011) || (if_opcode[5:3] == 3'b100));
@@ -1812,6 +1829,8 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
+wire is_aline = (if_opcode[15:12] == 4'hA);
+wire is_fline = (if_opcode[15:12] == 4'hF);
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
@@ -1898,6 +1917,7 @@ reg         held_lea_push;      // this LEA-shaped form pushes instead of writin
 reg         held_is_trapcc;     // TRAPcc.W / TRAPcc.L: the immediate is ignored
 reg         held_is_link;       // the tenth kind: LINK An,#d16
 reg         held_imm_chk;       // this immediate form is a CHK bound
+reg         held_imm_chk_l;     // ...and it is the Long form
 reg         held_is_immsr;      // ORI/ANDI/EORI to CCR or SR
 reg         held_immsr_sr;      // ...to SR rather than CCR
 reg         held_imm_ccr;       // does this immediate form set condition codes?
@@ -2003,6 +2023,7 @@ always @(posedge clk) begin
 		id_st_disp      <= 1'b0;
 		id_is_trapcc    <= 1'b0;
 		id_is_chk       <= 1'b0;
+		id_chk_long     <= 1'b0;
 		id_is_immsr     <= 1'b0;
 		id_is_stop      <= 1'b0;
 		id_immsr_to_sr  <= 1'b0;
@@ -2023,6 +2044,7 @@ always @(posedge clk) begin
 		id_is_jsr       <= 1'b0;
 		id_is_trap      <= 1'b0;
 		id_is_illegal   <= 1'b0;
+		id_illegal_kind <= 2'd0;
 		id_is_movesr    <= 1'b0;
 		id_is_movec     <= 1'b0;
 		id_is_rts       <= 1'b0;
@@ -2069,6 +2091,7 @@ always @(posedge clk) begin
 		held_is_jmp     <= 1'b0;
 		held_is_lea     <= 1'b0;
 		held_imm_chk    <= 1'b0;
+		held_imm_chk_l  <= 1'b0;
 		held_is_immsr   <= 1'b0;
 		held_immsr_sr   <= 1'b0;
 		held_imm_ccr    <= 1'b0;
@@ -2276,6 +2299,7 @@ always @(posedge clk) begin
 					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_pea       <= (held_is_lea && held_lea_push) || (held_is_abs && held_abs_push);
 					id_is_chk       <= held_is_imm && held_imm_chk;
+					id_chk_long     <= held_is_imm && held_imm_chk_l;
 					id_is_trapcc    <= held_is_trapcc;
 					id_is_immsr     <= held_is_immsr;
 					id_immsr_to_sr  <= held_immsr_sr;
@@ -2295,6 +2319,7 @@ always @(posedge clk) begin
 					id_is_jsr       <= held_is_jsr || (held_is_abs && held_abs_jsr);
 					id_is_trap      <= 1'b0;
 					id_is_illegal   <= movec_illegal_gather;
+					id_illegal_kind <= 2'd0;
 					id_is_movesr    <= 1'b0;
 					id_is_movec     <= held_is_movec && !movec_illegal_gather;
 					id_is_rts       <= 1'b0;
@@ -2342,6 +2367,7 @@ always @(posedge clk) begin
 				held_imm_mem_pi  <= is_immmem_pi;
 				held_imm_mem_pd  <= is_immmem_pd;
 				held_imm_chk     <= is_chk_imm;
+				held_imm_chk_l   <= is_chk_imm && chk_is_long;
 				held_is_immsr    <= is_immsr || is_stop;
 				held_immsr_sr    <= is_immsr_sr || is_stop;
 				held_is_stop     <= is_stop;
@@ -2575,6 +2601,7 @@ always @(posedge clk) begin
 				id_is_lea       <= if_valid && is_lea_an;
 				id_is_pea       <= if_valid && is_pea_an;
 				id_is_chk       <= if_valid && is_chk;
+				id_chk_long     <= if_valid && is_chk && chk_is_long;
 				id_is_trapcc    <= if_valid && is_trapcc;
 				id_is_immsr     <= 1'b0;
 				id_is_stop      <= 1'b0;
@@ -2584,7 +2611,9 @@ always @(posedge clk) begin
 				// Long for the ALU and the writeback; Word for the memory read
 				// and the autoincrement step. See the header above for why the
 				// sign extension it also implies does not make MULU signed.
-				id_sxt_w        <= if_valid && (is_adda_w || is_mul || is_div || is_chk);
+				// CHK.L reads a full longword and sign-extends nothing.
+				id_sxt_w        <= if_valid && (is_adda_w || is_mul || is_div ||
+				                               (is_chk && !chk_is_long));
 				// Scc to memory rides the read-modify-write store path
 				// (milestone 107): its byte is not known until EX, where the
 				// condition is evaluated, so it cannot use the EA-fetch
@@ -2612,6 +2641,7 @@ always @(posedge clk) begin
 				id_is_jsr       <= if_valid && is_jsr_an;
 				id_is_trap      <= if_valid && is_trap;
 				id_is_illegal   <= if_valid && is_illegal;
+				id_illegal_kind <= is_aline ? 2'd1 : is_fline ? 2'd2 : 2'd0;
 				id_is_movesr    <= if_valid && is_movesr;
 				id_is_movec     <= 1'b0;   // MOVEC never reaches this branch -- it always gathers
 				id_is_rts       <= if_valid && is_rts;

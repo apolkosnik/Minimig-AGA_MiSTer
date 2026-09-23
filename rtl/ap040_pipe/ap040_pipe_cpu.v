@@ -257,7 +257,9 @@ wire        id_is_lea, id_sxt_w, id_is_rmw, id_immrmw, id_st_disp, id_is_link, i
 wire        id_is_movem, id_movem_dir, id_movem_word, id_movem_down, id_movem_wb, id_movem_pcrel, id_movem_abs;
 wire [15:0] id_movem_mask, eac_movem_mask;
 wire        id_is_div, id_div_signed;
+wire        id_chk_long, eac_chk_long;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
+wire  [1:0] id_illegal_kind, eac_illegal_kind;
 wire        id_is_movesr, id_is_movec;
 wire        id_is_rts, id_is_rte, id_is_nop;
 wire  [3:0] id_cond;
@@ -736,6 +738,7 @@ ap040_decode u_id
 	.id_is_rmw       (id_is_rmw),
 	.id_immrmw       (id_immrmw),
 	.id_st_disp      (id_st_disp),
+	.id_chk_long     (id_chk_long),
 	.id_is_chk       (id_is_chk),
 	.id_is_trapcc    (id_is_trapcc),
 	.id_is_immsr     (id_is_immsr),
@@ -758,6 +761,7 @@ ap040_decode u_id
 	.id_is_jsr       (id_is_jsr),
 	.id_is_trap      (id_is_trap),
 	.id_is_illegal   (id_is_illegal),
+	.id_illegal_kind (id_illegal_kind),
 	.id_is_movesr    (id_is_movesr),
 	.id_is_movec     (id_is_movec),
 	.id_is_rts       (id_is_rts),
@@ -803,6 +807,7 @@ ap040_ea_calc u_eac
 	.id_is_rmw        (id_is_rmw),
 	.id_immrmw        (id_immrmw),
 	.id_st_disp       (id_st_disp),
+	.id_chk_long      (id_chk_long),
 	.id_is_chk        (id_is_chk),
 	.id_is_trapcc     (id_is_trapcc),
 	.id_is_immsr      (id_is_immsr),
@@ -825,6 +830,7 @@ ap040_ea_calc u_eac
 	.id_is_jsr        (id_is_jsr),
 	.id_is_trap       (id_is_trap),
 	.id_is_illegal    (id_is_illegal),
+	.id_illegal_kind  (id_illegal_kind),
 	.id_is_movesr     (id_is_movesr),
 	.id_is_movec      (id_is_movec),
 	.id_is_rts        (id_is_rts),
@@ -863,6 +869,7 @@ ap040_ea_calc u_eac
 	.eac_st_disp      (eac_st_disp),
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
+	.eac_chk_long     (eac_chk_long),
 	.eac_is_chk       (eac_is_chk),
 	.eac_is_trapcc    (eac_is_trapcc),
 	.eac_is_immsr     (eac_is_immsr),
@@ -885,6 +892,7 @@ ap040_ea_calc u_eac
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
 	.eac_is_illegal   (eac_is_illegal),
+	.eac_illegal_kind (eac_illegal_kind),
 	.eac_is_movesr    (eac_is_movesr),
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
@@ -932,6 +940,7 @@ ap040_ea_fetch #(
 	.eac_st_disp      (eac_st_disp),
 	.eac_ea_indexed   (eac_ea_indexed),
 	.eac_ea_pcrel     (eac_ea_pcrel),
+	.eac_chk_long     (eac_chk_long),
 	.eac_is_chk       (eac_is_chk),
 	.eac_is_trapcc    (eac_is_trapcc),
 	.eac_is_immsr     (eac_is_immsr),
@@ -974,6 +983,7 @@ ap040_ea_fetch #(
 	.eac_is_jsr       (eac_is_jsr),
 	.eac_is_trap      (eac_is_trap),
 	.eac_is_illegal   (eac_is_illegal),
+	.eac_illegal_kind (eac_illegal_kind),
 	.eac_is_movesr    (eac_is_movesr),
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
