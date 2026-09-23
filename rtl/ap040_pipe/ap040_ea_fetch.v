@@ -641,7 +641,7 @@ wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_ta
 // cycle the instruction falls through to the ordinary completion path
 // below, which writes An through the second port via an_wr_*.
 wire mvm_fin   = mvm_active && !mvm_any && !mvm_rd_pend;
-wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin && !trace_hold;
+wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin && !trace_hold && !ae_busy;
 
 assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
 assign rf3_addr = mvm_rd_reg;
@@ -720,6 +720,7 @@ wire rte_odd_now     = live && eac_is_rte && !eac_is_priv && !trace_hold &&
                        ret_pending && l1_rvalid_b && (ret_ph == RET_BEAT1_E) &&
                        rte_fmt_now_ok && rte_pc_now[0];
 reg        ae_arm;
+reg        ae_susp;
 reg [31:0] ae_pc_r;    // the RTE's own address, which the frame's PC field carries
 reg [31:0] ae_tgt_r;   // the odd address it tried to return to
 // Division by zero (milestone 52). Detected here rather than in
@@ -841,6 +842,15 @@ wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 // one's address. A TRAP then stacked the wrong return address, and
 // returning from it would have run the TRAP again.
 wire ae_hold         = eac_valid && ae_arm;
+// ae_arm is the DETECTION window and it is too short to suppress anything
+// with: it clears on ae_take, and the frame writes, the vector read and the
+// redirect all happen after that. ae_susp is the whole window, from the odd
+// RTE that arms the fault to the vector read that ends its entry, and it is
+// what the held instruction's memory and side effects are gated on
+// (milestone 109). It is deliberately NOT folded into own_exc: own_exc has
+// to be TRUE when the deferred entry retires, because the exception branch
+// latches eaf_is_addrerr <= eac_is_addrerr && own_exc.
+wire ae_busy         = eac_valid && ae_susp;
 wire ae_take         = ae_hold && !eaf_valid && !wb_busy && !stall_in;
 wire addrerr_now     = (live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
                                  eac_is_rts_odd)) || ae_take;
@@ -944,7 +954,7 @@ wire creg_hazard  = live && ex_creg_sp && sp_read_a;
 // keeps the held instruction's requests off the memory while it waits.
 wire stall_self = stall_in || creg_hazard;
 
-wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold;
+wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold && !ae_busy;
 // ...unless this instruction has just turned out to be an exception. For a
 // memory-source fault the value that CAUSES the fault is the one the load
 // just returned, so both conditions are true in the same cycle -- and the
@@ -964,7 +974,7 @@ wire mem_complete = mem_pending && l1_rvalid_b && !exc_active;
 // INSTRUCTION FETCH at the odd target, not on the call itself.
 wire eac_is_push  = ((eac_is_bsr && !eac_is_br_odd) ||
                      (eac_is_jsr && !eac_is_jsr_odd) ||
-                     eac_is_link || eac_is_pea) && !trace_hold;
+                     eac_is_link || eac_is_pea) && !trace_hold && !ae_busy;
 wire wr_stall     = live && (eac_is_push || store_now) && (l1_wr_busy || port_taken);
 
 // TRAP #n / illegal instruction exception entry -- see header. exc_ph
@@ -1045,7 +1055,7 @@ reg  trace_arm_cond;
 // eac_is_store outranks exc_writing in l1_addr_word and st_be assumes the
 // store's size, so without this the frame's beats went to the store's
 // address with the store's lanes.
-wire store_now    = eac_is_store && !trace_hold;
+wire store_now    = eac_is_store && !trace_hold && !ae_busy;
 
 // ae_take sits beside eac_is_trace and OUTSIDE own_exc for the same reason
 // the trace does: both fire while the instruction behind the completed one
@@ -1327,9 +1337,17 @@ wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the 
                                                                  : addrerr_pc_live) :
                               (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc
                                                                                : eac_next_pc;
+// The address error is tested BEFORE illegal and privilege, which is the
+// order exc_pc_field above has always used. With it the other way round a
+// deferred RTE fault started an entry and then took its VECTOR from the
+// held instruction it had just suppressed: an ILLEGAL at the odd target
+// stacked vector 4, and a privileged opcode after a return to user mode
+// stacked vector 8, both with the address error's own PC and address
+// fields. rte_odd_now already excludes eac_is_priv, so no instruction can
+// legitimately be both (milestone 109).
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
-                              eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_addrerr ? 8'd3 :
+                              eac_is_illegal ? 8'd4 : eac_is_priv ? 8'd8 :
                               eac_is_divzero ? 8'd5 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
@@ -1515,6 +1533,7 @@ always @(posedge clk) begin
 		exc_pend_ae_target <= 32'd0;
 		exc_pend_ae_pc     <= 32'd0;
 		ae_arm             <= 1'b0;
+		ae_susp            <= 1'b0;
 		ae_pc_r            <= 32'd0;
 		ae_tgt_r           <= 32'd0;
 		exc_pend_chk     <= 1'b0;
@@ -1588,6 +1607,11 @@ always @(posedge clk) begin
 			exc_pend_ae_target <= addrerr_live;
 			exc_pend_ae_pc     <= addrerr_pc_live;
 		end
+
+		// Cleared where exc_pend_addrerr is, because that is when the entry
+		// this window exists for has finished reading its vector.
+		if (exc_vec_done && !stall_in) ae_susp <= 1'b0;
+		else if (rte_odd_now)          ae_susp <= 1'b1;
 
 		if (exc_vec_done && !stall_in) exc_pend_chk <= 1'b0;
 		else if (chk_now && !exc_go) begin
@@ -1781,7 +1805,20 @@ always @(posedge clk) begin
 				// it into the trace entry (exc_writing, above in this chain
 				// on the next pass).
 				eaf_valid       <= 1'b0;
-			end else if (eac_valid && eac_is_movem && !mvm_fin && !trace_hold) begin
+			end else if (ae_busy && !exc_active) begin
+				// The same thing for the instruction at an odd RTE target,
+				// which never had it (milestone 109). Without this branch it
+				// simply RETIRED: the deferred address error suppressed its
+				// exception trigger through own_exc and nothing else, so its
+				// store went out, its MOVEM ran the sequencer, its register
+				// writes committed, and ae_take merely waited a cycle for
+				// eaf_valid to drop before entering on top of the damage.
+				// Parking it here is what makes the whole instruction not
+				// happen; the !ae_busy gates on store_now, mem_issue and
+				// eac_is_push above stop the REQUESTS, which are driven off
+				// eac_* and do not care which branch this chain takes.
+				eaf_valid       <= 1'b0;
+			end else if (eac_valid && eac_is_movem && !mvm_fin && !trace_hold && !ae_busy) begin
 				// Start, then one beat per cycle. eac_* is frozen by
 				// mvm_stall throughout, so operand_a still reads An on the
 				// starting cycle, and the mask and base are latched once.
