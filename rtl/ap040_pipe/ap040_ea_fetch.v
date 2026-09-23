@@ -1067,6 +1067,11 @@ wire own_exc      = !trace_hold && !ae_hold;   // the held instruction's own fau
 // immediate-to-SR classification made STOP #$6715 with SR already $6715
 // push a vector-9 frame and run the handler.
 wire stop_t0_change = {eac_imm[15:12], eac_imm[10:8]} != {sr_in[15:12], sr_in[10:8]};
+// A TRACED stop does not stop: it raises vector 9 and the handler runs,
+// which is what ap040_core.v:6622 does before it ever reaches S_STOPPED.
+// Named once so both retire sites share it -- and so a mutation can reach
+// it, which two identical copies did not allow.
+wire stop_takes_hold = eac_is_stop && !traced_now;
 wire t0_flow_static = eac_is_bsr || eac_is_jmp || eac_is_jsr || eac_is_rts || eac_is_rte ||
                       eac_is_movesr ||
                       (eac_is_immsr && eac_immsr_to_sr && !eac_is_stop) ||
@@ -1739,10 +1744,7 @@ always @(posedge clk) begin
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_is_chk     <= 1'b0;
 				eaf_is_immsr   <= eac_is_immsr;
-				// A TRACED stop does not stop: it raises vector 9 and the
-				// handler runs, which is what ap040_core.v:6622 does before
-				// it ever reaches S_STOPPED (milestone 110).
-				eaf_is_stop    <= eac_is_stop && !traced_now;
+				eaf_is_stop    <= stop_takes_hold;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_trapcc  <= 1'b0;
@@ -2176,10 +2178,7 @@ always @(posedge clk) begin
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
-				// A TRACED stop does not stop: it raises vector 9 and the
-				// handler runs, which is what ap040_core.v:6622 does before
-				// it ever reaches S_STOPPED (milestone 110).
-				eaf_is_stop    <= eac_is_stop && !traced_now;
+				eaf_is_stop    <= stop_takes_hold;
 				eaf_is_chk     <= 1'b0;
 				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
