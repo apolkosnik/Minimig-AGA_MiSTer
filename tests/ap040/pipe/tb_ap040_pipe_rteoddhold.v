@@ -71,7 +71,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d3, dbg_d4;
+wire [31:0] dbg_d0, dbg_d3, dbg_d4;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -87,7 +87,7 @@ ap040_pipe_core #(
 	.dbg_eaf_valid(dbg_eaf_valid), .dbg_eaf_pc(dbg_eaf_pc),
 	.dbg_ex_valid (dbg_ex_valid),  .dbg_ex_pc (dbg_ex_pc),
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
-	.dbg_d3 (dbg_d3), .dbg_d4 (dbg_d4), .dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr)
+	.dbg_d0 (dbg_d0), .dbg_d3 (dbg_d3), .dbg_d4 (dbg_d4), .dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr)
 );
 
 integer errors = 0;
@@ -172,6 +172,11 @@ initial begin
 
 	// ...nor its postincrement, which is what proves the instruction did not
 	// merely have its memory request suppressed but never ran at all.
+	if (dbg_d0 !== 32'h1122_3344) begin
+		errors = errors + 1;
+		$display("FAIL: D0 = %h, expected 11223344 (suppressing the store also swings an_wr_reg from the destination An to the SOURCE register, so a retiring target writes its address update into D0)",
+		         dbg_d0);
+	end
 	if (dut.u_cpu.u_regfile.areg[0] !== 32'h0000_0800) begin
 		errors = errors + 1;
 		$display("FAIL: A0 = %h, expected 00000800 (the (A0)+ at the odd target must not step; 00000804 means the instruction retired with its store gated)",
