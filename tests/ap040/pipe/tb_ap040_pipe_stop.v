@@ -27,9 +27,13 @@
 // SR write happened first it reads $2700 instead, and the privilege check   //
 // would be running after the damage.                                       //
 //                                                                          //
-// D5 is what proves the second. The MOVEQ after the supervisor STOP must    //
-// never execute; a core that loaded SR and carried on would pass every      //
-// value check here and fail only this one.                                  //
+// D5 is what proves the second, and the branch after it is why the proof    //
+// holds. A single poison instruction is not enough: a mutation removing the //
+// fetch stall left this bench passing, because the flush killed that one    //
+// instruction and the core then ran on to a terminal BRA.B -2 and span      //
+// there -- "flushed once" reading exactly like "stopped". The poison now    //
+// ends in BRA.B -4, back to itself, so a machine that is still issuing      //
+// anything at all executes it. Only a stopped one leaves D5 at zero.        //
 //                                                                          //
 // This core has no interrupt input, so "stops until an interrupt" is        //
 // "stops until reset". That is the correct behaviour for a machine with     //
@@ -113,7 +117,7 @@ initial begin
 	dut.u_l1.mem[386] = 16'h4E72;  // STOP #$2500     supervisor: load SR, stop
 	dut.u_l1.mem[387] = 16'h2500;
 	dut.u_l1.mem[388] = 16'h7A66;  // MOVEQ #$66,D5 (poison: must NOT run)
-	dut.u_l1.mem[389] = 16'h60FE;  // BRA.B -2
+	dut.u_l1.mem[389] = 16'h60FC;  // BRA.B -4  -- back to the poison, forever
 
 	// Vector 8 (privilege violation) -> $700.
 	dut.u_l1.mem[3600] = 16'h0000;
