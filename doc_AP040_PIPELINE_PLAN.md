@@ -1688,6 +1688,87 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Milestone 106: a bench that passed, and the defect it found anyway
+
+   The worklist milestone 105 produced put "executed and wrong" ahead of
+   "not decoded" -- a missing instruction faults loudly, a wrong answer
+   corrupts silently -- and its largest entry was CHK.W: 5,668 rounds, every
+   one an opcode with A7 as the EA register (459f, 45a7, 479f, 47a7), every
+   one reading the ORIGINAL A7 back where the oracle expects the
+   postincrement. `tb_ap040_pipe_faultpi.v` already proves that shape with
+   DIVU.W and passes, so the difference had to be that CHK's fault is
+   decided later: `chk_now` needs the loaded BOUND, so it is qualified by
+   `mem_pending && l1_rvalid_b` and deferred through `exc_pend_chk`.
+
+   `tb_ap040_pipe_chkpia7.v` was written to reproduce that. **It passed on
+   the RTL it was written to fail on**, which is the whole milestone. The
+   core was right and the corpus driver was wrong, for the third time in two
+   milestones and in the same family as the other two.
+
+   The driver ended an exception round one cycle after `exc_go`. That is the
+   cycle the fault's VERDICT registers, not the cycle its consequences land.
+   Traced on Basic/CHK.W/0002, the entry needs 35 more: the frame is pushed
+   over the 16-bit bus, the vector read, A7 given the new stack pointer, and
+   the faulting instruction's own (A7)+ written back. At +1 none of it has
+   happened and the register file still holds the round's input; at +35
+   `usp=43800402` and `isp=438007f4`, both exactly what the oracle asked
+   for. The sequential driver waits two qualified cycles for this same
+   hazard and says so in a comment; one cycle is that comment's translation
+   to a machine where the entry is itself a multi-cycle instruction.
+
+   The entry retires under the FAULTING INSTRUCTION'S OWN PC, so the
+   boundary already used for completed rounds covers both kinds and the
+   early exit is simply deleted. The entry-time register snapshot goes with
+   it -- registers are read live, since nothing younger has committed -- and
+   the vector, stacked SR and new SP are still sampled at entry, those being
+   the frame's own latched fields.
+
+   That also broke the census, which keyed "never decoded" off "nothing
+   committed": once rounds ran long enough, the illegal-instruction ENTRY
+   commits like any other instruction. It now reads the core's own
+   `eac_is_illegal` while the tested instruction is in the EA stage, which
+   is the fact itself rather than a proxy for it.
+
+   **The core defect this milestone does fix is JMP.** The absolute EA forms
+   all ride `held_is_abs`, and four sub-kinds say what becomes of the
+   gathered address: `held_abs_lea` delivers it to An, `held_abs_push`
+   pushes it, `held_abs_jsr` pushes a return address, `held_abs_jmp` only
+   branches. `id_writes_ccr` excludes all four. `id_writes_reg` excluded
+   three, and a JMP is not an ALU operation, so `!held_abs_alu` made the
+   term true for free. The register it wrote is not arbitrary: the absolute
+   path takes its destination from the opcode's bits [11:9], and JMP fixes
+   those at 111, so both forms wrote the target address into D7.
+
+   | run | result |
+   |---|---|
+   | control: `tb_ap040_pipe_chkpia7` | PASSES on the prior RTL -- a regression guard, not a control, and the reason the CHK failure was traced to the driver |
+   | control: `tb_ap040_pipe_jmpabs` | FAILS on the prior RTL, `D7 = 00000600` |
+   | mutation: `!held_abs_jmp` removed | caught, `D7 = 00000600` |
+   | mutation: absolute JMP stops branching | caught, D3/D4 zero and the poison ran |
+   | mutation: exclusion moved to `held_abs_push` | **NOT caught at first** -- see below; caught after the bench grew |
+   | corpus: Basic/JMP, both slices | 1,280 wrong rounds -> 0, 4,080 judged |
+   | corpus: Basic/CHK.W | 5,668 wrong rounds -> 1,652 |
+   | corpus: all 658 Basic slices | 177/658 slices, wrong rounds 10,460 -> 5,164 |
+   | bench suite, four build modes | 122/122 each |
+   | fit at 25 ns | +1.344 ns, Fmax 42.27 MHz, 6,022 ALMs (was +0.704 ns; 0.64 ns is the placement band, so: no regression) |
+
+   **The third mutation is the one worth keeping.** Moving the exclusion
+   from `held_abs_jmp` to `held_abs_push` -- an over-reaching version of
+   exactly this fix -- left `tb_ap040_pipe_pea`, `_jsr` and `_lea` all
+   passing. Nothing in the suite covered the absolute PEA's A7 write, so a
+   fix that broke PEA instead of fixing JMP would have gone in green.
+   `tb_ap040_pipe_jmpabs.v` now runs PEA (xxx).L and JSR (xxx).L beside the
+   two JMPs and does catch it. The rule: **when a fix is an EXCLUSION from a
+   shared term, mutate the exclusion onto its siblings, because that is the
+   way this kind of fix fails.**
+
+   What is left of the executed-and-wrong list, 5,164 rounds in 9 families:
+   CHK.W 1,652 in its `-(A7)` and immediate forms (`43bc`, `41a7` -- the
+   `(A7)+` cases are gone), ADDA/SUBA .L/.W 624 each where the EA register
+   is also the destination (`dfdf` is ADDA.L (A7)+,A7), NEGX.L/W/B 992 in
+   their memory forms, MOVEC2 24. The not-decoded column is untouched at
+   7,674,801 rounds and remains the larger job.
+
    ### Milestone 105: the corpus at scale, and two driver bugs between it and the truth
 
    The stack-pointer pattern milestone 104 left open was the driver's, not
