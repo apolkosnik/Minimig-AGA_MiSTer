@@ -134,6 +134,7 @@ module ap040_execute
 	input             eaf_is_trace,
 	input             eaf_is_chk,
 	input             eaf_is_immsr,
+	input             eaf_is_stop,
 	input             eaf_immsr_to_sr,
 	input             eaf_is_pea,
 	input             eaf_is_link,
@@ -600,7 +601,12 @@ wire [15:0] immsr_imm = eaf_operand_a[15:0];
 wire  [7:0] immsr_ccr = (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot[7:0] & immsr_imm[7:0]) :
                         (eaf_alu_op == `AP040_ALU_EOR) ? (eaf_sr_snapshot[7:0] ^ immsr_imm[7:0]) :
                                                          (eaf_sr_snapshot[7:0] | immsr_imm[7:0]);
-wire [15:0] immsr_full = (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot & immsr_imm) :
+// STOP (milestone 108) REPLACES the SR rather than combining with it, which
+// is the one thing separating it from ORI/ANDI/EORI-to-SR on this path. It
+// arrives as ALU_MOVE, and without a case of its own it fell into the OR
+// default and left the old SR's bits standing.
+wire [15:0] immsr_full = (eaf_alu_op == `AP040_ALU_MOVE) ? immsr_imm :
+                         (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot & immsr_imm) :
                          (eaf_alu_op == `AP040_ALU_EOR) ? (eaf_sr_snapshot ^ immsr_imm) :
                                                           (eaf_sr_snapshot | immsr_imm);
 wire [15:0] immsr_result = eaf_immsr_to_sr ? immsr_full

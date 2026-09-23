@@ -303,6 +303,7 @@ module ap040_ea_fetch
 	input             eac_is_trapcc,
 	input             eac_is_chk,
 	input             eac_is_immsr,
+	input             eac_is_stop,
 	input             eac_immsr_to_sr,
 	input             eac_is_pea,
 	input             eac_is_link,
@@ -427,6 +428,7 @@ module ap040_ea_fetch
 	output reg        eaf_is_trapcc,
 	output reg        eaf_is_chk,
 	output reg        eaf_is_immsr,
+	output reg        eaf_is_stop,
 	output reg        eaf_immsr_to_sr,
 	output reg        eaf_is_pea,
 	output reg        eaf_is_link,
@@ -1487,6 +1489,7 @@ always @(posedge clk) begin
 		eaf_is_chk     <= 1'b0;
 		eaf_is_trapcc     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
+		eaf_is_stop    <= 1'b0;
 		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
 		eaf_is_link    <= 1'b0;
@@ -1686,6 +1689,7 @@ always @(posedge clk) begin
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_is_chk     <= 1'b0;
 				eaf_is_immsr   <= eac_is_immsr;
+				eaf_is_stop    <= eac_is_stop;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_trapcc  <= 1'b0;
@@ -1925,6 +1929,7 @@ always @(posedge clk) begin
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
+				eaf_is_stop    <= 1'b0;
 				eaf_is_chk     <= eac_is_chk_trap && own_exc;
 				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
 				eaf_is_div     <= 1'b0;
@@ -2049,6 +2054,7 @@ always @(posedge clk) begin
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
+				eaf_is_stop     <= 1'b0;
 				eaf_is_chk      <= 1'b0;
 				eaf_is_trapcc      <= 1'b0;
 				eaf_is_div      <= 1'b0;
@@ -2117,6 +2123,7 @@ always @(posedge clk) begin
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
+				eaf_is_stop    <= eac_is_stop;
 				eaf_is_chk     <= 1'b0;
 				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;

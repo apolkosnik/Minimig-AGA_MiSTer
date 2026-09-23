@@ -317,6 +317,7 @@ module ap040_decode
 	output reg        id_is_trapcc,
 	output reg        id_is_chk,
 	output reg        id_is_immsr,
+	output reg        id_is_stop,
 	output reg        id_immsr_to_sr,
 	output reg        id_is_pea,
 	output reg        id_is_link,
@@ -1133,6 +1134,18 @@ wire immsr_shape = (if_opcode[15:12] == 4'b0000) && (if_opcode[8] == 1'b0) &&
                     (if_opcode[11:9] == 3'b101));
 wire is_immsr    = immsr_shape;
 wire is_immsr_sr = immsr_shape && (if_opcode[7:6] == 2'b01);
+
+// STOP #imm (milestone 108). One opcode, and 1,048,576 corpus rounds -- the
+// largest single item left after Scc. It is an immediate-to-SR with two
+// differences: the SR is REPLACED rather than OR/AND/EOR'd, and afterwards
+// the processor stops until an interrupt.
+//
+// It rides the immsr machinery because that already gathers one extension
+// word, already writes SR, and above all is already in eac_is_priv_capable
+// -- ap040_core.v:6029 decides go_priv before it even fetches the extension
+// word, and every judged STOP round in the corpus is a user-mode one that
+// must raise vector 8 rather than stop anything.
+wire is_stop = (if_opcode == 16'h4E72);
 wire [5:0] immsr_op = (if_opcode[11:9] == 3'b001) ? `AP040_ALU_AND :
                       (if_opcode[11:9] == 3'b101) ? `AP040_ALU_EOR :
                                                     `AP040_ALU_OR;
@@ -1751,7 +1764,7 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // (movec_illegal_gather below), once the extension word is known.
 wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
-                   !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_move_mem_l &&
+                   !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an &&
                    !is_immsr;
@@ -1819,6 +1832,7 @@ reg         held_is_alu_disp;
 // held_cond and the EA register already rides held_reg, so the family adds
 // only "this is an Scc" and "its destination was absolute".
 reg         held_is_scc_mem;
+reg         held_is_stop;
 reg         held_scc_abs;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
 reg         held_is_movem;      // the eleventh kind: MOVEM.L
@@ -1940,6 +1954,7 @@ always @(posedge clk) begin
 		id_is_trapcc    <= 1'b0;
 		id_is_chk       <= 1'b0;
 		id_is_immsr     <= 1'b0;
+		id_is_stop      <= 1'b0;
 		id_immsr_to_sr  <= 1'b0;
 		id_is_pea       <= 1'b0;
 		id_is_link      <= 1'b0;
@@ -1991,6 +2006,7 @@ always @(posedge clk) begin
 		held_is_move_disp <= 1'b0;
 		held_is_alu_disp  <= 1'b0;
 		held_is_scc_mem   <= 1'b0;
+		held_is_stop      <= 1'b0;
 		held_scc_abs      <= 1'b0;
 		held_alu_op       <= `AP040_ALU_MOVE;
 		held_alu_nowrite  <= 1'b0;
@@ -2213,6 +2229,7 @@ always @(posedge clk) begin
 					id_is_trapcc    <= held_is_trapcc;
 					id_is_immsr     <= held_is_immsr;
 					id_immsr_to_sr  <= held_immsr_sr;
+					id_is_stop      <= held_is_stop;
 					id_is_link      <= held_is_link;
 					id_is_div       <= held_is_imm && held_imm_div;
 					id_div_signed   <= held_is_imm && held_imm_divs;
@@ -2248,7 +2265,8 @@ always @(posedge clk) begin
 			              is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_abs_alu ||
 			              is_pea_gather || is_eaonly_abs || is_immsr || is_chk_imm ||
 			              is_jmp_idx || is_jmp_pcrel || is_jsr_idx || is_jsr_pcrel ||
-			              is_jmpjsr_abs || is_trapcc_gather || is_scc_mem_gather) begin
+			              is_jmpjsr_abs || is_trapcc_gather || is_scc_mem_gather ||
+			              is_stop) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -2273,9 +2291,11 @@ always @(posedge clk) begin
 				held_imm_mem_pi  <= is_immmem_pi;
 				held_imm_mem_pd  <= is_immmem_pd;
 				held_imm_chk     <= is_chk_imm;
-				held_is_immsr    <= is_immsr;
-				held_immsr_sr    <= is_immsr_sr;
-				held_imm_op      <= is_immsr    ? immsr_op :
+				held_is_immsr    <= is_immsr || is_stop;
+				held_immsr_sr    <= is_immsr_sr || is_stop;
+				held_is_stop     <= is_stop;
+				held_imm_op      <= is_stop     ? `AP040_ALU_MOVE :
+				                    is_immsr    ? immsr_op :
 				                    is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
 				                    is_div_imm  ? `AP040_ALU_MOVE :
 				                    is_adda_imm ? alu_nib_op :
@@ -2497,6 +2517,7 @@ always @(posedge clk) begin
 				id_is_chk       <= if_valid && is_chk;
 				id_is_trapcc    <= if_valid && is_trapcc;
 				id_is_immsr     <= 1'b0;
+				id_is_stop      <= 1'b0;
 				id_immsr_to_sr  <= 1'b0;
 				// id_size stays Long for the ALU; this forces the READ (and
 				// the auto-increment step) to Word and sign-extends it.

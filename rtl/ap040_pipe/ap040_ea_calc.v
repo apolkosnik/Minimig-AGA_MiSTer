@@ -114,6 +114,7 @@ module ap040_ea_calc
 	input             id_is_trapcc,
 	input             id_is_chk,
 	input             id_is_immsr,
+	input             id_is_stop,
 	input             id_immsr_to_sr,
 	input             id_is_pea,
 	input             id_is_link,
@@ -173,6 +174,7 @@ module ap040_ea_calc
 	output reg        eac_is_trapcc,
 	output reg        eac_is_chk,
 	output reg        eac_is_immsr,
+	output reg        eac_is_stop,
 	output reg        eac_immsr_to_sr,
 	output reg        eac_is_pea,
 	output reg        eac_is_link,
@@ -235,6 +237,7 @@ always @(posedge clk) begin
 		eac_is_trapcc    <= 1'b0;
 		eac_is_chk       <= 1'b0;
 		eac_is_immsr     <= 1'b0;
+		eac_is_stop      <= 1'b0;
 		eac_immsr_to_sr  <= 1'b0;
 		eac_is_pea       <= 1'b0;
 		eac_is_link      <= 1'b0;
@@ -295,6 +298,7 @@ always @(posedge clk) begin
 			eac_is_trapcc    <= id_is_trapcc;
 			eac_is_chk       <= id_is_chk;
 			eac_is_immsr     <= id_is_immsr;
+			eac_is_stop      <= id_is_stop;
 			eac_immsr_to_sr  <= id_immsr_to_sr;
 			eac_is_pea       <= id_is_pea;
 			eac_is_link      <= id_is_link;
