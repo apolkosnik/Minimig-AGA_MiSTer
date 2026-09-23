@@ -676,6 +676,20 @@ ap040_inst_fetch #(
 	.if_opcode (if_opcode)
 );
 
+// A stopped machine must present decode with NOTHING, not merely stop
+// fetching new words (milestone 110). if_valid is if_pend && l1_rvalid_a in
+// ap040_inst_fetch.v and does not consult stall_in at all, which only
+// blocks `advance` -- so holding the stall preserved a VALID word and decode
+// consumed it again and again. STOP's own flush even fetches one more word
+// on the way out, and that is the word that circulated: a MOVE.L D0,(A0)
+// tail posted 796 writes after the STOP, and an ADDQ tail counted D0 up
+// past 1590 retirements.
+//
+// Qualifying it here rather than inside the fetch stage keeps the fetch's
+// own PC and pending-read bookkeeping untouched, so an outstanding read
+// still completes and STOP's SR commit is unaffected.
+wire if_valid_id = if_valid && !stopped;
+
 ap040_decode u_id
 (
 	.clk             (clk),
@@ -684,7 +698,7 @@ ap040_decode u_id
 	.stall_in        (ea_stall),
 	.flush           (flush),
 
-	.if_valid        (if_valid),
+	.if_valid        (if_valid_id),
 	.if_pc           (if_pc),
 	.if_opcode       (if_opcode),
 

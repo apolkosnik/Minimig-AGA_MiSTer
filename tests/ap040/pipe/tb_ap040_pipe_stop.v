@@ -70,6 +70,7 @@ wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
 wire [31:0] dbg_d2, dbg_d3, dbg_d4, dbg_d5;
+wire [31:0] dbg_commits;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -90,7 +91,7 @@ ap040_pipe_core #(
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
 	.dbg_d2 (dbg_d2), .dbg_d3 (dbg_d3), .dbg_d4 (dbg_d4), .dbg_d5 (dbg_d5),
-	.dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr)
+	.dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr), .dbg_commits(dbg_commits)
 );
 
 integer errors = 0;
