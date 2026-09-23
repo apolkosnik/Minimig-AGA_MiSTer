@@ -538,7 +538,11 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
 assign ex_st_sup  = eaf_sr_snapshot[13];
 assign ex_st_addr = eaf_ea_target;
 assign ex_st_size = eaf_size;
-assign ex_st_data = alu_result;
+// Scc to memory (milestone 107) stores the condition byte, not an ALU
+// result: there is no ALU operation in an Scc at all. The register form
+// merges the same byte into the destination's low eight bits through
+// scc_merged below; the memory form is a plain byte store of it.
+assign ex_st_data = eaf_is_scc ? {24'd0, scc_fill[7:0]} : alu_result;
 
 wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_result[7:0]}  :
                         (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :
