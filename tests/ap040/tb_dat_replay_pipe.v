@@ -408,6 +408,11 @@ integer undec_cnt [0:65535];
 // are different milestones and want different benches.
 integer wrong_cnt [0:65535];
 integer undec_rounds, wrong_rounds, mism_at_round, drain;
+// "Never decoded" is the core's OWN verdict, sampled while the tested
+// instruction is in the EA stage -- not "nothing committed", which stopped
+// being true the moment the round ran long enough for the illegal-
+// instruction ENTRY to commit like any other instruction.
+reg saw_illegal;
 // +buswr follows one store from the CPU port through the membus to the bus.
 // Sampled once: $test$plusargs on every edge is not free.
 reg trace_bus;
@@ -436,13 +441,15 @@ reg        p_exc_go, cap_pend, cap_done;
 reg [7:0]  cap_vec;
 reg [15:0] cap_sr;
 reg [31:0] cap_sp;
-reg [31:0] cap_regs [0:15];
 integer    ci;
 
 always @(posedge clk) begin
 	if (!nreset || !round_active) begin
 		p_exc_go <= 0; cap_pend <= 0;
 	end else if (ce) begin
+		if (dbg_eac_valid && dbg_eac_pc == i_pc &&
+		    dut.u_cpu.u_eaf.eac_is_illegal)
+			saw_illegal <= 1'b1;
 		p_exc_go <= dut.u_cpu.u_eaf.exc_go;
 		if (dut.u_cpu.u_eaf.exc_go && !p_exc_go && !cap_done)
 			cap_pend <= 1;
@@ -452,10 +459,6 @@ always @(posedge clk) begin
 			cap_vec  <= dut.u_cpu.u_eaf.exc_vec_r;
 			cap_sr   <= dut.u_cpu.u_eaf.sr_faulted;
 			cap_sp   <= dut.u_cpu.u_eaf.exc_new_sp;
-			for (ci = 0; ci < 8; ci = ci + 1) begin
-				cap_regs[ci]   <= dut.u_cpu.u_regfile.dreg[ci];
-				cap_regs[8+ci] <= (ci == 7) ? final_a7() : dut.u_cpu.u_regfile.areg[ci];
-			end
 		end
 	end
 end
@@ -533,13 +536,20 @@ task check_final;
 		// judged on the live register file.
 		if (cap_done && cap_vec !== e_exc)
 			mismatch("exception vector", {24'd0, e_exc}, {24'd0, cap_vec});
+		// Live, for an exception round as much as a completed one: the
+		// round now stops at the entry's retirement, so everything the
+		// oracle names has committed and nothing younger has. A snapshot
+		// taken at entry time is the thing this replaced.
 		for (fi = 0; fi < 16; fi = fi + 1) begin
-			got = cap_done ? cap_regs[fi]
-			    : (fi < 8)  ? dut.u_cpu.u_regfile.dreg[fi]
+			got = (fi < 8)  ? dut.u_cpu.u_regfile.dreg[fi]
 			    : (fi < 15) ? dut.u_cpu.u_regfile.areg[fi-8]
 			                : final_a7();
-			if (got !== e_regs[fi])
+			if (got !== e_regs[fi]) begin
+				if (mism < report_lim)
+					$display("  reg detail: %0s%0d",
+					         fi < 8 ? "D" : "A", fi < 8 ? fi : fi - 8);
 				mismatch(fi < 8 ? "D register" : "A register", e_regs[fi], got);
+			end
 		end
 		got_sr = cap_done ? cap_sr : dbg_sr;
 		if (((got_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
@@ -557,8 +567,7 @@ task check_final;
 				mismatch("memory", em_v[fi], read_value(em_a[fi], em_sz[fi]));
 			end
 		if (mism > mism_at_round) begin
-			if (cap_done && cap_vec == 8'h04 &&
-			    (dbg_commits - commits_at_start) == 0) begin
+			if (saw_illegal) begin
 				undec_rounds = undec_rounds + 1;
 				undec_cnt[{rd8(i_pc), rd8(i_pc + 1)}] =
 					undec_cnt[{rd8(i_pc), rd8(i_pc + 1)}] + 1;
@@ -578,6 +587,7 @@ task run_round;
 	begin
 		ran = ran + 1;
 		cap_done = 0; cap_pend = 0; cap_vec = 8'hff; p_exc_go = 0;
+		saw_illegal = 0;
 		boot_pc = i_pc; boot_msp = i_msp; cur_pc = i_pc;
 		hold_fetch = 0; round_active = 1;
 		ce = 0;
@@ -604,8 +614,19 @@ task run_round;
 		// RETIRING -- the writeback stage naming its address -- or an
 		// exception entry being captured. A few cycles afterwards let its
 		// commits land before anything is read.
+		//
+		// An EXCEPTION round ends at the same place, and this used to stop
+		// it one cycle after exc_go instead. That is the cycle the fault's
+		// VERDICT registers, not the cycle its consequences land: the frame
+		// still has to be pushed over the bus, the vector read, A7 given the
+		// new stack pointer and the faulting instruction's own (An)+ written
+		// back. Measured on Basic/CHK.W/0002, that takes 35 more cycles, and
+		// stopping at +1 read A7 before the postincrement and the frame push
+		// had committed -- 5,668 rounds of CHK.W reporting a core that had
+		// done exactly the right thing. The entry RETIRES under the faulting
+		// instruction's own PC, so one condition covers both kinds of round.
 		timeout = 0;
-		while (timeout < EXEC_TIMEOUT && !(cap_done && !cap_pend) &&
+		while (timeout < EXEC_TIMEOUT &&
 		       !(dbg_wb_valid && dbg_wb_pc == i_pc && ce)) begin
 			@(posedge clk); timeout = timeout + 1;
 		end
@@ -748,7 +769,7 @@ initial begin
 	// be the same vacuous green this campaign has had to correct twice
 	// already.
 	if (undec_rounds != 0) begin
-		$display("pipe undecoded: %0d rounds took vector 4 with nothing committed", undec_rounds);
+		$display("pipe undecoded: %0d rounds the core never decoded", undec_rounds);
 		for (uo = 0; uo < 65536; uo = uo + 1)
 			if (undec_cnt[uo] != 0)
 				$display("UNDECODED %04x %0d", uo[15:0], undec_cnt[uo]);
