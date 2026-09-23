@@ -47,6 +47,14 @@
 // that came through as Word or Long would be invisible to the value checks  //
 // alone while corrupting the neighbour.                                     //
 //                                                                          //
+// The last instruction is ST with destination mode 7 register 5, which is   //
+// a RESERVED encoding and must stay an illegal instruction. That is what    //
+// ea_not_alt is actually for here: a mutation dropping it left DBcc and     //
+// TRAPcc working anyway, because their own decode wires win the ternary     //
+// chains, so the class predicate earns its place only on the reserved       //
+// mode-7 values. D4 is set by the vector-4 handler and is how this bench    //
+// knows the encoding was refused rather than quietly stored somewhere.      //
+//                                                                          //
 // A2 and A3 prove the autoincrement and autodecrement happened, and by how  //
 // much: one byte, not the two a Word access would step -- except that A7 is //
 // the register where a byte access steps by TWO on a real 68040, which is   //
@@ -57,7 +65,7 @@
 
 module tb_ap040_pipe_sccmem;
 
-localparam PROG_WORDS      = 40;
+localparam PROG_WORDS      = 200;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -78,7 +86,7 @@ wire        dbg_if_valid,  dbg_id_valid,  dbg_eac_valid;
 wire        dbg_eaf_valid, dbg_ex_valid,  dbg_wb_valid;
 wire [31:0] dbg_if_pc,     dbg_id_pc,     dbg_eac_pc;
 wire [31:0] dbg_eaf_pc,    dbg_ex_pc,     dbg_wb_pc;
-wire [31:0] dbg_d0, dbg_d3;
+wire [31:0] dbg_d0, dbg_d3, dbg_d4, dbg_d5;
 wire [15:0] dbg_sr;
 wire  [4:0] dbg_ccr;
 
@@ -98,7 +106,8 @@ ap040_pipe_core #(
 	.dbg_ex_valid (dbg_ex_valid),  .dbg_ex_pc (dbg_ex_pc),
 	.dbg_wb_valid (dbg_wb_valid),  .dbg_wb_pc (dbg_wb_pc),
 
-	.dbg_d0 (dbg_d0), .dbg_d3 (dbg_d3), .dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr)
+	.dbg_d0 (dbg_d0), .dbg_d3 (dbg_d3), .dbg_d4 (dbg_d4), .dbg_d5 (dbg_d5),
+	.dbg_sr(dbg_sr), .dbg_ccr(dbg_ccr)
 );
 
 integer errors = 0;
@@ -158,8 +167,21 @@ initial begin
 	dut.u_l1.mem[34] = 16'h50F9;   // ST  ($00000870).L    -> $870
 	dut.u_l1.mem[35] = 16'h0000;
 	dut.u_l1.mem[36] = 16'h0870;
-	dut.u_l1.mem[37] = 16'h767B;   // MOVEQ #$7B,D3  -- the stream resumed
-	dut.u_l1.mem[38] = 16'h60FE;   // BRA.B -2
+	dut.u_l1.mem[37] = 16'h2A0F;   // MOVE.L A7,D5  -- A7 before the trap below
+	dut.u_l1.mem[38] = 16'h767B;   // MOVEQ #$7B,D3  -- the stream resumed
+	dut.u_l1.mem[39] = 16'h50FD;   // ST <mode 7/5>  -- reserved, must be ILLEGAL
+	dut.u_l1.mem[40] = 16'h4E71;   // NOP
+	dut.u_l1.mem[41] = 16'h4E71;   // NOP
+	dut.u_l1.mem[42] = 16'h4E71;   // NOP
+	dut.u_l1.mem[43] = 16'h60FE;   // BRA.B -2  (reached only if it was not)
+
+	// Illegal-instruction handler @ word idx 384 (byte $700).
+	dut.u_l1.mem[384] = 16'h782C;  // MOVEQ #$2C,D4
+	dut.u_l1.mem[385] = 16'h60FE;  // BRA.B -2
+
+	// Vector 4 (illegal instruction) -> $700.
+	dut.u_l1.mem[3592] = 16'h0000;
+	dut.u_l1.mem[3593] = 16'h0700;
 
 	// The six target words, poisoned. $5A is neither a true nor a false Scc
 	// byte, so an absent store cannot look like a false one.
@@ -180,7 +202,7 @@ initial begin
 	repeat (2) @(posedge clk);
 	nreset = 1;
 
-	repeat ((PROG_WORDS + 200) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
+	repeat ((PROG_WORDS + 2000) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
 	chk_byte("ST  (A0)  -> $800", 512, 1, 8'hFF);
 	chk_byte("SF  (A2)+ -> $810", 520, 1, 8'h00);
@@ -205,6 +227,11 @@ initial begin
 	chk_byte("neighbour of $860", 560, 0, 8'h5A);
 	chk_byte("neighbour of $870", 568, 0, 8'h5A);
 
+	if (dbg_d4 !== 32'h0000_002C) begin
+		errors = errors + 1;
+		$display("FAIL: D4 = %h, expected 0000002c (ST with a reserved mode-7 destination must be an illegal instruction)",
+		         dbg_d4);
+	end
 	if (dbg_d3 !== 32'h0000_007B) begin
 		errors = errors + 1;
 		$display("FAIL: D3 = %h, expected 0000007b (the MOVEQ after ST ($870).L must run; a short gather executes the address half instead)",
@@ -220,10 +247,13 @@ initial begin
 		$display("FAIL: A3 = %h, expected 00000823 (-(A3) must step one BYTE before the store)",
 		         dut.u_cpu.u_regfile.areg[3]);
 	end
-	if (dut.u_cpu.u_regfile.isp !== 32'h0000_0900) begin
+	// A7 is captured into D5 by the mainline, BEFORE the deliberate illegal
+	// instruction below pushes a frame on it -- reading the live ISP at the
+	// end would only prove the handler's frame is eight bytes.
+	if (dbg_d5 !== 32'h0000_0900) begin
 		errors = errors + 1;
 		$display("FAIL: A7 = %h, expected 00000900 (ST (A7) must not disturb the stack pointer)",
-		         dut.u_cpu.u_regfile.isp);
+		         dbg_d5);
 	end
 
 	if (errors == 0)
