@@ -244,6 +244,13 @@ module ap040_execute
 	// comment. ap040_pipe_core.v broadcasts this as `flush` to ID/EA-calc/
 	// EA-fetch and redirects IF to ex_recovery_pc.
 	output            ex_mispredict,
+	// The broadcast flush: everything ex_mispredict causes a flush for, plus
+	// STOP, which discards younger work without redirecting anywhere
+	// (milestone 108). Computed HERE rather than OR'd onto ex_mispredict in
+	// ap040_pipe_cpu.v, because that put an extra level on a net feeding the
+	// enable of every register in EA-fetch and the fit lost 0.68 ns to it.
+	// Sharing this expression's own eaf_valid term costs nothing.
+	output            ex_flush,
 	output     [31:0] ex_recovery_pc,
 
 	output reg        exe_valid,
@@ -498,6 +505,9 @@ wire redirect_always = eaf_is_jmp || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
 assign ex_mispredict   = eaf_valid && ((eaf_is_branch && !cond_result) ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
                                         redirect_always);
+assign ex_flush        = eaf_valid && ((eaf_is_branch && !cond_result) ||
+                                        (eaf_is_dbcc   && !dbcc_branch_taken) ||
+                                        redirect_always || eaf_is_stop);
 assign ex_recovery_pc  = redirect_always ? eaf_operand_a : eaf_next_pc;
 
 wire [31:0] scc_fill   = {24'd0, {8{cond_result}}};

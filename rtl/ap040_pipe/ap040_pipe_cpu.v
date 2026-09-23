@@ -275,7 +275,7 @@ wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_immrmw, eac_st_disp, eac_is_l
 wire        eaf_is_trapcc, eaf_is_fmterr, eaf_is_trace;
 wire        eaf_is_chk;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
-wire        id_is_stop, eac_is_stop, eaf_is_stop;
+wire        id_is_stop, eac_is_stop, eaf_is_stop, ex_flush;
 wire        eaf_is_pea;
 wire        eac_is_movem, eac_movem_dir, eac_movem_word, eac_movem_down, eac_movem_wb, eac_movem_pcrel, eac_movem_abs, eac_is_div, eac_div_signed;
 wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
@@ -341,7 +341,7 @@ wire [31:0] final_redirect_pc    = ex_mispredict ? ex_recovery_pc : id_redirect_
 
 // Broadcast flush: discards whatever ID/EA-calc/EA-fetch are currently
 // holding, all speculatively advanced down the (wrong) assumed-taken guess.
-wire flush = ex_mispredict || stop_now;
+wire flush = ex_flush;
 
 // EA-fetch's regfile operand read ports.
 wire  [3:0] raddr_a, raddr_b, raddr_c;
@@ -411,7 +411,10 @@ wire commit_sr   = exe_valid && exe_fresh && exe_writes_sr;
 // Stalling the fetch is not enough on its own: by the time a STOP reaches
 // EX the four instructions behind it are already in ID, EA-calc and
 // EA-fetch, and they would commit. So the STOP flushes them exactly as a
-// mispredicted branch does, and the stall then keeps the fetch quiet. It is
+// mispredicted branch does -- through ap040_execute.v's ex_flush, which
+// folds it into the expression that already computes the mispredict flush
+// rather than adding a level here -- and the stall then keeps the fetch
+// quiet. It is
 // taken while the STOP is still IN ex, so the STOP itself completes and only
 // younger work is discarded.
 wire stop_now = eaf_valid && eaf_is_stop;
@@ -1121,6 +1124,7 @@ ap040_execute u_ex
 	.ex_sr_fwd_data   (ex_sr_fwd_data),
 
 	.ex_mispredict    (ex_mispredict),
+	.ex_flush         (ex_flush),
 	.ex_recovery_pc   (ex_recovery_pc),
 
 	.exe_valid        (exe_valid),
