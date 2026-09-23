@@ -559,8 +559,17 @@ wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
 // instruction autoincrements, so there is no contention. Hoisted here so
 // every branch below assigns the same three wires instead of repeating a
 // ternary that now has three cases.
-wire        an_wr_any  = an_write || (eac_valid && (eac_is_link || eac_is_unlk)) ||
-                         (mvm_fin && mvm_wb);
+// ...and not at all while a deferred address error owns the pipeline. The
+// held instruction is not the faulting one -- a faulting (A7)+ still has to
+// commit its own step, which is what milestone 92 is about -- so this is
+// gated on ae_busy rather than on an exception being under way at all.
+// Without it the ENTRY committed the suppressed instruction's address
+// update: the exception branch latches eaf_writes_an <= an_wr_any &&
+// own_exc, own_exc is true again by then, and gating store_now had already
+// swung an_wr_reg from the destination An to eac_src_reg -- so MOVE.L
+// D0,(A0)+ at an odd RTE target wrote $11223348 into D0.
+wire        an_wr_any  = (an_write || (eac_valid && (eac_is_link || eac_is_unlk)) ||
+                          (mvm_fin && mvm_wb)) && !ae_busy;
 wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          store_now ? eac_dest_reg : eac_src_reg;
