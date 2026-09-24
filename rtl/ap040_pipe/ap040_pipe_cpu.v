@@ -1301,7 +1301,12 @@ ap040_execute u_ex
 	.eaf_rte_sr_data  (eaf_rte_sr_data),
 	.eaf_cond         (eaf_cond),
 
-	.ccr_in           (sr_resolved[4:0]),
+	// sr_base, not sr_resolved: an instruction writing the SR computes its
+	// result from its snapshot, never from ccr_in, so EX's own SR forward
+	// cannot matter here -- but it put that forward on the path into the
+	// ALU's X input, and so ahead of every forwarded result (the worst
+	// path at 63f63af4 began eaf_alu_op -> ex_sr_fwd_data -> ALU).
+	.ccr_in           (sr_base[4:0]),
 
 	.sfc_in           ({29'd0, sfc}),
 	.dfc_in           ({29'd0, dfc}),

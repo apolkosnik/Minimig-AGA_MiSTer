@@ -55,6 +55,7 @@ ap040_pipe_core #(
 	.PROG_WORDS(PROG_WORDS)
 ) dut
 (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk (clk), .nreset (nreset), .ce (ce),
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
 	.dbg_id_valid (dbg_id_valid),  .dbg_id_pc (dbg_id_pc),

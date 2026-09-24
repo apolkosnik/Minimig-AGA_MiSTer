@@ -89,6 +89,7 @@ ap040_pipe_sys #(
 	.PROG_WORDS(PROG_WORDS)
 ) dut
 (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk (clk), .nreset (nreset), .ce (ce),
 
 	.mem_req (mem_req), .mem_write(mem_write), .mem_instr(mem_instr),

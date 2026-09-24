@@ -942,7 +942,7 @@ wire [31:0] ck_addr   = (ck_ph == CK_RD2) ? (ck_ea + ck_step) : ck_ea;
 wire        ck_ld_go  = ck_active && ((ck_ph == CK_RD1) || (ck_ph == CK_RD2)) && !port_taken;
 wire        ck_fin    = ck_active && (ck_ph == CK_DONE);
 wire        ck_stall  = eac_valid && ck && !ck_fin && !trace_hold && !ae_busy;
-wire signed [31:0] ck_rn = ck_an ? operand_b : ck_sx(operand_b, eac_size);
+wire signed [31:0] ck_rn = ck_an ? operand_b_ea : ck_sx(operand_b_ea, eac_size);   // a verdict: see addr_hz
 wire signed [31:0] ck_lbs = ck_lb;
 wire signed [31:0] ck_ubs = ck_sx(l1_q_b, eac_size);
 wire        ck_oob    = (ck_lbs <= ck_ubs) ? ((ck_rn < ck_lbs) || (ck_rn > ck_ubs))
@@ -1006,7 +1006,7 @@ function [3:0] cas_cmp;   // {N, Z, V, C} of d - s at size sz
 		endcase
 	end
 endfunction
-wire  [3:0] cas_fl  = cas_cmp(mem_lane, operand_b, eac_size);
+wire  [3:0] cas_fl  = cas_cmp(mem_lane, operand_b_ea, eac_size);   // decides the store: see addr_hz
 // The store goes where the load went. ea_target is not that address at
 // completion for (d8,An,Xn): port C has moved from the index to Du, so
 // idx_val is Du and the store landed at base + Du + d8. Latched at issue,
@@ -1291,7 +1291,7 @@ reg [31:0] ae_tgt_r;   // the odd address it tried to return to
 // DIVU.W (A1),D0 tested the ADDRESS against zero and never trapped: the
 // divider ran with a zero divisor and the instruction after it executed
 // normally. Found while designing CHK, which has the same operand shape.
-wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
+wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a_ea;   // a verdict: see addr_hz
 // !stall_in for the REGISTER source (milestone 95). A divide holds EX for
 // thirty-two cycles and its forward shows an intermediate the whole time,
 // so a fault judged on it is judged on a number the program never
@@ -1302,7 +1302,10 @@ wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
 // mem_pending && l1_rvalid_b is true for exactly one cycle, so requiring
 // !stall_in there would DROP the fault rather than delay it.
 // A long divide's divisor is all 32 bits (milestone 115).
-wire divzero_now = eac_valid && eac_is_div &&
+// Not in a hold cycle: the divisor is read through the address view, which
+// is stale exactly while addr_hz waits for EX's long forward -- MOVE.L #7,D1;
+// DIVU.W D1,D0 latched a zero divide from D1's old value.
+wire divzero_now = eac_valid && eac_is_div && !hold_hazard &&
                    (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                    (eac_ml[6] ? (div_divisor == 32'd0) : (div_divisor[15:0] == 16'd0));
 
@@ -1328,13 +1331,13 @@ wire eac_is_divzero = divzero_now || exc_pend_divzero;
 // value is negative, cleared when it merely exceeds the bound. It goes into
 // the STACKED SR, which is what the handler reads and what RTE restores, so
 // it must be latched alongside the fault itself.
-wire signed [15:0] chk_value = operand_b[15:0];
-wire [31:0]        chk_src   = eac_is_mem_src ? mem_lane : operand_a;
+wire signed [15:0] chk_value = operand_b_ea[15:0];   // a verdict: see addr_hz
+wire [31:0]        chk_src   = eac_is_mem_src ? mem_lane : operand_a_ea;
 wire signed [15:0] chk_bound = chk_src[15:0];
 // CHK.L compares the full 32 bits (milestone 111). The word form's operands
 // are the low halves, sign-extended by their own reads; the long form's are
 // the registers themselves.
-wire signed [31:0] chk_value_l = operand_b;
+wire signed [31:0] chk_value_l = operand_b_ea;
 wire signed [31:0] chk_bound_l = chk_src;
 wire chk_long     = eac_chk_long;
 wire chk_negative = chk_long ? (chk_value_l < 32'sd0) : (chk_value < 16'sd0);
@@ -1365,7 +1368,7 @@ wire chk_ex_writes  = eaf_valid && ((eaf_dest_reg == eac_dest_reg) ||
                                     (eaf_writes_an && (eaf_an_reg == eac_dest_reg)) ||
                                     (eaf_ml[6] && ({1'b0, eaf_ml[2:0]} == eac_dest_reg)));
 wire chk_fwd_hazard = eac_valid && eac_is_chk && chk_ex_writes;
-wire chk_now = eac_valid && eac_is_chk && !chk_fwd_hazard &&
+wire chk_now = eac_valid && eac_is_chk && !chk_fwd_hazard && !hold_hazard &&
                (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                (chk_negative || chk_over);
 reg exc_pend_chk;
@@ -1485,12 +1488,17 @@ wire [31:0] addrerr_pc_live = vecodd_pend    ? vecodd_pc_r :
 // and format error keep the four-word frame. Until milestone 77 the three
 // dynamic ones pushed format $0; tb_ap040_pipe_integration4.v's handlers
 // read the frames and said so.
-wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
+// An interrupt entry is format $0 whatever the instruction it holds would
+// have raised: that instruction's CHK or zero-divide verdict is computed
+// while it waits (tb_ap040_pipe_irqdual.v's DIVU.W by zero behind the mask
+// drop pushed a twelve-byte frame for the interrupt).
+wire eac_is_fmt2     = !eac_is_irq &&
+                      (eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
                        eac_is_trapcc_trap || eac_is_trace ||
-                       (eac_is_fpexc && (fp_exc_fmt != 2'd0));
+                       (eac_is_fpexc && (fp_exc_fmt != 2'd0)));
 // Format $3, the FPU's post-instruction frame: format $2's shape, its own
 // nibble, and only when the FPU's is the exception being taken.
-wire eac_is_fmt3     = eac_is_fpexc && (fp_exc_fmt == 2'd3) && !eac_is_trace && !eac_is_addrerr;
+wire eac_is_fmt3     = eac_is_fpexc && (fp_exc_fmt == 2'd3) && !eac_is_trace && !eac_is_irq && !eac_is_addrerr;
 
 // The L1 always returns a full longword on port B (address_b is the HIGH
 // word, the low word implicitly address_b+1), so a sized load is a lane
@@ -1571,11 +1579,16 @@ wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw ||
                    eac_is_rts || eac_is_rte || eac_is_rtr || eac_is_link || eac_is_unlk ||
                    eac_is_movem || mm || mvp || bfv || ck || cas || cas2 || m16 || eac_fp || fx ||
                    eac_moves[2];
-wire addr_hz      = live && eac_uses_ea && (lf_a || lf_b || lf_c);
+// ...and the trap verdicts decided in this stage from a register, which
+// reach exc_active and so every port-B strobe: CHK's bound and value and
+// DIV's divisor read the same views (CHK2's register and CAS's compare
+// operand are covered by eac_uses_ea already).
+wire addr_hz      = live && (eac_uses_ea || eac_is_chk || eac_is_div) && (lf_a || lf_b || lf_c);
 `ifdef VERILATOR
 always @(posedge clk)
 	if (nreset && ce && live && !eac_uses_ea && !exc_active && !fp_active && (l1_rd_b || l1_wren_b))
-		$error("ap040_ea_fetch: %h touched port B but is classed register-only (eac_uses_ea)", eac_pc);
+		$error("ap040_ea_fetch: %h touched port B but is classed register-only (eac_uses_ea): rd %b wr %b exc_go %b ph %0d vecpend %b irq %b arm %b hold %b own %b pend_div %b",
+		       eac_pc, l1_rd_b, l1_wren_b, exc_go, exc_ph, exc_vec_pending, eac_is_irq, irq_arm, trace_hold, own_exc, exc_pend_divzero);
 `endif
 wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
                       (live && fx_hold_go) ||                      // a full-format pointer read
@@ -2080,13 +2093,13 @@ wire [31:0] exc_new_sp     = exc_pass2  ? exc_isp8_r :
 // already had this exclusion. eac_is_addrerr stays true for the whole
 // entry (exc_pend_addrerr && exc_go), so the choice holds while the frame
 // is written.
-wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_addrerr)
+wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
                               ? {sr_in[15:3], ck_z, sr_in[1], ck_c} :
-                             (eac_is_chk_trap && !eac_is_trace && !eac_is_addrerr)
+                             (eac_is_chk_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:1],
                                  (exc_pend_chk ? exc_pend_chk_c : chk_c)}
-                              : (eac_is_divzero && !eac_is_trace && !eac_is_addrerr)
+                              : (eac_is_divzero && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
                               ? {sr_in[15:1], 1'b0}
                               : sr_in;
 wire [15:0] exc_sr_word    = exc_pass2 ? (sr_faulted | 16'h2000) : sr_faulted;
@@ -2468,7 +2481,12 @@ always @(posedge clk) begin
 		// lose it -- or with a flush, which kills the instruction it was
 		// set for.
 		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
-		else if (exc_active && !a7_busy && !creg_busy) begin
+		// ...and not in a hold cycle, when the instruction is not running:
+		// behind an SR write that lowers the mask the arm is sampled again
+		// there (irq_recheck), and a verdict latched in that cycle -- a DIVU
+		// by zero's, an ILLEGAL's -- went on building its frame after the
+		// interrupt had taken the instruction over (own_exc low).
+		else if (exc_active && !a7_busy && !creg_busy && !hold_hazard) begin
 			exc_go <= 1'b1;
 			if (!exc_go) begin   // fixed at the verdict, not re-read per beat
 				exc_fmt2_r <= eac_is_fmt2;

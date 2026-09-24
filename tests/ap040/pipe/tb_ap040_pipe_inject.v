@@ -71,6 +71,7 @@ ap040_pipe_bus16 #(
 	.PC_RESET  (PC_RESET),
 	.PROG_WORDS(32'h0100_0000)   // out of the way: a slice must not meet it
 ) dut (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk(clk), .nreset(nreset), .ce(ce), .clkena_in(clkena_in),
 	.data_in(data_in), .addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),

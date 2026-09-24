@@ -76,6 +76,7 @@ ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
 	.PROG_WORDS(PROG_WORDS)
 ) dut (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk(clk), .nreset(nreset), .ce(1'b1),
 	.l1_addr_a(l1_addr_a), .l1_req_a(l1_req_a),
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),

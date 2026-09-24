@@ -509,6 +509,7 @@ ap040_pipe_bus16 #(
 	.PROG_WORDS(1000000)
 ) dut_p
 (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk (clk), .nreset (nreset), .ce (1'b1), .clkena_in (p_clkena),
 	.data_in (p_din), .addr_out(p_addr), .data_write(p_dwrite),
 	.nwr (p_nwr), .nuds(p_nuds), .nlds(p_nlds),

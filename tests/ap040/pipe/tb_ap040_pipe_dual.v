@@ -91,6 +91,9 @@ endfunction
 // was meant, which is ORI.B #x,(A7) -- an instruction the FSM core has and
 // the pipelined core does not, so it looked exactly like a real finding.
 integer slot, kind, dn, dm, an, anw, q, cc, k, sh, imm, dir, want_scc;
+integer want_idx, ix, ik, iv, n_idx;
+reg     btgt [0:NSLOT+7];   // a forward Bcc lands on this slot
+reg [7:0] d8;
 integer pro;
 reg [15:0] w0, w1;
 
@@ -117,7 +120,8 @@ task gen_program;
 		end
 		slot_base = prog_words;
 
-		want_scc = 0;
+		want_scc = 0; want_idx = 0;
+		for (slot = 0; slot < NSLOT + 8; slot = slot + 1) btgt[slot] = 1'b0;
 		for (slot = 0; slot < NSLOT; slot = slot + 1) begin
 			dn = rbits(3); dm = rbits(3);
 			an  = rbits(32) % 5;                         // A0-A4: even, Long-safe
@@ -132,13 +136,36 @@ task gen_program;
 			// mutation that crossed CMPI's operands back over is what
 			// showed this was needed: it failed tb_ap040_pipe_immmem.v and
 			// passed sixteen differential programs.
-			if (want_scc) begin
+			// The consumer of a value EX is still producing (2026-09-24): the
+			// slot before it ended in ADD.L Dx,Dx, so Dx arrives on the long
+			// forward -- as the index of an access, or as a divisor. The
+			// address views make such an instruction wait a cycle; without
+			// the wait the index is the MOVEQ's k rather than 2k, and the
+			// divisor likewise. No Bcc lands here (btgt), so Dx is always
+			// the small, even 2k and the access stays in the scratch lane.
+			if (want_idx) begin
+				iv = rbits(2); imm = rbits(6);
+				d8 = (imm - 32) * 2;
+				w1 = {1'b0, ix[2:0], 1'b1, 2'b00, 1'b0, d8};
+				case (iv)
+				0: w0 = {4'b0010, dn[2:0], 6'b000_110, an[2:0]};        // MOVE.L (d8,An,Dx.L),Dn
+				1: w0 = {4'b0010, an[2:0], 6'b110_000, dm[2:0]};        // MOVE.L Dm,(d8,An,Dx.L)
+				2: w0 = {4'b1101, dn[2:0], 6'b010_110, an[2:0]};        // ADD.L (d8,An,Dx.L),Dn
+				default: begin w0 = {4'b1000, dn[2:0], 6'b011_000, ix[2:0]}; w1 = `AP040_OP_NOP; end   // DIVU.W Dx,Dn
+				endcase
+				want_idx = 0; n_idx = n_idx + 1;
+			end else if (want_scc) begin
 				cc = 2 + (rbits(32) % 14);
 				w0 = {4'b0101, cc[3:0], 2'b11, 3'b000, dn[2:0]};   // Scc Dn
 				want_scc = 0;
 			end else begin
-			kind = rbits(32) % 45;
+			kind = rbits(32) % 46;
+			if (kind == 45 && (slot + 1 >= NSLOT || btgt[slot + 1])) kind = 1;
 			case (kind)
+			45: begin ix = rbits(3); ik = 1 + (rbits(32) % 31);
+			    w0 = {4'b0111, ix[2:0], 1'b0, ik[7:0]};               // MOVEQ #k,Dx
+			    w1 = {4'b1101, ix[2:0], 6'b010_000, ix[2:0]};         // ADD.L Dx,Dx
+			    want_idx = 1; end
 			0:  begin imm = rbits(8);
 			    w0 = {4'b0111, dn[2:0], 1'b0, imm[7:0]}; end          // MOVEQ
 			1:  w0 = {4'b0010, dn[2:0], 6'b000_000, dm[2:0]};       // MOVE.L Dm,Dn
@@ -179,6 +206,7 @@ task gen_program;
 			    cc = 2 + (rbits(32) % 14);
 			    k  = 1 + (rbits(32) % 3);
 			    if (slot + k >= NSLOT) k = 1;
+			    btgt[slot + k] = 1'b1;
 			    imm = (4*k - 2) & 32'hFF;
 			    w0 = {4'b0110, cc[3:0], imm[7:0]};
 			    end
@@ -392,6 +420,7 @@ ap040_pipe_bus16 #(
 	.PROG_WORDS(1000000)
 ) dut_p
 (
+	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk (clk), .nreset (nreset), .ce (1'b1), .clkena_in (p_clkena),
 	.data_in (p_din), .addr_out(p_addr), .data_write(p_dwrite),
 	.nwr (p_nwr), .nuds(p_nuds), .nlds(p_nlds),
@@ -496,6 +525,7 @@ integer round, mism;
 reg [31:0] seed;
 
 initial begin
+	n_idx = 0;
 	for (round = 0; round < NROUND; round = round + 1) begin
 		seed = 32'h1357_9BDF + round * 32'h9E37_79B9;   // one program per round
 
@@ -573,6 +603,11 @@ initial begin
 		end
 	end
 
+	$display("%0d accesses and divides consumed a value still on EX's long forward", n_idx);
+	if (n_idx == 0) begin
+		errors = errors + 1;
+		$display("FAIL: no consumer of a long forward was generated");
+	end
 	if (errors == 0)
 		$display("ALL TESTS PASSED (%0d programs x %0d slots, both cores agree)", NROUND, NSLOT);
 	else

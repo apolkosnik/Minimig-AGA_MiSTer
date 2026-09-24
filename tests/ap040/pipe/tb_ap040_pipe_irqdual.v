@@ -117,7 +117,7 @@ endfunction
 
 // Counted as generated, so a run that never reached a case says so.
 integer n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp;
-integer n_trace, n_trace_ev, fill_n, c1, t_new, n_chain, hl;
+integer n_trace, n_trace_ev, fill_n, c1, t_new, n_chain, hl, n_trapfill, tf;
 
 integer k, r1, r2, r3, ev, lvl, msk, s, m, m0, fmt, v, irq_on, tgt_at;
 reg [15:0] sr;
@@ -169,6 +169,26 @@ task chain;
 		emit(16'h31FC); emit(hl[15:0]); emit(IRQ_CHAIN[15:0]);   // MOVE.W #h,IRQ_CHAIN.W
 		n_chain = n_chain + 1;
 		count_irq(1, 0);   // taken in the first handler: supervisor, M clear
+	end
+endtask
+
+// An instruction that always traps, as the one the interrupt holds: CHK.W
+// D2,D2 (D2 = -1) or DIVU.W D3,D4 (D3 = 0). The interrupt goes first and
+// must stack the SR as it is, not with the trap's own flag effects; the
+// trap follows when the handler returns, and the generic handler resumes
+// past it. trap_resume goes BEFORE the instruction that lowers the mask
+// (4 words), which is 2 words, so the trapping one is 14 bytes on.
+task trap_resume;
+	reg [31:0] ra;
+	begin
+		ra = here(0) + 32'd14;
+		emit(16'h21FC); emit(ra[31:16]); emit(ra[15:0]); emit(RESUME[15:0]);   // MOVE.L #ra,RESUME.W
+	end
+endtask
+task trap_insn;
+	begin
+		emit(rbits(1) ? 16'h4582 : 16'h88C3);
+		n_trapfill = n_trapfill + 1;
 	end
 endtask
 
@@ -236,6 +256,8 @@ task gen_program;
 		emit(16'h203C); emit(USP_TOP[31:16]); emit(USP_TOP[15:0]);   // MOVE.L #USP_TOP,D0
 		emit(16'h4E7B); emit(16'h0800);                               // MOVEC D0,USP
 		emit(16'h287C); emit(SCR_LO[31:16]); emit(SCR_LO[15:0]);     // MOVEA.L #SCR_LO,A4
+		emit(16'h74FF);                                               // MOVEQ #-1,D2
+		emit(16'h7600);                                               // MOVEQ #0,D3
 		for (k = 4; k < 8; k = k + 1) begin
 			r1 = rbits(32);
 			emit({4'b0010, k[2:0], 6'b000_111, 3'b100}); emit(r1[31:16]); emit(r1[15:0]);
@@ -253,7 +275,10 @@ task gen_program;
 				raise(lvl);
 				if (rbits(2) == 0) chain(lvl);
 				filler(0, 2);
+				tf = (rbits(2) == 0);
+				if (tf) trap_resume;
 				emit(16'h46FC); emit(mk_sr(s, m, msk, rbits(5)));
+				if (tf) trap_insn;
 				count_irq(s, m);
 				filler(1, 3);
 				settle(s);
@@ -263,7 +288,10 @@ task gen_program;
 				raise(lvl);
 				filler(0, 2);
 				r1 = rbits(5);
+				tf = (rbits(2) == 0);
+				if (tf) trap_resume;
 				emit(16'h027C); emit({2'b11, s[0], m[0], 1'b1, msk[2:0], 3'b111, r1[4:0]});
+				if (tf) trap_insn;
 				count_irq(s, m0 & m);
 				filler(1, 3);
 				settle(s);
@@ -632,12 +660,15 @@ endtask
 initial begin
 	n_irq = 0; n_irq_m1 = 0; n_irq_user = 0; n_stop = 0; n_nmi = 0; n_rte = 0;
 	n_f1 = 0; n_f1_msp = 0; n_f1_isp = 0; n_f1_usp = 0; logged = 0;
-	n_trace = 0; n_trace_ev = 0; n_chain = 0;
+	n_trace = 0; n_trace_ev = 0; n_chain = 0; n_trapfill = 0;
 	for (round = 0; round < NROUND; round = round + 1) begin
 		seed = 32'h1A2B_3C4D + round * 32'h9E37_79B9;
 		nreset = 0;
 		repeat (8) @(posedge clk);
 		build_memory(seed);
+		if ($test$plusargs("showprog"))
+			for (i = 0; i < pw; i = i + 1)
+				$display("  round %0d prog %h: %h", round, PROG_BASE + 2*i, prog[i]);
 		nreset = 1;
 		@(posedge clk);
 		@(posedge clk);
@@ -682,15 +713,16 @@ initial begin
 		$display("round %0d: seed %h, %0d program words, %0d cycles, %0d log bytes, %0d mismatches",
 		         round, seed, pw, cyc, rd32f(LOGPTR) - LOG_BASE, mism);
 	end
-	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events, %0d nested",
-	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev, n_chain);
-	// Every interrupt logs 22 bytes and every trace 12; nothing else writes
+	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events, %0d nested, %0d held a trapping instruction",
+	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev, n_chain, n_trapfill);
+	// Every interrupt logs 22 bytes, every trace 12 and every CHK/zero-divide
+	// trap (format $2 through the generic handler) 12; nothing else writes
 	// the log here.
-	if (logged != 22 * n_irq + 12 * n_trace) begin
+	if (logged != 22 * n_irq + 12 * n_trace + 12 * n_trapfill) begin
 		errors = errors + 1;
-		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each) and %0d traces (12 each)", logged, n_irq, n_trace);
+		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each), %0d traces and %0d traps (12 each)", logged, n_irq, n_trace, n_trapfill);
 	end
-	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0 || n_chain == 0) begin
+	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0 || n_chain == 0 || n_trapfill == 0) begin
 		errors = errors + 1;
 		$display("FAIL: a case went ungenerated");
 	end
