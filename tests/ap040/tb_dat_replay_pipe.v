@@ -724,8 +724,9 @@ task run_round;
 		@(posedge clk);
 		inject_state;
 		if (trace_ex)
-			$display("ROUND j%0d t%0d r%0d pc=%08x op=%02x%02x %02x%02x end_pc=%08x exc=%0d",
+			$display("ROUND j%0d t%0d r%0d pc=%08x op=%02x%02x %02x%02x %02x%02x %02x%02x end_pc=%08x exc=%0d",
 			         jr, test_idx, round_idx, i_pc, rd8(i_pc), rd8(i_pc+1), rd8(i_pc+2), rd8(i_pc+3),
+			         rd8(i_pc+4), rd8(i_pc+5), rd8(i_pc+6), rd8(i_pc+7),
 			         e_pc, e_exc);
 		commits_at_start = dbg_commits;
 		@(posedge clk);

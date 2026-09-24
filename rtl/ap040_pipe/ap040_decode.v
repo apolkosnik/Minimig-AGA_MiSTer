@@ -375,7 +375,12 @@ module ap040_decode
 	output reg        id_fp,
 	output reg  [8:0] id_fp_op,       // opcode[8:0]: kind, EA mode, EA register
 	output reg [15:0] id_fp_cmd,      // the command / condition word
-	output reg [95:0] id_fp_imm       // every word gathered after the opcode, right-aligned
+	output reg [95:0] id_fp_imm,      // every word gathered after the opcode, right-aligned
+	// A full-format extension word (2026-09-24): {valid, the MOVE destination's,
+	// BS, IS, post-indexed, memory indirect}, and its displacements.
+	output reg  [5:0] id_fx,
+	output reg [31:0] id_fx_bd,
+	output reg [31:0] id_fx_od
 );
 
 assign id_stall = stall_in;
@@ -2492,6 +2497,59 @@ reg  [15:0] disp_acc3;      // the word before disp_acc's two (milestone 117)
 // A general F-line form's command word, arriving, may ask for more.
 wire [2:0] fp_more   = fp_after_cmd(if_opcode, held_fp_eaw, held_fp_imm);
 wire       fp_extend = held_fp && held_fp_gen && held_fp_first && (fp_more != 3'd0);
+// ------------------------------------------------ full-format extension
+// (2026-09-24) An indexed EA's extension word with bit 8 set is the full
+// format: base and index suppress, a null, word or long base displacement,
+// and memory indirection with a null, word or long outer one. It was read
+// as the brief format and executed silently wrong (the FPU differential
+// found MOVE.B (d8,A5,Xn) with $21FC). The words that follow it are
+// counted by the word itself.
+//
+// Where the extension word is the instruction's last word as counted so
+// far -- every single EA, and a MOVE's destination -- the instruction is
+// DECODED at that word, exactly as for a brief word, so every field that
+// reads the words before it by position (an immediate, a bitfield or
+// MOVES word, a MOVEM mask, the FPU's command) reads what it always did;
+// then the displacement words are gathered with id_valid held low, and
+// id_next_pc moves past them. A memory-to-memory MOVE's SOURCE word has
+// the destination's words after it, so there the gather is extended in
+// the middle instead, and the source's capture is not repeated. Reserved
+// encodings -- BD SIZE 00, bit 3, I/IS 100 -- are illegal, as
+// ap040_core.v's S_EA_EXTW2 has them; so are two full-format EAs in one
+// MOVE.
+reg         held_fx_seen, held_fx_dst, held_fx_bad, held_fx_tail;
+reg  [15:0] held_fx_ext;
+reg   [2:0] held_fx_left, held_fx_more;
+reg   [1:0] held_fx_bdw, held_fx_odw;
+reg  [63:0] fx_acc;
+wire        fx_src_pos  = !held_fp_first &&
+                          (held_mm ? (held_mm_sbrief && (ext_pending == ({1'b0, held_mm_dwords} + 3'd1)))
+                                   : (held_ea_indexed && (ext_pending == 3'd1)));
+wire        fx_dst_pos  = held_mm && held_mm_didx && (ext_pending == 3'd1);
+wire        fx_here     = (fx_src_pos || fx_dst_pos) && !held_fx_seen && if_opcode[8];
+wire        fx_twice    = fx_dst_pos && held_fx_seen && if_opcode[8];
+wire  [1:0] fx_bdw      = (if_opcode[5:4] == 2'b10) ? 2'd1 : (if_opcode[5:4] == 2'b11) ? 2'd2 : 2'd0;
+wire  [1:0] fx_odw      = (if_opcode[1:0] == 2'b10) ? 2'd1 : (if_opcode[1:0] == 2'b11) ? 2'd2 : 2'd0;
+wire  [2:0] fx_more     = {1'b0, fx_bdw} + {1'b0, fx_odw};
+wire        fx_reserved = (if_opcode[5:4] == 2'b00) || if_opcode[3] || (if_opcode[2:0] == 3'b100);
+wire        fx_final    = fx_here && (ext_pending == 3'd1);
+wire  [3:0] fx_len      = {1'b0, held_ext_n} + {1'b0, fx_more};
+wire        fx_mid_ext  = fx_here && !fx_final && !fx_reserved && !fx_len[3] && (fx_more != 3'd0);
+wire        fx_tail_go  = fx_final && !fx_reserved && (fx_more != 3'd0);
+wire        fx_bad_now  = held_fx_bad || fx_twice || (fx_here && (fx_reserved || (!fx_final && fx_len[3])));
+wire        fx_valid_now = !fx_bad_now && (held_fx_seen || fx_here);
+wire [15:0] fx_ext_now  = fx_here ? if_opcode : held_fx_ext;
+wire        fx_dst_now  = fx_here ? fx_dst_pos : held_fx_dst;
+wire  [1:0] fx_bdw_now  = fx_here ? fx_bdw : held_fx_bdw;
+wire  [1:0] fx_odw_now  = fx_here ? fx_odw : held_fx_odw;
+wire [63:0] fx_acc_now  = (held_fx_left != 3'd0) ? {fx_acc[47:0], if_opcode} : fx_acc;
+wire [31:0] fx_od_now   = (fx_odw_now == 2'd2) ? fx_acc_now[31:0] :
+                          (fx_odw_now == 2'd1) ? {{16{fx_acc_now[15]}}, fx_acc_now[15:0]} : 32'd0;
+wire [15:0] fx_bdw1     = (fx_odw_now == 2'd2) ? fx_acc_now[47:32] :
+                          (fx_odw_now == 2'd1) ? fx_acc_now[31:16] : fx_acc_now[15:0];
+wire [31:0] fx_bd_now   = (fx_bdw_now == 2'd2) ? ((fx_odw_now == 2'd2) ? fx_acc_now[63:32] :
+                                                 (fx_odw_now == 2'd1) ? fx_acc_now[47:16] : fx_acc_now[31:0]) :
+                          (fx_bdw_now == 2'd1) ? {{16{fx_bdw1[15]}}, fx_bdw1} : 32'd0;
 wire completing_gather = (ext_pending == 3'd1) && !fp_extend;
 
 // The full displacement as of the completing cycle: word form sign-extends
@@ -2725,6 +2783,19 @@ always @(posedge clk) begin
 		id_fp_op        <= 9'd0;
 		id_fp_cmd       <= 16'd0;
 		id_fp_imm       <= 96'd0;
+		id_fx           <= 6'd0;
+		id_fx_bd        <= 32'd0;
+		id_fx_od        <= 32'd0;
+		held_fx_seen    <= 1'b0;
+		held_fx_dst     <= 1'b0;
+		held_fx_bad     <= 1'b0;
+		held_fx_tail    <= 1'b0;
+		held_fx_ext     <= 16'd0;
+		held_fx_left    <= 3'd0;
+		held_fx_more    <= 3'd0;
+		held_fx_bdw     <= 2'd0;
+		held_fx_odw     <= 2'd0;
+		fx_acc          <= 64'd0;
 		ext_pending     <= 3'd0;
 		held_is_imm      <= 1'b0;
 		held_imm_mem     <= 1'b0;
@@ -2887,12 +2958,42 @@ always @(posedge clk) begin
 		if (flush) begin
 			id_valid    <= 1'b0;
 			ext_pending <= 3'd0;   // abandon any in-progress gather too
+			held_fx_tail <= 1'b0;
 		end else if (!stall_in && if_valid) begin
-			if (ext_pending != 3'd0) begin
+			if (held_fx_tail) begin
+				// A full-format EA's displacement words; the instruction was
+				// decoded at its extension word (see fx_* above).
+				fx_acc       <= {fx_acc[47:0], if_opcode};
+				held_fx_left <= held_fx_left - 3'd1;
+				ext_pending  <= ext_pending - 3'd1;
+				if (ext_pending == 3'd1) begin
+					id_valid     <= 1'b1;
+					id_next_pc   <= id_next_pc + {28'd0, held_fx_more, 1'b0};
+					id_fx_bd     <= fx_bd_now;
+					id_fx_od     <= fx_od_now;
+					held_fx_tail <= 1'b0;
+				end
+			end else if (ext_pending != 3'd0) begin
 				// Gathering: if_opcode is extension-word data, never a
 				// fresh opcode.
 				disp_acc <= {disp_acc[15:0], if_opcode};
 				disp_acc3 <= disp_acc[31:16];
+				if (held_fx_left != 3'd0) begin
+					fx_acc       <= {fx_acc[47:0], if_opcode};
+					held_fx_left <= held_fx_left - 3'd1;
+				end
+				if (fx_here) begin
+					held_fx_seen <= 1'b1;
+					held_fx_ext  <= if_opcode;
+					held_fx_dst  <= fx_dst_pos;
+					held_fx_bdw  <= fx_bdw;
+					held_fx_odw  <= fx_odw;
+					held_fx_more <= fx_more;
+					held_fx_left <= (fx_mid_ext || fx_tail_go) ? fx_more : 3'd0;
+					fx_acc       <= 64'd0;
+					if (fx_reserved || (!fx_final && fx_len[3])) held_fx_bad <= 1'b1;
+				end
+				if (fx_twice) held_fx_bad <= 1'b1;
 				if (held_fp) begin
 					fp_acc <= {fp_acc[79:0], if_opcode};
 					if (held_fp_first) begin
@@ -2902,7 +3003,7 @@ always @(posedge clk) begin
 				end
 				// A memory-to-memory MOVE's last SOURCE word is the one with
 				// exactly the destination's words still to come.
-				if (held_mm && (ext_pending == ({1'b0, held_mm_dwords} + 3'd1)))
+				if (held_mm && (ext_pending == ({1'b0, held_mm_dwords} + 3'd1)) && !held_fx_seen)
 					held_mm_src_ext <= mm_src_now;
 				if (completing_gather) begin
 					id_valid        <= 1'b1;
@@ -3222,13 +3323,89 @@ always @(posedge clk) begin
 					id_fp_op        <= held_fp_op;
 					id_fp_cmd       <= held_fp_first ? if_opcode : fp_cmd_r;
 					id_fp_imm       <= {fp_acc[79:0], if_opcode};
+					id_fx           <= {fx_valid_now, fx_dst_now, fx_ext_now[7], fx_ext_now[6], fx_ext_now[2],
+					                    fx_ext_now[2:0] != 3'd0};
+					id_fx_bd        <= fx_bd_now;
+					id_fx_od        <= fx_od_now;
+					// A reserved encoding is an illegal instruction and nothing else:
+					// every flag that would reach memory or a register is cleared.
+					if (fx_bad_now) begin
+						id_is_illegal   <= 1'b1;
+						id_illegal_kind <= 2'd0;
+						// ...whose entry writes the new SP: A7, as every other
+						// illegal (movec_illegal_gather included) names. Left at the
+						// instruction's own destination, the SP went into D4 and the
+						// handler ran on the old stack (tb_ap040_pipe_fxdual).
+						id_dest_reg     <= 4'd15;
+						id_mm <= 7'd0;
+						id_moves <= 3'd0;
+						id_mvfsr <= 2'd0;
+						id_movep <= 3'd0;
+						id_ml <= 7'd0;
+						id_bf <= 5'd0;
+						id_ck2 <= 3'd0;
+						id_cas <= 5'd0;
+						id_m16 <= 4'd0;
+						id_writes_reg <= 1'd0;
+						id_writes_ccr <= 1'd0;
+						id_is_branch <= 1'd0;
+						id_is_scc <= 1'd0;
+						id_is_dbcc <= 1'd0;
+						id_is_mem_src <= 1'd0;
+						id_is_store <= 1'd0;
+						// A MOVE whose DESTINATION word is reserved has had its source
+						// EA evaluated first in ap040_core.v (ea_start commits an
+						// (An)+/-(An) step in S_EA_BASE), and then takes vector 4 at the
+						// destination's S_EA_EXTW2: the step stands. No hardware
+						// capture settles it either way; the reference is the oracle.
+						if (!fx_dst_now) begin
+							id_is_postinc <= 1'd0;
+							id_is_predec <= 1'd0;
+						end
+						id_is_jmp <= 1'd0;
+						id_is_lea <= 1'd0;
+						id_is_rmw <= 1'd0;
+						id_immrmw <= 1'd0;
+						id_st_disp <= 1'd0;
+						id_is_trapcc <= 1'd0;
+						id_is_chk <= 1'd0;
+						id_is_immsr <= 1'd0;
+						id_is_stop <= 1'd0;
+						id_is_pea <= 1'd0;
+						id_is_link <= 1'd0;
+						id_is_div <= 1'd0;
+						id_is_movem <= 1'd0;
+						id_is_unlk <= 1'd0;
+						id_is_bsr <= 1'd0;
+						id_is_jsr <= 1'd0;
+						id_is_trap <= 1'd0;
+						id_is_movesr <= 1'd0;
+						id_is_movec <= 1'd0;
+						id_is_rts <= 1'd0;
+						id_is_nop <= 1'd0;
+						id_is_reset <= 1'd0;
+						id_is_rte <= 1'd0;
+						id_is_rtr <= 1'd0;
+						id_fp <= 1'd0;
+						id_bnt <= 1'd0;
+					end
 					ext_pending     <= 3'd0;
+					// Decoded at the extension word; its displacements come next.
+					if (fx_tail_go && !fx_bad_now) begin
+						id_valid     <= 1'b0;
+						held_fx_tail <= 1'b1;
+						ext_pending  <= fx_more;
+					end
 				end else begin
 					id_valid    <= 1'b0;
 					ext_pending <= ext_pending - 3'd1;
 					if (fp_extend) begin
 						ext_pending <= fp_more;
 						held_ext_n  <= held_ext_n + fp_more;
+					end
+					if (fx_mid_ext) begin
+						ext_pending <= ext_pending - 3'd1 + fx_more;
+						held_ext_n  <= held_ext_n + fx_more;
 					end
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
@@ -3476,6 +3653,10 @@ always @(posedge clk) begin
 				held_cas2      <= is_cas2;
 				held_m16_form  <= is_m16_pp ? 3'd4 : {1'b0, if_opcode[4:3]};
 				held_fp        <= is_fp;
+				held_fx_seen   <= 1'b0;
+				held_fx_bad    <= 1'b0;
+				held_fx_left   <= 3'd0;
+				fx_acc         <= 64'd0;
 				held_fp_op     <= if_opcode[8:0];
 				held_fp_nocmd  <= fp_nocmd;
 				held_fp_first  <= is_fp && !fp_nocmd;
@@ -3731,6 +3912,7 @@ always @(posedge clk) begin
 				id_fp_op        <= if_opcode[8:0];
 				id_fp_cmd       <= 16'd0;
 				id_fp_imm       <= 96'd0;
+				id_fx           <= 6'd0;
 			end
 		end else if (!stall_in) begin
 			// A fetch bubble (milestone 80): the L1 has not returned the next

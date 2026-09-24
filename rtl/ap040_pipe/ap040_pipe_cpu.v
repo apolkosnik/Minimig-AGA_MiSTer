@@ -220,6 +220,8 @@ wire        id_fp;
 wire  [8:0] id_fp_op;
 wire [15:0] id_fp_cmd;
 wire [95:0] id_fp_imm;
+wire  [5:0] id_fx;
+wire [31:0] id_fx_bd, id_fx_od;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -303,6 +305,8 @@ wire        eac_fp;
 wire  [8:0] eac_fp_op;
 wire [15:0] eac_fp_cmd;
 wire [95:0] eac_fp_imm;
+wire  [5:0] eac_fx;
+wire [31:0] eac_fx_bd, eac_fx_od;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -795,6 +799,9 @@ ap040_decode u_id
 	.id_fp_op           (id_fp_op),
 	.id_fp_cmd          (id_fp_cmd),
 	.id_fp_imm          (id_fp_imm),
+	.id_fx              (id_fx),
+	.id_fx_bd           (id_fx_bd),
+	.id_fx_od           (id_fx_od),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -882,6 +889,9 @@ ap040_ea_calc u_eac
 	.id_fp_op            (id_fp_op),
 	.id_fp_cmd           (id_fp_cmd),
 	.id_fp_imm           (id_fp_imm),
+	.id_fx               (id_fx),
+	.id_fx_bd            (id_fx_bd),
+	.id_fx_od            (id_fx_od),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -962,6 +972,9 @@ ap040_ea_calc u_eac
 	.eac_fp_op           (eac_fp_op),
 	.eac_fp_cmd          (eac_fp_cmd),
 	.eac_fp_imm          (eac_fp_imm),
+	.eac_fx              (eac_fx),
+	.eac_fx_bd           (eac_fx_bd),
+	.eac_fx_od           (eac_fx_od),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1051,6 +1064,9 @@ ap040_ea_fetch #(
 	.eac_fp_op           (eac_fp_op),
 	.eac_fp_cmd          (eac_fp_cmd),
 	.eac_fp_imm          (eac_fp_imm),
+	.eac_fx              (eac_fx),
+	.eac_fx_bd           (eac_fx_bd),
+	.eac_fx_od           (eac_fx_od),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),

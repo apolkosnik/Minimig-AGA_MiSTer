@@ -287,6 +287,9 @@ module ap040_ea_fetch
 	input       [8:0] eac_fp_op,
 	input      [15:0] eac_fp_cmd,
 	input      [95:0] eac_fp_imm,
+	input       [5:0] eac_fx,       // a full-format extension (2026-09-24), see below
+	input      [31:0] eac_fx_bd,
+	input      [31:0] eac_fx_od,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -586,10 +589,43 @@ wire [31:0] ea_base = eac_ea_pcrel ? eac_pc_base : operand_a;   // opcode + 2 un
 // feeds the carry chain where a fifth mux way would be another level after
 // it. eac_immrmw is a register, which is what the milestone-88 rule
 // requires of anything selecting on this path.
+
+// ------------------------------------------------ full-format extension
+// (2026-09-24; see ap040_decode.v) {valid, the MOVE destination's, BS, IS,
+// post-indexed, memory indirect}, with the base and outer displacements.
+// Without indirection the address is (BS ? 0 : base) + (IS ? 0 : index) +
+// bd -- the brief formula with a wider displacement and two suppresses, all
+// selected by registers. With it, a pointer is read first, from base + bd,
+// plus the index for the pre-indexed forms, and the address is that pointer
+// plus od, plus the index for the post-indexed ones (ap040_core.v's
+// S_EA_BD/S_EA_MIND/S_EA_OD). The read is a pre-phase: the stage holds with
+// bubbles through hold_hazard, so stall_self keeps every other access of
+// the instruction off the memory and nothing in the output chain runs until
+// the pointer is in; the intermediate address and the result are both
+// latched, so no forward reaches the L1 address. The instruction's own
+// exceptions wait for it too -- a JMP's odd-target test must see the
+// resolved address -- but a trace owed by the one before goes first.
+wire        fx       = eac_fx[5];
+wire        fx_dst   = eac_fx[4];
+wire        fx_bs    = eac_fx[3];
+wire        fx_is    = eac_fx[2];
+wire        fx_post  = eac_fx[1];
+wire        fx_ind   = eac_fx[0];
+wire        fx_src   = fx && !fx_dst;
+localparam [1:0] FXI_ADDR = 2'd0, FXI_RD = 2'd1, FXI_W = 2'd2, FXI_DONE = 2'd3;
+reg   [1:0] fxi_ph;
+reg  [31:0] fxi_addr, fxi_ea;
+wire        fx_hold   = eac_valid && fx && fx_ind && (fxi_ph != FXI_DONE);
+wire        fx_hold_go = fx_hold && !trace_hold && !ae_busy;
+wire        fxi_rd    = (fxi_ph == FXI_RD);
+wire        fxi_ld_go = fx_hold_go && fxi_rd && live && !port_taken && !stall_in;
+wire [31:0] fx_base_s = (fx_src && fx_bs) ? 32'd0 : ea_base;
+wire [31:0] fx_idx_s  = (fx_src && fx_is) ? 32'd0 : idx_val;
+wire [31:0] fx_disp_s = fx_src ? eac_fx_bd : idx_disp;
 wire [31:0] ea_disp   = ea_ext;
 wire [31:0] ea_target = eac_is_abs     ? ea_ext             :
                         eac_is_predec  ? (an_base - an_step) :
-                        eac_ea_indexed ? (ea_base + idx_val + idx_disp) :
+                        eac_ea_indexed ? ((fx_src && fx_ind) ? fxi_ea : (fx_base_s + fx_idx_s + fx_disp_s)) :
                                          (ea_base + ea_disp);
 
 // The value An takes afterwards. Both modes leave An at the same place --
@@ -632,9 +668,12 @@ wire  [1:0] mm_dsz      = (eac_alu_op == `AP040_ALU_PACK) ? `AP040_SZ_B :
                           (eac_alu_op == `AP040_ALU_UNPK) ? `AP040_SZ_W : eac_size;
 wire [31:0] mm_dstep    = (mm_dsz == `AP040_SZ_B) ? ((eac_dest_reg == 4'd15) ? 32'd2 : 32'd1) :
                           (mm_dsz == `AP040_SZ_W) ? 32'd2 : 32'd4;
+wire [31:0] fx_base_d   = (fx_dst && fx_bs) ? 32'd0 : mm_base;
+wire [31:0] fx_idx_d    = (fx_dst && fx_is) ? 32'd0 : mm_idx_val;
+wire [31:0] fx_disp_d   = fx_dst ? eac_fx_bd : mm_idx_disp;
 wire [31:0] mm_daddr    = mm_dabs ? eac_ea_ext :
                           mm_dpd  ? (mm_base - mm_dstep) :
-                          mm_didx ? (mm_base + mm_idx_val + mm_idx_disp) :
+                          mm_didx ? ((fx_dst && fx_ind) ? fxi_ea : (fx_base_d + fx_idx_d + fx_disp_d)) :
                                     (mm_base + eac_ea_ext);   // (An), (An)+: zero; (d16,An)
 wire [31:0] mm_dan_new  = mm_dpi ? (mm_base + mm_dstep) : (mm_base - mm_dstep);
 
@@ -1015,7 +1054,7 @@ wire        fp_ld_go     = fp_mem_rd && !port_taken;
 wire        fp_st_want   = fp_mem_wr && !port_taken;
 wire        fp_st_go     = fp_st_want && !l1_wr_busy;
 wire        fp_stall     = eac_valid && fp && !fp_fin && !trace_hold && !ae_busy;
-wire        fp_start     = live && fp && !eaf_valid && !fp_active && !fp_fin &&
+wire        fp_start     = live && fp && !eaf_valid && !fp_active && !fp_fin && !fx_hold &&
                            !trace_hold && !ae_busy && !stall_in;
 wire        eac_is_fpexc = eac_valid && fp && fp_fin && fp_exc;
 wire        fp_clear     = flush || (fp_fin && !eaf_stall);
@@ -1023,6 +1062,35 @@ wire        fp_clear     = flush || (fp_fin && !eaf_stall);
 always @(posedge clk)
 	if (!nreset)             fp_ea_r <= 32'd0;
 	else if (ce && fp_start) fp_ea_r <= ea_target;
+
+// The full-format pointer read (see its block above). ADDR latches the
+// intermediate address once EX can take the instruction's operands as
+// final; RD sends it; the data may come back whatever EX is doing. It
+// starts over whenever the instruction leaves the stage.
+wire [31:0] fxi_mid = fx_dst ? (fx_base_d + eac_fx_bd + (fx_post ? 32'd0 : fx_idx_d))
+                             : (fx_base_s + eac_fx_bd + (fx_post ? 32'd0 : fx_idx_s));
+wire [31:0] fxi_idx = fx_dst ? fx_idx_d : fx_idx_s;
+always @(posedge clk) begin
+	if (!nreset) begin
+		fxi_ph   <= FXI_ADDR;
+		fxi_addr <= 32'd0;
+		fxi_ea   <= 32'd0;
+	end else if (ce) begin
+		if (flush || !eaf_stall) fxi_ph <= FXI_ADDR;
+		else case (fxi_ph)
+			FXI_ADDR: if (fx_hold_go && live && !stall_in) begin
+				fxi_addr <= fxi_mid;
+				fxi_ph   <= FXI_RD;
+			end
+			FXI_RD:   if (fxi_ld_go) fxi_ph <= FXI_W;
+			FXI_W:    if (l1_rvalid_b) begin
+				fxi_ea <= l1_q_b + eac_fx_od + (fx_post ? fxi_idx : 32'd0);
+				fxi_ph <= FXI_DONE;
+			end
+			default: ;
+		endcase
+	end
+end
 
 ap040_pipe_fpu u_fpu (
 	.clk       (clk),
@@ -1430,7 +1498,8 @@ wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
 wire movec_rd       = eac_is_movec && !eac_imm[4];
 wire creg_rd_hazard = movec_rd && ex_creg_any;
 wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
-wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard);   // chk_fwd_hazard: see chk_now
+wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
+                      (live && fx_hold_go);                        // a full-format pointer read
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1594,7 +1663,7 @@ wire store_now    = eac_is_store && !trace_hold && !ae_busy && !moves_priv;
 // from being taken. The debt is the completed instruction's, not the held
 // one's (milestone 100).
 wire eac_is_exc    = eac_is_trace || ae_take ||
-                     (own_exc && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
+                     (own_exc && !fx_hold && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
                                   eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
                                   eac_is_fpexc));
 wire exc_active    = live && eac_is_exc;
@@ -1709,7 +1778,7 @@ wire ret_stall    = ret_active && !ret_done;
 // MOVE.L (A0),D1 issued thirty-four reads and one TRAP pushed its frame
 // eighteen times. The earlier fix gated the ordinary store alone, which was
 // the reported symptom rather than the defect.
-assign l1_rd_b = !stall_self &&
+assign l1_rd_b = fxi_ld_go || !stall_self &&
                  (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go || ck_ld_go ||
                   m16_ld_go || c2_ld_go || fp_ld_go);
 
@@ -1768,7 +1837,8 @@ wire        ml_rd_dr  = eac_ml[6] && eac_ml[5] && eac_ml[3] && (eac_ml[2:0] != e
 // use -- they store nothing -- and ap040_execute.v writes it early.
 wire        ml_an3    = eac_ml[6] && (eac_ml[5] || eac_ml[3]) && (eac_ml[2:0] != eac_dest_reg[2:0]) &&
                         (eac_is_postinc || eac_is_predec);
-assign raddr_c    = c2_use_c ? c2_rc :
+assign raddr_c    = (fx_hold && fx_dst) ? mm_didx_reg :   // a MOVE destination's pointer read
+                    c2_use_c ? c2_rc :
                     mm_dphase ? mm_didx_reg :
                     bf_use_c  ? bf_rc :
                     (cas && mem_pending) ? {1'b0, eac_cas[2:0]} :
@@ -1989,7 +2059,8 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = fp_active    ? fp_mem_addr  :
+wire [31:0] l1_addr_word = fxi_rd       ? fxi_addr     :
+                            fp_active    ? fp_mem_addr  :
                             mvm_active   ? mvm_cur_addr :
                             mvp_active   ? mvp_addr     :
                             bf_active    ? bf_cur_addr  :
@@ -2043,7 +2114,8 @@ assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
 // -- is a Longword.
-assign l1_size_b = fp_active    ? fp_mem_size :
+assign l1_size_b = fxi_rd       ? `AP040_SZ_L :
+                   fp_active    ? fp_mem_size :
                    mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
                    mvp_active   ? `AP040_SZ_B :
                    bf_active    ? bf_cur_sz :

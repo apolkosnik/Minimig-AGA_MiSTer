@@ -93,6 +93,9 @@ module ap040_ea_calc
 	input       [8:0] id_fp_op,
 	input      [15:0] id_fp_cmd,
 	input      [95:0] id_fp_imm,
+	input       [5:0] id_fx,        // a full-format extension (2026-09-24)
+	input      [31:0] id_fx_bd,
+	input      [31:0] id_fx_od,
 	input       [5:0] id_alu_op,
 	input       [1:0] id_size,
 	input       [5:0] id_shcnt,
@@ -177,6 +180,9 @@ module ap040_ea_calc
 	output reg  [8:0] eac_fp_op,
 	output reg [15:0] eac_fp_cmd,
 	output reg [95:0] eac_fp_imm,
+	output reg  [5:0] eac_fx,
+	output reg [31:0] eac_fx_bd,
+	output reg [31:0] eac_fx_od,
 	output reg  [5:0] eac_alu_op,
 	output reg  [1:0] eac_size,
 	output reg  [5:0] eac_shcnt,
@@ -260,6 +266,9 @@ always @(posedge clk) begin
 		eac_fp_op        <= 9'd0;
 		eac_fp_cmd       <= 16'd0;
 		eac_fp_imm       <= 96'd0;
+		eac_fx           <= 6'd0;
+		eac_fx_bd        <= 32'd0;
+		eac_fx_od        <= 32'd0;
 		eac_alu_op       <= 6'h0;
 		eac_size         <= `AP040_SZ_L;
 		eac_shcnt        <= 6'd1;
@@ -341,6 +350,9 @@ always @(posedge clk) begin
 			eac_fp_op        <= id_fp_op;
 			eac_fp_cmd       <= id_fp_cmd;
 			eac_fp_imm       <= id_fp_imm;
+			eac_fx           <= id_fx;
+			eac_fx_bd        <= id_fx_bd;
+			eac_fx_od        <= id_fx_od;
 			eac_alu_op       <= id_alu_op;
 			eac_size         <= id_size;
 			eac_shcnt        <= id_shcnt;
