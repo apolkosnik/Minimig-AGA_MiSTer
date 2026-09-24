@@ -1799,6 +1799,24 @@ wire addr_use_b   = (eac_uses_ea || eac_is_chk) &&
                     (st_base_b || eac_is_bsr || eac_is_jsr || eac_is_pea || eac_is_link ||
                      mm || ck || cas || eac_is_chk);
 wire addr_hz      = live && ((addr_use_a && lf_a) || (addr_use_b && lf_b));
+// Three holds the lists above leave out on purpose, each covered some other
+// way; the mutations dropping them survived every bench, so the reasons are
+// checked here instead of trusted. CHK2/CMP2's and CAS's verdict operands
+// and a displacement store's base all come with an extension word, and
+// decode's gather keeps every gathered instruction a cycle behind its
+// producer, so none of them meets a long forward here; CHK's checked
+// register (port B) is held by chk_fwd_hazard whenever EX writes it.
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live) begin
+		if ((ck || cas) && lf_b)
+			$error("ap040_ea_fetch: CHK2/CAS at %h meets a long forward on its verdict operand", eac_pc);
+		if (eac_is_store && eac_st_disp && lf_a)
+			$error("ap040_ea_fetch: displacement store at %h meets a long forward on its base", eac_pc);
+		if (eac_is_chk && lf_b && !chk_fwd_hazard)
+			$error("ap040_ea_fetch: CHK at %h meets a long forward on port B that chk_fwd_hazard missed", eac_pc);
+	end
+`endif
 // MOVES reads SFC/DFC here, and needs no wait behind the MOVEC that sets
 // them: both carry an extension word, and the gathers keep MOVES back until
 // the MOVEC has committed (the hold this used to have survived its
