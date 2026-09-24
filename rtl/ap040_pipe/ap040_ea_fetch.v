@@ -253,6 +253,7 @@ module ap040_ea_fetch
 	// A MOVEC to a stack pointer is in EX (milestone 92): its write lands
 	// through the register file's auxiliary port, which no forward reaches.
 	input             ex_creg_sp,
+	input             ex_creg_any,
 	// An OLDER instruction's write to A7 has not reached the register file
 	// yet (milestone 93). The exception sequencer reads the stack pointer
 	// straight out of the file, so its frame base is stale until this
@@ -275,6 +276,8 @@ module ap040_ea_fetch
 	input       [2:0] eac_movep,
 	input       [6:0] eac_ml,
 	input       [4:0] eac_bf,
+	input       [2:0] eac_ck2,
+	input       [3:0] eac_cas,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -336,6 +339,8 @@ module ap040_ea_fetch
 	input             eac_is_rts,
 	input             eac_is_rte,
 	input             eac_is_nop,
+	input             eac_is_rtr,
+	input             eac_is_reset,
 	input       [3:0] eac_cond,
 
 	// Architectural SR (milestone 15: widened from a 5-bit CCR-only port to
@@ -433,6 +438,9 @@ module ap040_ea_fetch
 	output reg  [1:0] eaf_mvfsr,
 	output reg  [6:0] eaf_ml,
 	output reg  [2:0] eaf_bf,       // bitfield: {it is one, N, Z} -- EX takes the flags from here
+	output reg  [2:0] eaf_ck2,      // CMP2/CHK2: {it is one, Z, C}
+	output reg  [4:0] eaf_casf,     // CAS: {it is one, N, Z, V, C} -- CMP's flags
+	output reg  [5:0] eaf_rtr_ccr,  // RTR: {it is one, the popped X N Z V C}
 	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
 	output            rf3_we,
 	output      [3:0] rf3_addr,
@@ -804,6 +812,79 @@ assign bf_clz = bf_clz32(bf_al);
 wire [39:0] bf_head   = ~(40'hFF_FFFF_FFFF >> bf_bib);
 wire [39:0] bf_nw40   = ({bf_w1, bf_w2} & bf_head) | (bf_t40 >> bf_bib);
 
+// -------------------------------------------------------------- CHK2/CMP2
+// Two sized reads, the lower bound at ea and the upper at ea + size
+// (milestone 117), then ap040_core.v's S_CHK2_D: everything sign-extended
+// by size except an address register, which compares whole; out of bounds
+// is judged the other way round when the bounds are reversed. Z and C are
+// all it writes. A CHK2 out of bounds becomes CHK's own vector-6 entry
+// through eac_is_chk_trap, with its Z and C in the stacked SR.
+localparam [2:0] CK_RD1 = 3'd1, CK_RD1W = 3'd2, CK_RD2 = 3'd3, CK_RD2W = 3'd4, CK_DONE = 3'd5;
+reg         ck_active;
+reg   [2:0] ck_ph;
+reg  [31:0] ck_ea, ck_lb;
+reg         ck_z, ck_c;
+wire        ck      = eac_ck2[2];
+wire        ck_chk  = eac_ck2[1];
+wire        ck_an   = eac_ck2[0];
+function [31:0] ck_sx;
+	input [31:0] v;
+	input  [1:0] sz;
+	begin
+		ck_sx = (sz == `AP040_SZ_B) ? {{24{v[7]}}, v[7:0]} :
+		        (sz == `AP040_SZ_W) ? {{16{v[15]}}, v[15:0]} : v;
+	end
+endfunction
+wire [31:0] ck_step   = (eac_size == `AP040_SZ_B) ? 32'd1 : (eac_size == `AP040_SZ_W) ? 32'd2 : 32'd4;
+wire [31:0] ck_addr   = (ck_ph == CK_RD2) ? (ck_ea + ck_step) : ck_ea;
+wire        ck_ld_go  = ck_active && ((ck_ph == CK_RD1) || (ck_ph == CK_RD2)) && !port_taken;
+wire        ck_fin    = ck_active && (ck_ph == CK_DONE);
+wire        ck_stall  = eac_valid && ck && !ck_fin && !trace_hold && !ae_busy;
+wire signed [31:0] ck_rn = ck_an ? operand_b : ck_sx(operand_b, eac_size);
+wire signed [31:0] ck_lbs = ck_lb;
+wire signed [31:0] ck_ubs = ck_sx(l1_q_b, eac_size);
+wire        ck_oob    = (ck_lbs <= ck_ubs) ? ((ck_rn < ck_lbs) || (ck_rn > ck_ubs))
+                                           : ((ck_rn < ck_lbs) && (ck_rn > ck_ubs));
+wire        ck2_trap  = eac_valid && ck && ck_chk && ck_fin && ck_c;
+
+// ------------------------------------------------------------------- CAS
+// (milestone 117) The load is an ordinary one; this is its completion.
+// Du comes through port C once the load is out, the way a 64-bit divide's
+// Dr does. CMP's flags are for <ea> - Dc at the operand size.
+wire        cas     = eac_cas[3];
+function [3:0] cas_cmp;   // {N, Z, V, C} of d - s at size sz
+	input [31:0] d, s;
+	input  [1:0] sz;
+	reg   [32:0] r;
+	reg          dm, sm, rm;
+	begin
+		r  = {1'b0, d} - {1'b0, s};
+		case (sz)
+		`AP040_SZ_B: begin
+			r = {24'd0, {1'b0, d[7:0]} - {1'b0, s[7:0]}};
+			dm = d[7];  sm = s[7];  rm = r[7];
+			cas_cmp = {rm, (r[7:0] == 8'd0), (dm != sm) && (rm != dm), r[8]};
+		end
+		`AP040_SZ_W: begin
+			r = {16'd0, {1'b0, d[15:0]} - {1'b0, s[15:0]}};
+			dm = d[15]; sm = s[15]; rm = r[15];
+			cas_cmp = {rm, (r[15:0] == 16'd0), (dm != sm) && (rm != dm), r[16]};
+		end
+		default: begin
+			dm = d[31]; sm = s[31]; rm = r[31];
+			cas_cmp = {rm, (r[31:0] == 32'd0), (dm != sm) && (rm != dm), r[32]};
+		end
+		endcase
+	end
+endfunction
+wire  [3:0] cas_fl  = cas_cmp(mem_lane, operand_b, eac_size);
+// The store goes where the load went. ea_target is not that address at
+// completion for (d8,An,Xn): port C has moved from the index to Du, so
+// idx_val is Du and the store landed at base + Du + d8. Latched at issue,
+// the way bf_ea and ck_ea are.
+reg  [31:0] cas_ea;
+wire        cas_eq  = cas_fl[2];
+
 assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
 assign rf3_addr = mvm_rd_reg;
 // A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
@@ -879,7 +960,7 @@ wire rte_fmt_now_ok  = (l1_q_b[15:12] == 4'h0) || (l1_q_b[15:12] == 4'h2) ||
 // and the stage reads the state the frame needs.
 wire rte_odd_now     = live && eac_is_rte && !eac_is_priv && !trace_hold &&
                        ret_pending && l1_rvalid_b && (ret_ph == RET_BEAT1_E) &&
-                       rte_fmt_now_ok && rte_pc_now[0];
+                       (rte_fmt_now_ok || eac_is_rtr) && rte_pc_now[0];
 reg        ae_arm;
 reg        ae_susp;
 reg [31:0] ae_pc_r;    // the RTE's own address, which the frame's PC field carries
@@ -964,7 +1045,7 @@ wire chk_now = eac_valid && eac_is_chk &&
 reg exc_pend_chk;
 reg exc_pend_chk_n;
 reg exc_pend_chk_c;
-wire eac_is_chk_trap = chk_now || exc_pend_chk;
+wire eac_is_chk_trap = chk_now || exc_pend_chk || ck2_trap;
 
 // TRAPcc (milestone 74). The condition is evaluated HERE, on sr_in's low
 // five bits -- the live, forwarded CCR -- because this is where a frame
@@ -1136,7 +1217,19 @@ wire live         = eac_valid && !flush;
 // answers it. MOVEC to a stack pointer is setup code, so the cost is
 // nothing.
 wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
-wire creg_hazard  = live && ex_creg_sp && sp_read_a;
+// The same one cycle for a control register READ (milestone 117). EX reads
+// the registered copy (creg_read_value), and a MOVEC or an RTE's stack
+// restore one instruction ahead commits it in WB, the cycle that reader
+// spends in EX: MOVE A0,USP; MOVE USP,A1 read the old USP.
+// An A7 write ahead of a USP/ISP/MSP read would be the same hazard, and is
+// not listed because it cannot happen. Only MOVE USP,An is one word; it
+// reads USP, runs in supervisor mode, and no supervisor A7 write lands in
+// USP. MOVEC gathers, and decode's gather freezes with every stall, so it
+// arrives at least two stages behind anything -- tried behind MOVEA, UNLK
+// and a load held up by a store, and never closer.
+wire movec_rd       = eac_is_movec && !eac_imm[4];
+wire creg_rd_hazard = movec_rd && ex_creg_any;
+wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1194,7 +1287,7 @@ reg       exc_vec_pending;
 // cycle -- see header for why the check couldn't happen any earlier.
 // The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
 // that is the whole difference between them at this level.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte || eac_moves[2] ||
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset ||
                             (eac_mvfsr[1] && !eac_mvfsr[0]) ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
@@ -1234,9 +1327,11 @@ wire own_exc      = !trace_hold && !ae_hold;   // the held instruction's own fau
 // instructions the 68040 defines as changes of flow: taken branches and
 // DBcc, BSR/JMP/JSR, RTS/RTE, every exception entry, and the non-branch
 // ones that resynchronise the pipeline -- MOVE to SR, ORI/ANDI/EORI to SR,
-// MOVEC to a control register, NOP (ap040_core.v's t0_special, which
-// cputest confirmed on hardware; MOVE An,USP and MOVES/CAS/CINV/CPUSH/FSAVE
-// are not decoded here). A conditional branch's taken-ness is only known in
+// MOVEC to a control register, NOP, MOVES, CAS (ap040_core.v's t0_special,
+// which cputest confirmed on hardware; MOVE An,USP and CINV/CPUSH/FSAVE are
+// not decoded here). MOVES joined the list late: milestone 113 decoded it
+// without it, and under T0 the instruction after it retired before the
+// trace, the frame naming that later instruction (review 13). A conditional branch's taken-ness is only known in
 // EX, so it arms provisionally (trace_arm_cond) and EX's verdict confirms or
 // cancels the arm: EX resolves the cycle after the branch departs, and the
 // hold on the next instruction outlasts that. T1 traces everything and
@@ -1271,7 +1366,7 @@ wire t0_flow_static = eac_is_bsr || eac_is_jmp || eac_is_jsr || eac_is_rts || ea
                       eac_is_movesr ||
                       (eac_is_immsr && eac_immsr_to_sr && !eac_is_stop) ||
                       (eac_is_stop && stop_t0_change) ||
-                      (eac_is_movec && eac_imm[4]) || eac_is_nop;
+                      (eac_is_movec && eac_imm[4]) || eac_is_nop || eac_moves[2] || eac_cas[3];
 wire t0_flow_cond   = eac_is_branch || eac_is_dbcc;
 wire traced_now     = sr_in[15] || (sr_in[14] && (t0_flow_static || t0_flow_cond));
 wire traced_cond    = !sr_in[15] && sr_in[14] && t0_flow_cond && !t0_flow_static;
@@ -1408,7 +1503,7 @@ wire ret_stall    = ret_active && !ret_done;
 // eighteen times. The earlier fix gated the ordinary store alone, which was
 // the reported symptom rather than the defect.
 assign l1_rd_b = !stall_self &&
-                 (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go);
+                 (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go || ck_ld_go);
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
 // for everything but address error; $2 and $3 are the six-word frames ($3
@@ -1427,7 +1522,7 @@ assign l1_rd_b = !stall_self &&
 wire [3:0] ret_fmt      = l1_q_b[15:12];
 wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
 wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
-assign fmterr_now = ret_done && !ret_fmt_ok;
+assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second word is not a format
 
 // One cycle, and only for an instruction that actually reads A7. A MOVEC
 // to the active stack pointer commits through the auxiliary port, so a
@@ -1436,7 +1531,7 @@ assign fmterr_now = ret_done && !ret_fmt_ok;
 // puts the read in the commit cycle, where the auxiliary bypass answers
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
 assign eaf_stall = stall_in || creg_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
-                   ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall ||
+                   ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall || ck_stall ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
@@ -1460,6 +1555,7 @@ assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 wire        ml_rd_dr  = eac_ml[6] && eac_ml[5] && eac_ml[3] && (eac_ml[2:0] != eac_dest_reg[2:0]);
 assign raddr_c    = mm_dphase ? mm_didx_reg :
                     bf_use_c  ? bf_rc :
+                    (cas && mem_pending) ? {1'b0, eac_cas[2:0]} :
                     (ml_rd_dr && (!eac_is_mem_src || mem_pending)) ? {1'b0, eac_ml[2:0]} : idx_reg;
 wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == raddr_c);
 wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_c);
@@ -1565,7 +1661,9 @@ wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 // already had this exclusion. eac_is_addrerr stays true for the whole
 // entry (exc_pend_addrerr && exc_go), so the choice holds while the frame
 // is written.
-wire [15:0] sr_faulted     = (eac_is_chk_trap && !eac_is_trace && !eac_is_addrerr)
+wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_addrerr)
+                              ? {sr_in[15:3], ck_z, sr_in[1], ck_c} :
+                             (eac_is_chk_trap && !eac_is_trace && !eac_is_addrerr)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:1],
                                  (exc_pend_chk ? exc_pend_chk_c : chk_c)}
@@ -1671,6 +1769,10 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             mvp_active   ? mvp_addr     :
                             bf_active    ? bf_cur_addr  :
+                            // ...but not once finished: a CHK2 out of bounds takes its
+                            // exception with the sequencer still up, and the frame
+                            // beats below must win the port (milestone 117).
+                            (ck_active && !ck_fin) ? ck_addr :
                             // A store with a displacement takes the LOAD's
                             // adder instead of one of its own (milestone
                             // 91): decode points eac_src_reg at An for
@@ -1717,6 +1819,7 @@ assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
 assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
                    mvp_active   ? `AP040_SZ_B :
                    bf_active    ? bf_cur_sz :
+                   (ck_active && !ck_fin) ? eac_size :
                    store_now    ? eac_size :
                    eac_is_push  ? `AP040_SZ_L :
                    exc_writing  ? `AP040_SZ_L :
@@ -1832,6 +1935,16 @@ always @(posedge clk) begin
 		bf_n           <= 1'b0;
 		bf_z           <= 1'b0;
 		eaf_bf         <= 3'd0;
+		ck_active      <= 1'b0;
+		ck_ph          <= CK_RD1;
+		ck_ea          <= 32'h0;
+		cas_ea         <= 32'h0;
+		ck_lb          <= 32'h0;
+		ck_z           <= 1'b0;
+		ck_c           <= 1'b0;
+		eaf_ck2        <= 3'd0;
+		eaf_casf       <= 5'd0;
+		eaf_rtr_ccr    <= 6'd0;
 		mvm_mask       <= 16'h0;
 		mvm_addr       <= 32'h0;
 		mvm_dir        <= 1'b0;
@@ -1982,6 +2095,7 @@ always @(posedge clk) begin
 			mvp_rd_pend     <= 1'b0;
 			bf_active       <= 1'b0;
 			bf_ph           <= BF_EA;
+			ck_active       <= 1'b0;
 			exc_pend_divzero <= 1'b0;
 			exc_pend_addrerr <= 1'b0;
 			exc_pend_chk     <= 1'b0;
@@ -2019,6 +2133,7 @@ always @(posedge clk) begin
 			end else if (mem_issue) begin
 				eaf_valid   <= 1'b0;
 				mem_pending <= 1'b1;
+				cas_ea      <= ea_target;
 			end else if (mem_complete) begin
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
@@ -2039,7 +2154,10 @@ always @(posedge clk) begin
 				// is NOT available as the source here: it is the address
 				// base, which is exactly why id_src_a_is_imm stays clear for
 				// this form (milestone 89).
-				eaf_operand_a  <= eac_immrmw ? eac_imm   :
+				// CAS (milestone 117): equal -- store Du; not equal -- the value
+				// goes to Dc, merged at the operand size by EX's alu_sized.
+				eaf_operand_a  <= cas        ? (cas_eq ? operand_c : mem_lane) :
+				                  eac_immrmw ? eac_imm   :
 				                  eac_is_rmw ? operand_b : mem_lane;
 				// Every classification flag this stage exports, because a
 				// path that leaves one alone hands the NEXT instruction the
@@ -2065,14 +2183,18 @@ always @(posedge clk) begin
 				// eac_* will have moved on by then.
 				// BTST to memory is marked RMW for the operand crossover only
 				// and writes nothing back (milestone 113).
-				eaf_is_rmw     <= (eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST)) || mm;
+				eaf_is_rmw     <= (eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST)) || mm || (cas && cas_eq);
+				eaf_casf       <= {cas, cas_fl};
 				eaf_is_mm      <= mm;
 				eaf_mvfsr      <= eac_mvfsr;
 				eaf_ml         <= eac_ml;
 				if (!bfv) eaf_bf <= 3'd0;
+				if (!ck) eaf_ck2 <= 3'd0;
+				if (!cas) eaf_casf <= 5'd0;
+				eaf_rtr_ccr    <= 6'd0;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
-				eaf_ea_target  <= mm ? mm_daddr : ea_target;
+				eaf_ea_target  <= mm ? mm_daddr : cas ? cas_ea : ea_target;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
 				// already route through eaf_operand_a -- but this stage
@@ -2098,7 +2220,7 @@ always @(posedge clk) begin
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
-				eaf_writes_reg <= eac_writes_reg;
+				eaf_writes_reg <= eac_writes_reg && !(cas && cas_eq);
 				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
 				eaf_is_scc     <= eac_is_scc;
@@ -2208,6 +2330,27 @@ always @(posedge clk) begin
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
 					mvm_addr    <= mvm_nxt_addr;
 				end
+			end else if (eac_valid && ck && !ck_fin && !trace_hold && !ae_busy) begin
+				// CHK2/CMP2 (see its header); eac_* frozen by ck_stall.
+				eaf_valid <= 1'b0;
+				if (!ck_active) begin
+					ck_active <= 1'b1;
+					ck_ea     <= ea_target;
+					ck_ph     <= CK_RD1;
+				end else case (ck_ph)
+				CK_RD1:  if (ck_ld_go) ck_ph <= CK_RD1W;
+				CK_RD1W: if (l1_rvalid_b) begin
+					ck_lb <= ck_sx(l1_q_b, eac_size);
+					ck_ph <= CK_RD2;
+				end
+				CK_RD2:  if (ck_ld_go) ck_ph <= CK_RD2W;
+				CK_RD2W: if (l1_rvalid_b) begin
+					ck_z  <= (ck_rn == ck_lbs) || (ck_rn == ck_ubs);
+					ck_c  <= ck_oob;
+					ck_ph <= CK_DONE;
+				end
+				default: ;
+				endcase
 			end else if (eac_valid && bfv && !bf_fin && !trace_hold && !ae_busy) begin
 				// The bitfield sequencer (see its header). eac_* is frozen by
 				// bf_stall throughout.
@@ -2350,6 +2493,10 @@ always @(posedge clk) begin
 				// vector read in flight (milestone 80) -- same as mem_pending above
 				eaf_valid       <= 1'b0;
 			end else if (exc_vec_done) begin
+				ck_active      <= 1'b0;
+				eaf_ck2        <= 3'd0;
+				eaf_casf       <= 5'd0;
+				eaf_rtr_ccr    <= 6'd0;
 				// l1_q_b now holds the handler address fetched last cycle.
 				// eaf_operand_a carries it into ap040_execute.v's
 				// ex_recovery_pc exactly like JMP/JSR's redirect target;
@@ -2432,6 +2579,9 @@ always @(posedge clk) begin
 				eaf_mvfsr      <= 2'd0;
 				eaf_ml         <= 7'd0;
 				eaf_bf         <= 3'd0;
+				eaf_ck2        <= 3'd0;
+				eaf_casf       <= 5'd0;
+				eaf_rtr_ccr    <= 6'd0;
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
@@ -2539,7 +2689,16 @@ always @(posedge clk) begin
 				trace_arm       <= traced_now && !rte_pc_now[0];   // judged on the SR BEFORE the RTE
 				trace_arm_cond  <= 1'b0;         // (RTE is a change of flow, so T0 traces it too)
 				trace_pc        <= eac_pc;
-				eaf_operand_b   <= operand_a +
+				// RTR (milestone 117) parts from RTE here. It leaves as an RTS
+				// -- the redirect, and A7 through the main port, banked by an
+				// S bit RTR cannot change, so a user-mode RTR moves USP where
+				// RTE's fixed ISP/MSP write would have missed it -- with the
+				// popped CCR committed by EX (eaf_rtr_ccr). An odd PC leaves A7
+				// where it was: ap040_core.v's S_RET3 backs the pop out before
+				// the address error, which rte_odd_now then owes exactly as it
+				// does an RTE's, the frame carrying the popped CCR.
+				eaf_operand_b   <= eac_is_rtr ? (operand_a + (rte_pc_now[0] ? 32'd0 : 32'd6)) :
+				                   operand_a +
 				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
@@ -2557,8 +2716,8 @@ always @(posedge clk) begin
 				// still computed above) is instead consumed by
 				// ap040_execute.v's exe_writes_creg path, writing directly
 				// to ISP/MSP.
-				eaf_writes_reg  <= 1'b0;
-				eaf_writes_ccr  <= 1'b0;
+				eaf_writes_reg  <= eac_is_rtr;
+				eaf_writes_ccr  <= eac_is_rtr;
 				eaf_is_branch   <= 1'b0;
 				eaf_is_scc      <= 1'b0;
 				eaf_is_dbcc     <= 1'b0;
@@ -2568,6 +2727,9 @@ always @(posedge clk) begin
 				eaf_mvfsr       <= 2'd0;
 				eaf_ml          <= 7'd0;
 				eaf_bf          <= 3'd0;
+				eaf_ck2         <= 3'd0;
+				eaf_casf        <= 5'd0;
+				eaf_rtr_ccr     <= {eac_is_rtr, ret_dword0[20:16]};
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
@@ -2586,8 +2748,8 @@ always @(posedge clk) begin
 				eaf_is_divzero  <= 1'b0;
 				eaf_is_movesr   <= 1'b0;
 				eaf_is_movec    <= 1'b0;
-				eaf_is_rts      <= 1'b0;
-				eaf_is_rte      <= 1'b1;
+				eaf_is_rts      <= eac_is_rtr;
+				eaf_is_rte      <= !eac_is_rtr;
 				eaf_is_fmterr  <= 1'b0;
 				eaf_is_trace   <= 1'b0;
 				// Popped SR, masked -- ap040_execute.v's new commit source
@@ -2610,6 +2772,8 @@ always @(posedge clk) begin
 				bf_active      <= 1'b0;
 				bf_ph          <= BF_EA;
 				eaf_bf         <= {bfv, bf_n, bf_z};
+				ck_active      <= 1'b0;
+				eaf_ck2        <= {ck, ck_z, ck_c};
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
 				if (eac_valid) begin   // a bubble departing here must not drop a pending trace
@@ -2677,6 +2841,9 @@ always @(posedge clk) begin
 				eaf_mvfsr      <= eac_mvfsr;
 				eaf_ml         <= eac_ml;
 				if (!bfv) eaf_bf <= 3'd0;
+				if (!ck) eaf_ck2 <= 3'd0;
+				if (!cas) eaf_casf <= 5'd0;
+				eaf_rtr_ccr    <= 6'd0;
 				if (mm) eaf_ea_target <= mm_daddr;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;

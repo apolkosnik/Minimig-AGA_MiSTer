@@ -213,6 +213,8 @@ wire  [1:0] id_pc_off;
 wire  [2:0] id_movep;
 wire  [6:0] id_ml;
 wire  [4:0] id_bf;
+wire  [2:0] id_ck2;
+wire  [3:0] id_cas;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -244,6 +246,7 @@ wire [31:0] exe_result_data2;
 wire        exe_writes_reg2;
 wire  [1:0] exe_an_sel;
 wire        ex_creg_sp;
+wire        ex_creg_any;
 wire        ex_st_sup;
 // A write to A7 that has not landed in the register file yet: one in EX
 // through either port, or one committing this cycle, whose value the file
@@ -269,7 +272,7 @@ wire        id_chk_long, eac_chk_long;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire  [1:0] id_illegal_kind, eac_illegal_kind;
 wire        id_is_movesr, id_is_movec;
-wire        id_is_rts, id_is_rte, id_is_nop;
+wire        id_is_rts, id_is_rte, id_is_nop, id_is_reset, id_is_rtr;
 wire  [3:0] id_cond;
 
 wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
@@ -283,6 +286,8 @@ wire [31:0] eac_pc_base;
 wire  [2:0] eac_movep;
 wire  [6:0] eac_ml;
 wire  [4:0] eac_bf;
+wire  [2:0] eac_ck2;
+wire  [3:0] eac_cas;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -305,10 +310,13 @@ wire        eaf_is_rmw, eaf_is_link, eaf_is_mm;
 wire  [1:0] eaf_mvfsr;
 wire  [6:0] eaf_ml;
 wire  [2:0] eaf_bf;
+wire  [2:0] eaf_ck2;
+wire  [4:0] eaf_casf;
+wire  [5:0] eaf_rtr_ccr;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
-wire        eac_is_rts, eac_is_rte, eac_is_nop;
+wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr;
 wire  [3:0] eac_cond;
 
 wire        eaf_valid; wire [31:0] eaf_pc; wire [31:0] eaf_next_pc;
@@ -763,6 +771,8 @@ ap040_decode u_id
 	.id_movep           (id_movep),
 	.id_ml              (id_ml),
 	.id_bf              (id_bf),
+	.id_ck2             (id_ck2),
+	.id_cas             (id_cas),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -814,6 +824,8 @@ ap040_decode u_id
 	.id_is_movec     (id_is_movec),
 	.id_is_rts       (id_is_rts),
 	.id_is_nop       (id_is_nop),
+	.id_is_rtr       (id_is_rtr),
+	.id_is_reset     (id_is_reset),
 	.id_is_rte       (id_is_rte),
 	.id_cond         (id_cond)
 );
@@ -840,6 +852,8 @@ ap040_ea_calc u_eac
 	.id_movep            (id_movep),
 	.id_ml               (id_ml),
 	.id_bf               (id_bf),
+	.id_ck2              (id_ck2),
+	.id_cas              (id_cas),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -891,6 +905,8 @@ ap040_ea_calc u_eac
 	.id_is_movec      (id_is_movec),
 	.id_is_rts        (id_is_rts),
 	.id_is_nop        (id_is_nop),
+	.id_is_rtr        (id_is_rtr),
+	.id_is_reset      (id_is_reset),
 	.id_is_rte        (id_is_rte),
 	.id_cond          (id_cond),
 
@@ -910,6 +926,8 @@ ap040_ea_calc u_eac
 	.eac_movep           (eac_movep),
 	.eac_ml              (eac_ml),
 	.eac_bf              (eac_bf),
+	.eac_ck2             (eac_ck2),
+	.eac_cas             (eac_cas),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -961,6 +979,8 @@ ap040_ea_calc u_eac
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_is_rtr       (eac_is_rtr),
+	.eac_is_reset     (eac_is_reset),
 	.eac_is_rte       (eac_is_rte),
 	.eac_cond         (eac_cond)
 );
@@ -989,6 +1009,8 @@ ap040_ea_fetch #(
 	.eac_movep           (eac_movep),
 	.eac_ml              (eac_ml),
 	.eac_bf              (eac_bf),
+	.eac_ck2             (eac_ck2),
+	.eac_cas             (eac_cas),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1055,6 +1077,9 @@ ap040_ea_fetch #(
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),
+	.eaf_ck2          (eaf_ck2),
+	.eaf_casf         (eaf_casf),
+	.eaf_rtr_ccr      (eaf_rtr_ccr),
 	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -1065,6 +1090,8 @@ ap040_ea_fetch #(
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_is_rtr       (eac_is_rtr),
+	.eac_is_reset     (eac_is_reset),
 	.eac_is_rte       (eac_is_rte),
 	.eac_cond         (eac_cond),
 
@@ -1110,6 +1137,7 @@ ap040_ea_fetch #(
 	.eaf_writes_an    (eaf_writes_an),
 	.eaf_an_sel       (eaf_an_sel),
 	.ex_creg_sp       (ex_creg_sp),
+	.ex_creg_any      (ex_creg_any),
 	.a7_busy          (a7_busy),
 	.eaf_an_reg       (eaf_an_reg),
 	.eaf_an_data      (eaf_an_data),
@@ -1203,6 +1231,9 @@ ap040_execute u_ex
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),
+	.eaf_ck2          (eaf_ck2),
+	.eaf_casf         (eaf_casf),
+	.eaf_rtr_ccr      (eaf_rtr_ccr),
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
@@ -1256,6 +1287,7 @@ ap040_execute u_ex
 	.exe_writes_sr    (exe_writes_sr),
 	.exe_sr_data      (exe_sr_data),
 	.ex_creg_sp       (ex_creg_sp),
+	.ex_creg_any      (ex_creg_any),
 	.ex_st_sup        (ex_st_sup),
 	.exe_writes_creg  (exe_writes_creg),
 	.exe_creg_sel     (exe_creg_sel),

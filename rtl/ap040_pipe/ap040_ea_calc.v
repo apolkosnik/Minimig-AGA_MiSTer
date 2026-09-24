@@ -86,6 +86,8 @@ module ap040_ea_calc
 	input       [2:0] id_movep,
 	input       [6:0] id_ml,
 	input       [4:0] id_bf,
+	input       [2:0] id_ck2,
+	input       [3:0] id_cas,
 	input       [5:0] id_alu_op,
 	input       [1:0] id_size,
 	input       [5:0] id_shcnt,
@@ -137,6 +139,8 @@ module ap040_ea_calc
 	input             id_is_movec,
 	input             id_is_rts,
 	input             id_is_nop,
+	input             id_is_rtr,
+	input             id_is_reset,
 	input             id_is_rte,
 	input       [3:0] id_cond,
 
@@ -160,6 +164,8 @@ module ap040_ea_calc
 	output reg  [2:0] eac_movep,
 	output reg  [6:0] eac_ml,
 	output reg  [4:0] eac_bf,
+	output reg  [2:0] eac_ck2,
+	output reg  [3:0] eac_cas,
 	output reg  [5:0] eac_alu_op,
 	output reg  [1:0] eac_size,
 	output reg  [5:0] eac_shcnt,
@@ -211,6 +217,8 @@ module ap040_ea_calc
 	output reg        eac_is_movec,
 	output reg        eac_is_rts,
 	output reg        eac_is_nop,
+	output reg        eac_is_rtr,
+	output reg        eac_is_reset,
 	output reg        eac_is_rte,
 	output reg  [3:0] eac_cond
 );
@@ -233,6 +241,8 @@ always @(posedge clk) begin
 		eac_movep        <= 3'd0;
 		eac_ml           <= 7'd0;
 		eac_bf           <= 5'd0;
+		eac_ck2          <= 3'd0;
+		eac_cas          <= 4'd0;
 		eac_alu_op       <= 6'h0;
 		eac_size         <= `AP040_SZ_L;
 		eac_shcnt        <= 6'd1;
@@ -284,6 +294,8 @@ always @(posedge clk) begin
 		eac_is_movec     <= 1'b0;
 		eac_is_rts       <= 1'b0;
 		eac_is_nop       <= 1'b0;
+		eac_is_rtr       <= 1'b0;
+		eac_is_reset     <= 1'b0;
 		eac_is_rte       <= 1'b0;
 		eac_cond         <= 4'h0;
 	end else if (ce) begin
@@ -304,6 +316,8 @@ always @(posedge clk) begin
 			eac_movep        <= id_movep;
 			eac_ml           <= id_ml;
 			eac_bf           <= id_bf;
+			eac_ck2          <= id_ck2;
+			eac_cas          <= id_cas;
 			eac_alu_op       <= id_alu_op;
 			eac_size         <= id_size;
 			eac_shcnt        <= id_shcnt;
@@ -355,6 +369,8 @@ always @(posedge clk) begin
 			eac_is_movec     <= id_is_movec;
 			eac_is_rts       <= id_is_rts;
 			eac_is_nop       <= id_is_nop;
+			eac_is_rtr       <= id_is_rtr;
+			eac_is_reset     <= id_is_reset;
 			eac_is_rte       <= id_is_rte;
 			eac_cond         <= id_cond;
 		end

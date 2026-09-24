@@ -212,6 +212,9 @@ module ap040_execute
 	input       [1:0] eaf_mvfsr,
 	input       [6:0] eaf_ml,
 	input       [2:0] eaf_bf,
+	input       [2:0] eaf_ck2,
+	input       [4:0] eaf_casf,
+	input       [5:0] eaf_rtr_ccr,
 	input      [31:0] eaf_ea_target,
 	input             l1_wr_busy,
 	output            ex_st_req,
@@ -289,6 +292,9 @@ module ap040_execute
 	// commits through the register file's auxiliary port, which no forward
 	// reaches, so a reader of A7 one instruction behind has to wait for it.
 	output            ex_creg_sp,
+	// ...and any control register at all (milestone 117): a MOVEC read
+	// behind it takes the registered value, which is a cycle late.
+	output            ex_creg_any,
 	// The privilege of EX's own memory write (milestone 93). When EX takes
 	// port B its address, size and data all come from here; the privilege
 	// used to come from EA-fetch, where a YOUNGER exception forces
@@ -773,6 +779,7 @@ wire [15:0] exe_sr_data_c   = (exc_reaching_ex ? ((eaf_sr_snapshot & 16'h1FFF) |
 // established for the exception-entry push.
 wire exe_writes_creg_c = (eaf_valid && eaf_is_movec && eaf_movec_dir) ||
                           (eaf_valid && eaf_is_rte);
+assign ex_creg_any = exe_writes_creg_c;
 assign ex_creg_sp = exe_writes_creg_c &&
                     (exe_creg_sel_c == `AP040_CREG_USP ||
                      exe_creg_sel_c == `AP040_CREG_ISP ||
@@ -790,7 +797,13 @@ assign ex_fwd_data  = combined_result;
 // An in-bounds CHK clears N and C and leaves X, Z and V (milestone 112).
 // A bitfield's N and Z were settled by ap040_ea_fetch.v's sequencer
 // (milestone 116); V and C clear, X untouched.
-wire [4:0] exe_flags_c = eaf_bf[2]  ? {ccr_in[4], eaf_bf[1], eaf_bf[0], 1'b0, 1'b0} :
+// CMP2/CHK2 write Z and C and leave X, N and V (milestone 117).
+// CAS: CMP's flags, from ap040_ea_fetch.v (milestone 117).
+// RTR: the popped CCR, all five bits (milestone 117).
+wire [4:0] exe_flags_c = eaf_rtr_ccr[5] ? eaf_rtr_ccr[4:0] :
+                         eaf_casf[4] ? {ccr_in[4], eaf_casf[3:0]} :
+                         eaf_ck2[2] ? {ccr_in[4], ccr_in[3], eaf_ck2[1], ccr_in[1], eaf_ck2[0]} :
+                         eaf_bf[2]  ? {ccr_in[4], eaf_bf[1], eaf_bf[0], 1'b0, 1'b0} :
                          eaf_chk_ok ? {ccr_in[4], 1'b0, ccr_in[2], ccr_in[1], 1'b0} :
                          ml         ? ml_flags :
                          eaf_is_div ? div_flags : alu_flags;
