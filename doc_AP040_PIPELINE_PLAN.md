@@ -1688,6 +1688,78 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Bundle 8 (2026-09-24): fetch bandwidth, timing, review 15, the FPU
+
+   WIP commits a0bdc57e, 9d94eada, 9c73aa5d, e818618b; benches 4e8b71c1 and
+   26e264b6.
+
+   **Performance** (a user report measured 4 CPI on a zero-wait bus against
+   the sequential core's 2). `ap040_pipe_membus.v` fetches aligned longwords
+   into a four-entry stream buffer; decode predicts forward branches not
+   taken and backward ones taken; the divider does four restoring steps a
+   cycle. Zero-wait bus, CPI before -> after: NOP 4 -> 1.5, dependent ADD 4
+   -> 1.5, LEA 8 -> 3, BCS not taken 7 -> 1.5, MULU.L 8 -> 3, DIVU.L 40 ->
+   11, DIVU.W 36 -> 10 (review 15 measured the same).
+
+   **Review 15**, both confirmed with the full CPU: the stream fetched $0
+   out of reset before the first request (a $0 that never acknowledges hung
+   the reset fetch behind it), and its write-snoop compares were ordered, so
+   a window across $FFFFFFFF kept stale words. `pf_live` gates the stream;
+   the snoop uses modular distances of both longwords a write touches. The
+   `busredirect` bench still expected word fetches -- a0bdc57e failed it in
+   both suites -- and was rewritten for the stream. The prefetch bench's
+   patch case had gone VACUOUS when the divider got faster (the store went
+   out before its target was fetched): it now uses one-word divides, whose
+   issue rate lets the window gain on the fetch unit, and asserts the target
+   was fetched before its store.
+
+   **Timing**, standalone at 25 ns: a0bdc57e -2.540 ns. All 40 worst paths
+   ran EX's forward into the two-load forms' second address on the L1 path
+   (bundle 7c); `xm_daddr`/`xm_dan` are latched at the first load's issue
+   (9d94eada, -0.429). Then all 40 ran EX's forward into CHK's trap decision
+   and `exc_active`; CHK now waits one bubble when EX may write its register
+   (9c73aa5d, 39.89 MHz, -0.068, 9,261 ALMs).
+
+   **The FPU** (e818618b). `ap040_pipe_fpu.v` runs `rtl/ap040/ap040_fpu.v`,
+   the engine the sequential core uses, unchanged, inside a transliteration
+   of that core's `S_FPU_*`/`S_FBCC`/`S_FSCC*`/`S_FDBCC`/`S_FSAVE*`/`S_FREST*`
+   states under the same names. An F-line instruction starts once EX is
+   empty and holds EA-fetch; it retires through the default branch or as an
+   exception with its own vector, format ($0/$2/$3 -- format $3 is new to
+   the frame builder), PC and address. Decode gathers the command word and
+   then as many words as it asks for. Register-destination arithmetic is
+   released to the background and the next F-line instruction delivers its
+   exception, as the reference does. Corpus: BasicFPU 362/366 over
+   2,080,064 rounds -- the four slices the sequential core fails, with
+   identical mismatch counts (176/640/128/192) -- and PackedFPU 196/196,
+   544,364 rounds, 0 mismatches. This archive's 4_FINT has no slices, so
+   `tb_ap040_pipe_fpudual.v` runs generated FPU programs on both cores and
+   compares registers, FP state, memory and a log of every exception frame:
+   24 programs equal, 454 frames logged, 18/18 mutations of the FPU glue
+   caught (two only after the generator learned stores through (An)+ and
+   FMOVEM lists against their EA's direction). Fit: 15,944 ALMs, 38.94 MHz,
+   -0.681 at 25 ns; the worst path is integer -- EX's forward as a LEA/JMP
+   index register into `ea_target` -- not the FPU.
+
+   **The pipe driver** judges FPU rounds (state injected and checked as the
+   sequential driver does), holds the bus while a released FPU operation
+   finishes so the integer side cannot move, and judges a round that runs on
+   to the terminal entry on the SR it stacked (every user-mode FPU round
+   read the handler's $2000: cputest follows each FPU instruction with FNOP).
+
+   State: Basic 658/658 0 wrong; Default 532/532 and AE 38/38, 0 wrong (run
+   for the first time); ODD_STK 6/6. Not yet: FFEXT_SRC/FFEXT_DST (the
+   full-format extension -- the pipeline read it as the brief format, silently
+   wrong, found by the FPU differential), IRQ/ODD_IRQ (no interrupt input),
+   ODD_EXC (the driver skips odd vectors), and the MMU. 158 benches, both
+   builds.
+
+   Rules: a bench whose case depends on timing must assert the case
+   happened, or it goes vacuous when the timing moves; a differential
+   generator needs its own mutations before it is believed; and a forward
+   into any DECISION (a trap, an address) is the same timing problem as a
+   forward onto the L1 address.
+
    ### Bundle 7 (2026-09-24): the Basic integer ISA complete, every round judged
 
    Bundles replaced one-milestone-per-commit on 2026-09-23 at the user's
