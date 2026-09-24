@@ -35,6 +35,10 @@
 // landed, so the RTE's lowered mask cannot re-take it), and returns. TRAP  //
 // #1 returns a user-mode program to supervisor mode with its M bit.       //
 //                                                                          //
+// Traced events run T1 through the instruction that lowers the mask, so   //
+// a trace and an interrupt fall due at the same boundary; a trace handler //
+// logs every format-$2 frame and returns.                                 //
+//                                                                          //
 // Not generated, because ap040_ea_fetch.v deliberately differs there (see  //
 // ret_f1): a second throwaway behind the first, or a bad frame behind a    //
 // throwaway -- both a format error raised from the RTE's own starting      //
@@ -55,6 +59,7 @@ localparam [31:0] PROG_BASE  = 32'h0000_0400;
 localparam [31:0] HANDLER    = 32'h0000_0300;   // everything but the below: log, resume at RESUME
 localparam [31:0] SUPER      = 32'h0000_0340;   // TRAP #1: back to supervisor mode
 localparam [31:0] IRQ_HANDLER = 32'h0000_0360;  // vectors 25-31
+localparam [31:0] TRC_HANDLER = 32'h0000_03A0;  // vector 9: log the frame, return
 localparam [31:0] RESUME     = 32'h0000_1200;
 localparam [31:0] LOGPTR     = 32'h0000_1204;
 localparam [31:0] IRQ_SET    = 32'h0000_1210;
@@ -109,6 +114,7 @@ endfunction
 
 // Counted as generated, so a run that never reached a case says so.
 integer n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp;
+integer n_trace, n_trace_ev, fill_n, c1, t_new;
 
 integer k, r1, r2, r3, ev, lvl, msk, s, m, m0, fmt, v, irq_on, tgt_at;
 reg [15:0] sr;
@@ -121,6 +127,7 @@ task filler;
 	integer j, cnt, d1, d2;
 	begin
 		cnt = nmin + (rbits(32) % (nmax - nmin + 1));
+		fill_n = cnt;
 		for (j = 0; j < cnt; j = j + 1) begin
 			d1 = 4 + rbits(2); d2 = 4 + rbits(2);
 			case (rbits(3))
@@ -222,7 +229,7 @@ task gen_program;
 			msk = rbits(32) % lvl;               // below the level: taken
 			s   = rbits(1);
 			m   = rbits(1);
-			case (rbits(32) % 6)
+			case (rbits(32) % 7)
 			0: begin                                                  // MOVE #sr,SR
 				emit(16'h46FC); emit({3'b001, m0[0], 12'h700});
 				raise(lvl);
@@ -304,6 +311,33 @@ task gen_program;
 				filler(1, 3);
 				settle(s);
 			end
+			5: begin                                                  // traced through the mask drop
+				// T1 from the instruction after the first MOVE to SR, so the
+				// one that lowers the mask is traced: its trace and the
+				// interrupt are both owed at the same boundary. The trace is
+				// taken first and the interrupt before its handler runs
+				// (ap040_core.v's S_EXC_JMP), stacking the handler's address.
+				// The level is raised before T1 is set: a traced poll loop
+				// would log as many traces as each core happened to spin.
+				emit(16'h46FC); emit(16'h2700);
+				raise(lvl);
+				r1 = rbits(5);
+				emit(16'h46FC); emit({8'hA7, 3'b000, r1[4:0]});         // MOVE #$A7xx,SR: T1
+				filler(1, 2); c1 = fill_n;
+				t_new = rbits(1);
+				emit(16'h46FC); emit(mk_sr(s, m, msk, rbits(5)) | {t_new[0], 15'd0});
+				count_irq(s, m);
+				n_trace = n_trace + c1 + 1;
+				if (t_new) begin
+					// Still traced after it: the fillers, and the MOVE #$2700,SR
+					// that ends the event (TRAP #1 is not traced: no exception
+					// entry leaves one behind it, and its handler returns T1).
+					filler(1, 2);
+					n_trace = n_trace + fill_n + 1;
+				end
+				n_trace_ev = n_trace_ev + 1;
+				settle(s);
+			end
 			default: filler(2, 5);
 			endcase
 		end
@@ -371,6 +405,16 @@ task put_handlers;
 		put(IRQ_HANDLER + 32'h34, 16'h4E71); put(IRQ_HANDLER + 32'h36, 16'h4E71);
 		put(IRQ_HANDLER + 32'h38, 16'h4CDF); put(IRQ_HANDLER + 32'h3A, 16'h0101);   // MOVEM.L (A7)+,D0/A0
 		put(IRQ_HANDLER + 32'h3C, 16'h4E73);                                          // RTE
+		// The trace handler: the format-$2 frame's SR, PC, format word and
+		// address field, twelve bytes.
+		put(TRC_HANDLER + 32'h00, 16'h48E7); put(TRC_HANDLER + 32'h02, 16'h8080);   // MOVEM.L D0/A0,-(A7)
+		put(TRC_HANDLER + 32'h04, 16'h2078); put(TRC_HANDLER + 32'h06, LOGPTR[15:0]); // MOVEA.L LOGPTR.W,A0
+		put(TRC_HANDLER + 32'h08, 16'h20EF); put(TRC_HANDLER + 32'h0A, 16'h0008);   // MOVE.L 8(A7),(A0)+
+		put(TRC_HANDLER + 32'h0C, 16'h20EF); put(TRC_HANDLER + 32'h0E, 16'h000C);   // MOVE.L 12(A7),(A0)+
+		put(TRC_HANDLER + 32'h10, 16'h20EF); put(TRC_HANDLER + 32'h12, 16'h0010);   // MOVE.L 16(A7),(A0)+
+		put(TRC_HANDLER + 32'h14, 16'h21C8); put(TRC_HANDLER + 32'h16, LOGPTR[15:0]); // MOVE.L A0,LOGPTR.W
+		put(TRC_HANDLER + 32'h18, 16'h4CDF); put(TRC_HANDLER + 32'h1A, 16'h0101);   // MOVEM.L (A7)+,D0/A0
+		put(TRC_HANDLER + 32'h1C, 16'h4E73);                                          // RTE
 	end
 endtask
 
@@ -386,6 +430,7 @@ task build_memory;
 		for (i = 2; i < 64; i = i + 1) begin
 			if (i >= 25 && i <= 31) begin put(i*4, IRQ_HANDLER[31:16]); put(i*4 + 2, IRQ_HANDLER[15:0]); end
 			else if (i == 33)       begin put(i*4, SUPER[31:16]);       put(i*4 + 2, SUPER[15:0]); end
+			else if (i == 9)        begin put(i*4, TRC_HANDLER[31:16]); put(i*4 + 2, TRC_HANDLER[15:0]); end
 			else                    begin put(i*4, HANDLER[31:16]);     put(i*4 + 2, HANDLER[15:0]); end
 		end
 		put_handlers;
@@ -559,6 +604,7 @@ endtask
 initial begin
 	n_irq = 0; n_irq_m1 = 0; n_irq_user = 0; n_stop = 0; n_nmi = 0; n_rte = 0;
 	n_f1 = 0; n_f1_msp = 0; n_f1_isp = 0; n_f1_usp = 0; logged = 0;
+	n_trace = 0; n_trace_ev = 0;
 	for (round = 0; round < NROUND; round = round + 1) begin
 		seed = 32'h1A2B_3C4D + round * 32'h9E37_79B9;
 		nreset = 0;
@@ -608,14 +654,15 @@ initial begin
 		$display("round %0d: seed %h, %0d program words, %0d cycles, %0d log bytes, %0d mismatches",
 		         round, seed, pw, cyc, rd32f(LOGPTR) - LOG_BASE, mism);
 	end
-	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user)",
-	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp);
-	// Every interrupt logs 22 bytes; nothing else writes the log here.
-	if (logged != 22 * n_irq) begin
+	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events",
+	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev);
+	// Every interrupt logs 22 bytes and every trace 12; nothing else writes
+	// the log here.
+	if (logged != 22 * n_irq + 12 * n_trace) begin
 		errors = errors + 1;
-		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each)", logged, n_irq);
+		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each) and %0d traces (12 each)", logged, n_irq, n_trace);
 	end
-	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0) begin
+	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0) begin
 		errors = errors + 1;
 		$display("FAIL: a case went ungenerated");
 	end

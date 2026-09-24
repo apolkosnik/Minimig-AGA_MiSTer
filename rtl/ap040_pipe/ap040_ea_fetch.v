@@ -394,6 +394,7 @@ module ap040_ea_fetch
 	input             ex_fwd2_valid,
 	input       [3:0] ex_fwd2_dest,
 	input      [31:0] ex_fwd2_data,
+	input             ex_fwd2_slow,     // ex_fwd2_data is a multiply/divide high word
 
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
@@ -514,6 +515,22 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
                          fwd_a_from_ex2  ? ex_fwd2_data :
                                            rdata_a;
 
+// The address views (2026-09-24, timing). Every fit since the forward went
+// in has had the same worst path: EX's ALU, multiplier or divider result,
+// forwarded the same cycle into the base or index of an address, through
+// the displacement adder and on into the port-B address -- two adders, a
+// DSP and the L1's own decode in one cycle (-1.794 ns at 710c0692). The
+// address arithmetic now reads operands WITHOUT that forward: the
+// register file (whose write-through bypass carries WB's registered
+// result) or EX's An step, which is a register too. An instruction that
+// computes an address from a register EX is producing on the long path
+// waits one cycle (addr_hz), and the value then comes from the bypass.
+// This is the 68040's own change/use stall. Register-only instructions
+// keep the full forward, so a dependent ALU chain is not slowed.
+wire        lf_a         = !eac_src_a_is_imm && (fwd_a_from_ex || (fwd_a_from_ex2 && ex_fwd2_slow));
+wire [31:0] operand_a_ea = eac_src_a_is_imm ? eac_imm :
+                           (fwd_a_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_a;
+
 // The effective address: operand_a (An's value, resolved by the mux above)
 // PLUS eac_imm (the sign-extended displacement for a (d16,An) form, or
 // exactly 0 for the plain (An) form -- see ap040_decode.v's header for why
@@ -530,9 +547,9 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // A load's address register is the SOURCE (ir[2:0]); a store's is the
 // DESTINATION (ir[11:9]), which resolves to operand_b. One base wire keeps
 // the increment logic below from having to care which it is.
-wire [31:0] an_base = store_now ? operand_b : operand_a;
+wire [31:0] an_base = store_now ? operand_b_ea : operand_a_ea;
 // LINK reuses this as its own write address as well as An's new value.
-wire [31:0] push_addr = operand_b - 32'd4;
+wire [31:0] push_addr = operand_b_ea - 32'd4;
 // LINK A7,#d: the register being saved is the stack pointer itself, which
 // the push has already moved. eac_src_reg is An for a LINK; eac_dest_reg
 // is A7 for every one of them, so this is the only way to tell.
@@ -570,8 +587,8 @@ wire [31:0] an_step  = (eff_size == `AP040_SZ_L) ? 32'd4 :
 // the address path, and it replaces the mask that sat here before.
 wire [31:0] ea_ext   = eac_immrmw ? eac_ea_ext : eac_imm;
 wire  [3:0] idx_reg  = {ea_ext[15], ea_ext[14:12]};
-wire [31:0] idx_raw  = ea_ext[11] ? operand_c
-                                   : {{16{operand_c[15]}}, operand_c[15:0]};
+wire [31:0] idx_raw  = ea_ext[11] ? operand_c_ea
+                                   : {{16{operand_c_ea[15]}}, operand_c_ea[15:0]};
 wire [31:0] idx_val  = idx_raw << ea_ext[10:9];
 wire [31:0] idx_disp = {{24{ea_ext[7]}}, ea_ext[7:0]};
 
@@ -585,7 +602,7 @@ wire [31:0] idx_disp = {{24{ea_ext[7]}}, ea_ext[7:0]};
 // exception frames, so nothing new reaches this stage. operand_a is simply
 // unused for these modes; decode still points eac_src_reg at the register
 // the mode field nominally names, and reading it is harmless.
-wire [31:0] ea_base = eac_ea_pcrel ? eac_pc_base : operand_a;   // opcode + 2 unless an immediate intervenes
+wire [31:0] ea_base = eac_ea_pcrel ? eac_pc_base : operand_a_ea;   // opcode + 2 unless an immediate intervenes
 
 // An immediate with a memory destination (milestone 89) carries its
 // OPERAND in eac_imm, not a displacement, so there is nothing to add to
@@ -662,8 +679,8 @@ wire  [3:0] mm_didx_reg = {eac_ea_ext[15], eac_ea_ext[14:12]};
 wire        mm_dphase   = mm && (mem_pending || mm_simm);
 wire        mm_src_upd  = eac_is_postinc || eac_is_predec;
 wire        mm_same     = mm_src_upd && (eac_src_reg == eac_dest_reg);
-wire [31:0] mm_base     = mm_same ? an_new : operand_b;
-wire [31:0] mm_c        = (mm_src_upd && (mm_didx_reg == eac_src_reg)) ? an_new : operand_c;
+wire [31:0] mm_base     = mm_same ? an_new : operand_b_ea;
+wire [31:0] mm_c        = (mm_src_upd && (mm_didx_reg == eac_src_reg)) ? an_new : operand_c_ea;
 wire [31:0] mm_idx_val  = (eac_ea_ext[11] ? mm_c : {{16{mm_c[15]}}, mm_c[15:0]}) << eac_ea_ext[10:9];
 wire [31:0] mm_idx_disp = {{24{eac_ea_ext[7]}}, eac_ea_ext[7:0]};
 // The destination's size is the move's, except PACK/UNPK -(Ax),-(Ay)
@@ -1543,9 +1560,27 @@ wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
 wire movec_rd       = eac_is_movec && !eac_imm[4];
 wire creg_rd_hazard = movec_rd && ex_creg_any;
 wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
+// Everything that computes an address from a register or touches memory,
+// broadly: a register-form instruction named here only waits a cycle it
+// did not need to, while one missing would compute its address from a
+// stale register (the Verilator check below reports any that touches
+// port B).
+wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw || eac_st_disp ||
+                   eac_is_postinc || eac_is_predec || eac_is_abs || eac_ea_indexed || eac_ea_pcrel ||
+                   eac_is_jmp || eac_is_jsr || eac_is_lea || eac_is_pea || eac_is_bsr ||
+                   eac_is_rts || eac_is_rte || eac_is_rtr || eac_is_link || eac_is_unlk ||
+                   eac_is_movem || mm || mvp || bfv || ck || cas || cas2 || m16 || eac_fp || fx ||
+                   eac_moves[2];
+wire addr_hz      = live && eac_uses_ea && (lf_a || lf_b || lf_c);
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live && !eac_uses_ea && !exc_active && !fp_active && (l1_rd_b || l1_wren_b))
+		$error("ap040_ea_fetch: %h touched port B but is classed register-only (eac_uses_ea)", eac_pc);
+`endif
 wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
                       (live && fx_hold_go) ||                      // a full-format pointer read
-                      (live && irq_recheck);                       // the interrupt arm, behind an SR write
+                      (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
+                      addr_hz;                                     // an address from a long forward
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1642,15 +1677,23 @@ wire trc_hold     = eac_valid && trace_arm;
 // ones -- it becomes a format-$0 entry at vector 24 + level that stacks
 // its own address, the one the handler's RTE comes back to. The request
 // is judged again then: one withdrawn meanwhile lets the instruction run.
-// A trace owed goes first (the 68040 does it the other way round and
-// carries the trace into the handler; not modelled yet).
+//
+// A trace owed at the same boundary goes second: the interrupt is taken
+// first, and the trace is CARRIED into its handler (ap040_core.v's
+// texc_pend, WinUAE's do_specialties) -- the interrupt entry retires with
+// trace_arm still up and trace_pc still the traced instruction, so the
+// handler's first instruction becomes the trace entry: its own address in
+// the frame's PC field, the traced instruction's in the address field. A
+// carried trace outranks a further interrupt, as the reference delivers
+// texc before it samples irq_pend again; an odd vector cancels it.
 reg        irq_arm;
 reg        exc_pend_irq;
 reg  [2:0] irq_lvl_r;
-wire irq_hold     = eac_valid && irq_arm && !trc_hold;
+reg        trace_carried;
+wire irq_hold     = eac_valid && irq_arm && !(trace_arm && trace_carried);
 wire trace_hold   = trc_hold || irq_hold;   // an entry holds this instruction
-wire trace_take   = trc_hold && !eaf_valid && !wb_busy && !stall_in;
-wire irq_take     = irq_hold && irq_pend && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq;
+wire trace_take   = trc_hold && !irq_hold && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq;
+wire irq_take     = irq_hold && irq_pend && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq && !exc_pend_trace;
 wire eac_is_trace = trace_take || exc_pend_trace;
 wire eac_is_irq   = irq_take || exc_pend_irq;
 wire [2:0] irq_lvl_now = exc_pend_irq ? irq_lvl_r : irq_take_lvl;
@@ -1932,6 +1975,8 @@ wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == raddr_c);
 wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_c);
 wire [31:0] operand_c = fwd_c_from_ex  ? ex_fwd_data  :
                         fwd_c_from_ex2 ? ex_fwd2_data : rdata_c;
+wire        lf_c         = fwd_c_from_ex || (fwd_c_from_ex2 && ex_fwd2_slow);
+wire [31:0] operand_c_ea = (fwd_c_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_c;
 
 assign raddr_b    = eac_dest_reg;
 
@@ -1942,6 +1987,8 @@ wire fwd_b_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == eac_dest_reg);
 // current value" -- so it's a flat 2-way select.
 wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
                        fwd_b_from_ex2 ? ex_fwd2_data : rdata_b;
+wire        lf_b         = fwd_b_from_ex || (fwd_b_from_ex2 && ex_fwd2_slow);
+wire [31:0] operand_b_ea = (fwd_b_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_b;
 
 // BSR/JSR's push address AND the new A7 value to commit are the SAME
 // expression, from operand_b (A7's current value via port B, decode having
@@ -2136,7 +2183,7 @@ wire [31:0] exc_vec_addr = exc_vbase_r + {22'd0, exc_vec_r, 2'b00};
 // operand_a/port A, same as RTS's mem_issue/mem_complete reuse (decode set
 // eac_src_reg=A7 for RTE too, see ap040_decode.v's header).
 wire [31:0] ret_addr = ret_f1 ? ((ret_ph == RET_BEAT1) ? ret_base2_4 : ret_base2) :
-                      (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
+                      (ret_ph == RET_BEAT1) ? (operand_a_ea + 32'd4) : operand_a_ea;
 
 // Driven unconditionally, same "compute always, gate consumption" precedent
 // as raddr_b -- harmless when none of eac_is_mem_src/eac_is_jmp/eac_is_push/
@@ -2390,6 +2437,7 @@ always @(posedge clk) begin
 		exc_pend_irq     <= 1'b0;
 		irq_lvl_r        <= 3'd0;
 		trace_arm        <= 1'b0;
+		trace_carried    <= 1'b0;
 		trace_arm_cond   <= 1'b0;
 		trace_pc         <= 32'h0;
 		exc_ph          <= EXC_BEAT0;
@@ -3077,13 +3125,16 @@ always @(posedge clk) begin
 				// second, vector-9 frame before its own handler ran.
 				// ap040_core.v's S_EXC0 clears T1/T0 and arms nothing: only an
 				// interrupt that preempts a trace already owed carries it into
-				// the handler, and this pipeline takes no interrupts. Its
-				// notes record the hardware: cputest reported "Got unexpected
-				// trace exception" after the ILLEGAL ending every test while
-				// the sequential core still carried T0 through.
-				trace_arm      <= 1'b0;
+				// the handler (see irq_hold), unless its vector is odd: the
+				// address error that follows cancels it, as ap040_core.v's
+				// S_EXC_JMP clears texc_pend. Its notes record the hardware:
+				// cputest reported "Got unexpected trace exception" after the
+				// ILLEGAL ending every test while the sequential core still
+				// carried T0 through.
+				trace_arm      <= eac_is_irq && trace_arm && !exc_vec_odd_now;
+				trace_carried  <= eac_is_irq && trace_arm && !exc_vec_odd_now;
 				trace_arm_cond <= 1'b0;
-				trace_pc       <= eac_pc;
+				if (!(eac_is_irq && trace_arm)) trace_pc <= eac_pc;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;

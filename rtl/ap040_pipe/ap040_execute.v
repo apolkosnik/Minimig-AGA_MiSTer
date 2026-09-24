@@ -262,6 +262,7 @@ module ap040_execute
 	// comment. ap040_pipe_core.v broadcasts this as `flush` to ID/EA-calc/
 	// EA-fetch and redirects IF to ex_recovery_pc.
 	output            ex_mispredict,
+	output            ex_fwd2_slow,
 	// The broadcast flush: everything ex_mispredict causes a flush for, plus
 	// STOP, which discards younger work without redirecting anywhere
 	// (milestone 108). Computed HERE rather than OR'd onto ex_mispredict in
@@ -895,6 +896,9 @@ assign ex_ccr_fwd_data  = exe_flags_c;
 assign ex_fwd2_valid = eaf_valid && (ml_two ? ml_wr : eaf_writes_an);
 assign ex_fwd2_dest  = ml_two ? {1'b0, ml_dh} : eaf_an_reg;
 assign ex_fwd2_data  = ml_two ? ml_hi : eaf_an_data;
+// ...and whether that is the multiplier's or divider's high word, a long
+// path, rather than a register (ap040_ea_fetch.v's address views).
+assign ex_fwd2_slow  = ml_two;
 
 assign ex_sr_fwd_valid = exe_writes_sr_c;
 assign ex_sr_fwd_data  = exe_sr_data_c;
