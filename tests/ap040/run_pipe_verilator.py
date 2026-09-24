@@ -25,7 +25,9 @@ CORE = [RTL / n for n in (
     "ap040_pipe_membus.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
-    "ap040_pipe_l1.v")]
+    "ap040_pipe_l1.v", "ap040_pipe_fpu.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
+# ap040_pipe_fpu.v runs the shared FPU engine, which includes rtl/ap040's
+# ap040_defs.svh, so every build takes that directory too.
 
 
 def main():
@@ -69,7 +71,7 @@ def main():
     passed, failed = [], []
     for b in benches:
         name = b.stem
-        src, inc = CORE, [RTL]
+        src, inc = CORE, [RTL, ROOT / "rtl/ap040"]
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
         elif name.endswith("rmwsup"):
@@ -89,7 +91,7 @@ def main():
                 ROOT / "rtl/ap040" / n for n in (
                     "ap040_tg68k_compat.v", "ap040_core.v", "ap040_bus16_adapter.v",
                     "ap040_regfile.v", "ap040_alu.v", "ap040_muldiv.v",
-                    "ap040_mmu.v", "ap040_cache.v", "ap040_fpu.v")
+                    "ap040_mmu.v", "ap040_cache.v")   # ap040_fpu.v is in CORE
             ] + [HERE / "sim_dpram.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("inject"):

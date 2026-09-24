@@ -283,6 +283,10 @@ module ap040_ea_fetch
 	input       [2:0] eac_ck2,
 	input       [4:0] eac_cas,
 	input       [3:0] eac_m16,
+	input             eac_fp,       // the F-line (2026-09-24), see ap040_pipe_fpu.v
+	input       [8:0] eac_fp_op,
+	input      [15:0] eac_fp_cmd,
+	input      [95:0] eac_fp_imm,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -671,12 +675,15 @@ reg  [31:0] xm_dan;
 // swung an_wr_reg from the destination An to eac_src_reg -- so MOVE.L
 // D0,(A0)+ at an odd RTE target wrote $11223348 into D0.
 // EXG writes Ry through this port with Rx's value (milestone 115).
-wire        an_wr_any  = (an_write || (eac_valid && (eac_is_link || eac_is_unlk || eac_is_exgop)) ||
+wire        an_wr_any  = fp ? (eac_valid && fp_fin && fp_w2_en) :
+                         (an_write || (eac_valid && (eac_is_link || eac_is_unlk || eac_is_exgop)) ||
                           (mvm_fin && mvm_wb)) && !ae_busy && !moves_priv;
-wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem || eac_is_exgop) ? eac_src_reg :
+wire  [3:0] an_wr_reg  = fp ? fp_w2_reg :
+                         (eac_is_link || eac_is_movem || eac_is_exgop) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          store_now ? eac_dest_reg : eac_src_reg;
-wire [31:0] an_wr_data = eac_is_exgop ? operand_b            :
+wire [31:0] an_wr_data = fp           ? fp_w2_val            :
+                         eac_is_exgop ? operand_b            :
                          eac_is_link  ? push_addr            :
                          eac_is_unlk  ? (operand_a + 32'd4)  :
                          eac_is_movem ? mvm_addr             : an_new;
@@ -980,6 +987,86 @@ wire  [3:0] c2_f1       = cas_cmp(c2_m1, c2_dc1, eac_size);
 wire  [3:0] c2_f2       = cas_cmp(c2_m2, c2_dc2, eac_size);
 wire [31:0] c2_dc1_new  = (eac_size == `AP040_SZ_W) ? {c2_dc1[31:16], c2_m1[15:0]} : c2_m1;
 
+// ---------------------------------------------------------------- FPU
+// The F-line coprocessor-1 instructions (2026-09-24): ap040_pipe_fpu.v,
+// ap040_core.v's FPU states around the shared engine -- see its header.
+// It starts once EX is empty, so every older instruction has retired or
+// is committing and the register file (with its commit bypass) is the
+// state; it holds the stage, emitting bubbles, until it finishes. Then the
+// instruction retires through the default branch -- a result on the main
+// port by EX's eaf_is_xm route, an (An) step on port 2 through an_wr_*, a
+// taken FBcc/FDBcc as a JMP to fp_target -- or it is an exception like any
+// other, with its own vector, format, PC and address fields.
+//
+// Port A is the sequencer's while it runs (Dn sources, FScc/FDBcc, the
+// dynamic FMOVEM list), so the control-mode EA, which is built from port
+// A's An, is latched as it starts.
+wire        fp          = eac_fp;
+wire        fp_active, fp_fin, fp_exc, fp_w1_en, fp_w2_en, fp_redirect, fp_t0, fp_bg;
+wire  [7:0] fp_exc_vec;
+wire  [1:0] fp_exc_fmt;
+wire [31:0] fp_exc_pc, fp_exc_addr, fp_w1_val, fp_w2_val, fp_target;
+wire  [3:0] fp_w1_reg, fp_w2_reg, fp_rreg;
+wire        fp_mem_rd, fp_mem_wr;
+wire [31:0] fp_mem_addr, fp_mem_wdata;
+wire  [1:0] fp_mem_size;
+reg  [31:0] fp_ea_r;
+wire        fp_ld_go     = fp_mem_rd && !port_taken;
+wire        fp_st_want   = fp_mem_wr && !port_taken;
+wire        fp_st_go     = fp_st_want && !l1_wr_busy;
+wire        fp_stall     = eac_valid && fp && !fp_fin && !trace_hold && !ae_busy;
+wire        fp_start     = live && fp && !eaf_valid && !fp_active && !fp_fin &&
+                           !trace_hold && !ae_busy && !stall_in;
+wire        eac_is_fpexc = eac_valid && fp && fp_fin && fp_exc;
+wire        fp_clear     = flush || (fp_fin && !eaf_stall);
+
+always @(posedge clk)
+	if (!nreset)             fp_ea_r <= 32'd0;
+	else if (ce && fp_start) fp_ea_r <= ea_target;
+
+ap040_pipe_fpu u_fpu (
+	.clk       (clk),
+	.nreset    (nreset),
+	.ce        (ce),
+	.start     (fp_start),
+	.clear     (fp_clear),
+	.op        (eac_fp_op),
+	.cmd       (eac_fp_cmd),
+	.imm       (eac_fp_imm),
+	.pc_i      (eac_pc),
+	.pc        (eac_next_pc),
+	.ea_addr   (fp_ea_r),
+	.sup       (sr_in[13]),
+	.rreg      (fp_rreg),
+	.rdata     (rdata_a),
+	.mem_rd    (fp_mem_rd),
+	.mem_wr    (fp_mem_wr),
+	.mem_addr  (fp_mem_addr),
+	.mem_size  (fp_mem_size),
+	.mem_wdata (fp_mem_wdata),
+	.mem_rd_ok (fp_ld_go && !stall_self),
+	.mem_wr_ok (fp_st_go && !stall_self),
+	.mem_rvalid(l1_rvalid_b),
+	.mem_rdata (l1_q_b),
+	.active    (fp_active),
+	.fin       (fp_fin),
+	.exc       (fp_exc),
+	.exc_vec   (fp_exc_vec),
+	.exc_fmt   (fp_exc_fmt),
+	.exc_pc    (fp_exc_pc),
+	.exc_addr  (fp_exc_addr),
+	.w1_en     (fp_w1_en),
+	.w1_reg    (fp_w1_reg),
+	.w1_val    (fp_w1_val),
+	.w2_en     (fp_w2_en),
+	.w2_reg    (fp_w2_reg),
+	.w2_val    (fp_w2_val),
+	.redirect  (fp_redirect),
+	.target    (fp_target),
+	.t0_flow   (fp_t0),
+	.bg_busy   (fp_bg)
+);
+
 assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
 assign rf3_addr = mvm_rd_reg;
 // A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
@@ -1269,7 +1356,11 @@ wire [31:0] addrerr_pc_live = vecodd_pend    ? vecodd_pc_r :
 // dynamic ones pushed format $0; tb_ap040_pipe_integration4.v's handlers
 // read the frames and said so.
 wire eac_is_fmt2     = eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
-                       eac_is_trapcc_trap || eac_is_trace;
+                       eac_is_trapcc_trap || eac_is_trace ||
+                       (eac_is_fpexc && (fp_exc_fmt != 2'd0));
+// Format $3, the FPU's post-instruction frame: format $2's shape, its own
+// nibble, and only when the FPU's is the exception being taken.
+wire eac_is_fmt3     = eac_is_fpexc && (fp_exc_fmt == 2'd3) && !eac_is_trace && !eac_is_addrerr;
 
 // The L1 always returns a full longword on port B (address_b is the HIGH
 // word, the low word implicitly address_b+1), so a sized load is a lane
@@ -1479,7 +1570,7 @@ wire t0_flow_static = eac_is_bsr || eac_is_jmp || eac_is_jsr || eac_is_rts || ea
                       (eac_is_immsr && eac_immsr_to_sr && !eac_is_stop) ||
                       (eac_is_stop && stop_t0_change) ||
                       (eac_is_movec && eac_imm[4]) || eac_is_nop || eac_moves[2] || eac_cas[3] ||
-                      eac_cas[4];
+                      eac_cas[4] || (fp && fp_t0);
 wire t0_flow_cond   = eac_is_branch || eac_is_dbcc;
 wire traced_now     = sr_in[15] || (sr_in[14] && (t0_flow_static || t0_flow_cond));
 wire traced_cond    = !sr_in[15] && sr_in[14] && t0_flow_cond && !t0_flow_static;
@@ -1504,7 +1595,8 @@ wire store_now    = eac_is_store && !trace_hold && !ae_busy && !moves_priv;
 // one's (milestone 100).
 wire eac_is_exc    = eac_is_trace || ae_take ||
                      (own_exc && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
-                                  eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr));
+                                  eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
+                                  eac_is_fpexc));
 wire exc_active    = live && eac_is_exc;
 // The frame starts one cycle AFTER the fault is detected (milestone 88).
 // exc_active is the fault cone: the CHK compare on a forwarded ALU result,
@@ -1531,6 +1623,7 @@ reg  exc_go;
 // selects the frame size the beat address is computed from. The SELECT
 // of the address mux had left the cone; its DATA had not.
 reg  exc_fmt2_r;
+reg  exc_fmt3_r;   // format $3 (the FPU), latched the same way
 // The vector and the stack bank, latched the same way (second fit after
 // exc_go). exc_vec_num is the fault-priority mux over the whole cone and
 // {exc_vec_num, 00} is the vector read's ADDRESS; sr_in[12] is the M bit
@@ -1618,7 +1711,7 @@ wire ret_stall    = ret_active && !ret_done;
 // the reported symptom rather than the defect.
 assign l1_rd_b = !stall_self &&
                  (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go || ck_ld_go ||
-                  m16_ld_go || c2_ld_go);
+                  m16_ld_go || c2_ld_go || fp_ld_go);
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
 // for everything but address error; $2 and $3 are the six-word frames ($3
@@ -1647,10 +1740,10 @@ assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second wo
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
 assign eaf_stall = stall_in || hold_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall || ck_stall || m16_stall ||
-                   c2_stall ||
+                   c2_stall || fp_stall ||
                    (eac_valid && xm && !xm_have) ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
-assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
+assign raddr_a    = fp_active ? fp_rreg : mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
 // faulting instruction's own eac_dest_reg says (MOVEC's read direction
 // points it at the destination GPR, Rn, for its NORMAL case) -- but NOT via
@@ -1823,6 +1916,7 @@ wire [15:0] exc_sr_word    = sr_faulted;
 wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
                               eac_is_addrerr ? (exc_pend_addrerr ? exc_pend_ae_pc
                                                                  : addrerr_pc_live) :
+                              eac_is_fpexc   ? fp_exc_pc :   // registers of ap040_pipe_fpu.v
                               (eac_is_illegal || eac_is_priv || eac_is_fmterr) ? eac_pc
                                                                                : eac_next_pc;
 // The address error is tested BEFORE illegal and privilege, which is the
@@ -1835,6 +1929,7 @@ wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the 
 // legitimately be both (milestone 109).
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_addrerr ? 8'd3 :
+                              eac_is_fpexc   ? fp_exc_vec :
                               // 10 A-line, 11 F-line, 4 illegal -- literals
                               // like every other vector in this mux, because
                               // AP040_VEC_* lives in rtl/ap040's defs and the
@@ -1850,7 +1945,7 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
-wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
+wire [15:0] exc_vecoff_word = {exc_fmt3_r ? 4'd3 : exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
 // Format $2's own extra "instruction address" longword. For an odd JMP/JSR
 // target it is the target itself, LSB cleared (ap040_core.v's own convention
 // for this field, identical for JMP and JSR despite their differing PC
@@ -1858,7 +1953,8 @@ wire [15:0] exc_vecoff_word = {exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00
 // instruction's own address (ap040_core.v passes pc_i), which is what a
 // handler needs to find the instruction its PC field has already stepped past.
 wire [31:0] exc_addr_field = eac_is_trace   ? trace_pc :
-                             eac_is_addrerr ? {addrerr_target[31:1], 1'b0} : eac_pc;
+                             eac_is_addrerr ? {addrerr_target[31:1], 1'b0} :
+                             eac_is_fpexc   ? fp_exc_addr : eac_pc;
 
 // Beat0 @ exc_new_sp: SR, then PC's high word. Beat1 @ exc_new_sp+4: PC's
 // low word, then the format/vector-offset word. Beat2 @ exc_new_sp+8
@@ -1893,7 +1989,8 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
+wire [31:0] l1_addr_word = fp_active    ? fp_mem_addr  :
+                            mvm_active   ? mvm_cur_addr :
                             mvp_active   ? mvp_addr     :
                             bf_active    ? bf_cur_addr  :
                             m16_active   ? m16_addr     :
@@ -1935,7 +2032,7 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // each without needing this.
 assign l1_wren_b = !stall_self &&
                    ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want || mvp_st_want ||
-                    bf_st_want || m16_st_want || c2_st_want);
+                    bf_st_want || m16_st_want || c2_st_want || fp_st_want);
 // The privilege this access carries (milestone 92). An exception's frame
 // writes and vector read are SUPERVISOR accesses whatever mode the faulting
 // instruction ran in, and the switch to supervisor has not committed while
@@ -1946,7 +2043,8 @@ assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
 // -- is a Longword.
-assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
+assign l1_size_b = fp_active    ? fp_mem_size :
+                   mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
                    mvp_active   ? `AP040_SZ_B :
                    bf_active    ? bf_cur_sz :
                    m16_active   ? `AP040_SZ_L :
@@ -1971,7 +2069,8 @@ assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
 // rtl/ap040/ap040_core.v, which passes the cputest corpus, follows the
 // later rule. An is not written back until the sequence finishes, so
 // operand_a is still the initial value when this beat goes out.
-assign l1_data_b = mvp_st_want  ? {24'd0, mvp_byte} :
+assign l1_data_b = fp_st_want   ? fp_mem_wdata :
+                   mvp_st_want  ? {24'd0, mvp_byte} :
                    m16_st_want  ? m16_buf :
                    c2_st_want   ? c2_wdata :
                    bf_st_want   ? bf_wdata :
@@ -2135,6 +2234,7 @@ always @(posedge clk) begin
 		exc_vec_pending <= 1'b0;
 		exc_go          <= 1'b0;
 		exc_fmt2_r      <= 1'b0;
+		exc_fmt3_r      <= 1'b0;
 		exc_vec_r       <= 8'd0;
 		exc_vbase_r     <= 32'd0;
 		exc_m_r         <= 1'b0;
@@ -2152,6 +2252,7 @@ always @(posedge clk) begin
 			exc_go <= 1'b1;
 			if (!exc_go) begin   // fixed at the verdict, not re-read per beat
 				exc_fmt2_r <= eac_is_fmt2;
+				exc_fmt3_r <= eac_is_fmt3;
 				exc_vec_r  <= exc_vec_num;
 				exc_vbase_r <= vbr_in;   // creg_busy: no MOVEC to VBR still in flight
 				exc_m_r    <= sr_in[12];
@@ -2509,6 +2610,10 @@ always @(posedge clk) begin
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
 					mvm_addr    <= mvm_nxt_addr;
 				end
+			end else if (fp_stall) begin
+				// The FPU sequencer has the instruction (see its block); eac_*
+				// frozen by fp_stall, nothing goes to EX until it finishes.
+				eaf_valid <= 1'b0;
 			end else if (eac_valid && ck && !ck_fin && !trace_hold && !ae_busy) begin
 				// CHK2/CMP2 (see its header); eac_* frozen by ck_stall.
 				eaf_valid <= 1'b0;
@@ -2752,7 +2857,7 @@ always @(posedge clk) begin
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
 				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
-				                    eac_is_trace) ? 4'd15 : eac_dest_reg;
+				                    eac_is_trace || eac_is_fpexc) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -2826,7 +2931,11 @@ always @(posedge clk) begin
 				eaf_is_bsr     <= 1'b0;
 				eaf_is_jsr     <= 1'b0;
 				eaf_is_trap    <= eac_is_trap && own_exc;
-				eaf_is_illegal <= eac_is_illegal && own_exc;
+				// ...and the FPU's exceptions: EX needs only to know an entry is
+				// retiring (exc_reaching_ex), and this flag says nothing more. Without
+				// it the entry retired as an ordinary instruction and A7 took the
+				// handler's address, in the faulting instruction's own bank.
+				eaf_is_illegal <= (eac_is_illegal || eac_is_fpexc) && own_exc;
 				eaf_is_priv    <= eac_is_priv && own_exc;
 				eaf_is_addrerr <= eac_is_addrerr && own_exc;
 				eaf_is_divzero <= eac_is_divzero && own_exc;
@@ -3017,7 +3126,7 @@ always @(posedge clk) begin
 					trace_pc       <= eac_pc;
 				end
 				eaf_next_pc    <= eac_next_pc;
-				eaf_dest_reg   <= cas2 ? {1'b0, c2x[2:0]} : eac_dest_reg;
+				eaf_dest_reg   <= cas2 ? {1'b0, c2x[2:0]} : fp ? fp_w1_reg : eac_dest_reg;
 				// JMP/JSR: route the computed EA itself, not the register
 				// value alone -- see header. BSR has no source read at all
 				// (operand_a is simply unused for it), so it falls through
@@ -3033,7 +3142,7 @@ always @(posedge clk) begin
 				// assignment, not the address path.
 				// A branch predicted not taken carries its target to EX, which
 				// redirects there if it is taken (2026-09-24).
-				eaf_operand_a  <= (eac_is_branch && eac_bnt) ? br_target :
+				eaf_operand_a  <= fp ? fp_target : (eac_is_branch && eac_bnt) ? br_target :
 				                  cas2 ? c2_m2 : (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
 				                  eac_is_packop                            ? pack_value :
 				                  mvp                                      ? mvp_acc :
@@ -3069,15 +3178,15 @@ always @(posedge clk) begin
 				eaf_an_reg     <= cas2 ? {1'b0, c2x[18:16]} : m16 ? eac_src_reg : an_wr_reg;
 				eaf_an_data    <= cas2 ? c2_dc1_new : m16 ? (operand_a + 32'd16) :
 				                  ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
-				eaf_writes_reg <= cas2 ? !c2_eq : eac_writes_reg;
+				eaf_writes_reg <= cas2 ? !c2_eq : fp ? fp_w1_en : eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
-				eaf_is_jmp     <= eac_is_jmp;
+				eaf_is_jmp     <= eac_is_jmp || (fp && fp_redirect);
 				eaf_is_rmw     <= mm;
 				eaf_is_mm      <= mm;
-				eaf_is_xm      <= m16_pp;
+				eaf_is_xm      <= m16_pp || (fp && fp_w1_en);   // the FPU's result rides eaf_ea_target
 				eaf_bnt        <= eac_is_branch && eac_bnt;
 				eaf_mvfsr      <= eac_mvfsr;
 				eaf_ml         <= eac_ml;
@@ -3087,6 +3196,7 @@ always @(posedge clk) begin
 				eaf_rtr_ccr    <= 6'd0;
 				if (mm) eaf_ea_target <= mm_daddr;
 				if (m16) eaf_ea_target <= operand_b + 32'd16;   // (Ax)+,(Ay)+: Ay's step
+				if (fp) eaf_ea_target <= fp_w1_val;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
 				eaf_is_bsr     <= eac_is_bsr;

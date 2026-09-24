@@ -370,7 +370,12 @@ module ap040_decode
 	output reg        id_is_reset,     // RESET: privileged, nothing else (milestone 117)
 	output reg        id_is_rte,
 	output reg        id_is_rtr,       // RTR: rides RTE's pops (milestone 117)
-	output reg  [3:0] id_cond
+	output reg  [3:0] id_cond,
+	// The F-line coprocessor-1 instructions, for ap040_pipe_fpu.v (2026-09-24)
+	output reg        id_fp,
+	output reg  [8:0] id_fp_op,       // opcode[8:0]: kind, EA mode, EA register
+	output reg [15:0] id_fp_cmd,      // the command / condition word
+	output reg [95:0] id_fp_imm       // every word gathered after the opcode, right-aligned
 );
 
 assign id_stall = stall_in;
@@ -2263,8 +2268,59 @@ wire is_nop = (if_opcode == `AP040_OP_NOP);
 // gather-start branch instead, so this wire is never actually consulted for
 // it, but an invalid MOVEC selector DOES become illegal, one level down
 // (movec_illegal_gather below), once the extension word is known.
+// ------------------------------------------------------------------ FPU
+// F-line coprocessor 1 (2026-09-24): ap040_pipe_fpu.v runs these from
+// EA-fetch; decode recognises them and gathers their words. The kind is
+// ir[8:6], as in ap040_core.v's cpID-1 dispatch: 000 general and 001
+// FScc/FDBcc/FTRAPcc carry a command (condition) word first; 010/011 are
+// FBcc with a word or long displacement; 100 FSAVE and 101 FRESTORE have
+// only their EA's words. 110/111, and a general or conditional form whose
+// mode-7 register is 5..7, stay F-line exceptions, taken before any word
+// is fetched, as the reference rejects them.
+wire [2:0] fp_kind      = if_opcode[8:6];
+wire       fp_bad7      = (if_opcode[5:3] == 3'b111) && (if_opcode[2:0] > 3'b100);
+wire       is_fp        = (if_opcode[15:9] == 7'b1111_001) && (fp_kind <= 3'b101) &&
+                          !((fp_kind[2:1] == 2'b00) && fp_bad7);
+wire       fp_nocmd     = fp_kind[2] || fp_kind[1];
+wire       fp_is_dbcc   = (fp_kind == 3'b001) && (if_opcode[5:3] == 3'b001);
+wire       fp_is_trapcc = (fp_kind == 3'b001) && (if_opcode[5:3] == 3'b111) && (if_opcode[2:0] >= 3'b010);
+// The EA field is an address: not FBcc's (its condition), nor FDBcc's or
+// FTRAPcc's, whose mode-1 and mode-7 2..4 encodings name no EA.
+wire       fp_has_ea    = is_fp && !(fp_kind == 3'b010 || fp_kind == 3'b011) && !fp_is_dbcc && !fp_is_trapcc;
+// Words before the command word is known. A general form takes its command
+// word alone and then as many more as that word asks for (fp_more): the
+// reference consumes an EA's words only for the opclasses that use it, and
+// an immediate's length is the command word's format.
+wire [2:0] fp_words     = (fp_kind == 3'b010) ? 3'd1 :
+                          (fp_kind == 3'b011) ? 3'd2 :
+                          fp_kind[2]          ? {1'b0, ea_ext_words} :
+                          fp_is_dbcc          ? 3'd2 :
+                          fp_is_trapcc        ? ((if_opcode[2:0] == 3'b010) ? 3'd2 :
+                                                 (if_opcode[2:0] == 3'b011) ? 3'd3 : 3'd1) :
+                          (fp_kind == 3'b001) ? (3'd1 + {1'b0, ea_ext_words}) : 3'd1;
+function [2:0] fp_after_cmd;
+	input [15:0] c;
+	input  [1:0] eaw;     // the EA's own extension words
+	input        eaimm;   // the EA is #<data>
+	reg    [2:0] sel;
+	begin
+		sel = (c[12:10] == 3'd0) ? 3'b001 : c[12:10];
+		case (c[15:13])
+			3'b000, 3'b001: fp_after_cmd = 3'd0;   // FPm,FPn; undefined
+			3'b010: fp_after_cmd = (c[12:10] == 3'd7) ? 3'd0 :      // FMOVECR
+			                       !eaimm ? {1'b0, eaw} :
+			                       (c[12:10] == 3'd0 || c[12:10] == 3'd1) ? 3'd2 :
+			                       (c[12:10] == 3'd4 || c[12:10] == 3'd6) ? 3'd1 :
+			                       (c[12:10] == 3'd5) ? 3'd4 : 3'd6;
+			3'b100: fp_after_cmd = !eaimm ? {1'b0, eaw} :
+			                       (({2'b00, sel[2]} + {2'b00, sel[1]} + {2'b00, sel[0]}) << 1);
+			default: fp_after_cmd = eaimm ? 3'd0 : {1'b0, eaw};   // stores, FMOVEM: an immediate faults
+		endcase
+	end
+endfunction
+
 wire is_aline = (if_opcode[15:12] == 4'hA);
-wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16;
+wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16 && !is_fp;
 wire is_illegal = !is_nop && !is_xm && !is_trapv && !is_move_usp && !is_reset && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_muldiv_abs && !is_movea_abs && !is_mul_gather && !is_div_gather && !is_movea_gather && !is_adda_abs && !is_chk_gather && !is_quick_gx && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
@@ -2276,7 +2332,7 @@ wire is_illegal = !is_nop && !is_xm && !is_trapv && !is_move_usp && !is_reset &&
                    !is_mvto_dn && !is_mvto_memd && !is_mvto_g && !is_mvto_imm &&
                    !is_mvf_dn && !is_mvf_memd && !is_mvf_g &&
                    !is_exg && !is_tst_an && !is_tst_imm && !is_btst_dimm && !is_cmpi_pc && !is_movep &&
-                   !is_ml && !is_bf && !is_ck2 && !is_cas && !is_m16 && !is_cas2;
+                   !is_ml && !is_bf && !is_ck2 && !is_cas && !is_m16 && !is_cas2 && !is_fp;
 
 // Gather state -- see header comment. 0 = idle/normal decode cycle;
 // 1 = this cycle's if_opcode completes the gather; 2 = one more word
@@ -2392,6 +2448,13 @@ reg  [1:0]  held_ck2_size;
 reg         held_cas, held_cas_pi, held_cas_pd;
 reg         held_m16;
 reg         held_cas2;
+// The F-line gather: which kind, whether the command word is still to come
+// (it is the first gathered word), the EA's shape, and every word in order.
+reg         held_fp, held_fp_nocmd, held_fp_first, held_fp_gen, held_fp_imm, held_fp_idx, held_fp_abs;
+reg   [8:0] held_fp_op;
+reg   [1:0] held_fp_eaw;
+reg  [15:0] fp_cmd_r;
+reg  [95:0] fp_acc;
 reg   [2:0] held_m16_form;
 reg         held_is_immsr;      // ORI/ANDI/EORI to CCR or SR
 reg         held_immsr_sr;      // ...to SR rather than CCR
@@ -2426,7 +2489,10 @@ reg  [3:0]  held_cond;
 reg  [31:0] disp_acc;
 reg  [15:0] disp_acc3;      // the word before disp_acc's two (milestone 117)
 
-wire completing_gather = (ext_pending == 3'd1);
+// A general F-line form's command word, arriving, may ask for more.
+wire [2:0] fp_more   = fp_after_cmd(if_opcode, held_fp_eaw, held_fp_imm);
+wire       fp_extend = held_fp && held_fp_gen && held_fp_first && (fp_more != 3'd0);
+wire completing_gather = (ext_pending == 3'd1) && !fp_extend;
 
 // The full displacement as of the completing cycle: word form sign-extends
 // if_opcode alone (nothing was usefully shifted into disp_acc for a 1-word
@@ -2473,7 +2539,7 @@ wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp 
                              !held_is_scc_mem &&
                              !held_is_trapcc && !held_is_pack && !held_is_rtd && !held_mm &&
                              !held_moves && !held_mvto && !held_mvf && !held_movep && !held_ml && !held_bf &&
-                             !held_ck2 && !held_cas && !held_m16 && !held_cas2 &&
+                             !held_ck2 && !held_cas && !held_m16 && !held_cas2 && !held_fp &&
                              !bnt_gather;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
@@ -2527,6 +2593,14 @@ wire        bf_mod   = (held_bf_op == 3'd2) || (held_bf_op == 3'd4) ||
 // none, and a memory BFINS reads its source through port B instead.
 wire        bf_wr    = (held_bf_dn && bf_mod) ||
                        (held_bf_op == 3'd1) || (held_bf_op == 3'd3) || (held_bf_op == 3'd5);
+// The F-line EA's words are the last ones: two for (xxx).L, else one, a
+// displacement, a brief word verbatim, or a word address. FSAVE/FRESTORE
+// have no command word ahead of them.
+// An EA with no words of its own -- (An) above all -- has no displacement;
+// the completing word is then the command word, not an EA word.
+wire [31:0] fp_eadisp = (held_fp_eaw == 2'd0) ? 32'd0 :
+                        ((held_fp_nocmd ? 3'd2 : 3'd3) == held_ext_n) ? {disp_acc[15:0], if_opcode} :
+                        held_fp_idx ? {16'd0, if_opcode} : {{16{if_opcode[15]}}, if_opcode};
 wire [31:0] moves_eaext = (held_ext_n == 3'd1) ? 32'h0 :
                           (held_ext_n == 3'd3) ? {disp_acc[15:0], if_opcode} :
                           held_moves_idx       ? {16'd0, if_opcode} :
@@ -2547,7 +2621,8 @@ assign id_redirect_pc    = redirect_from_gather
 // or a trace after it stacks.
 // Three bits since milestone 114: a memory-to-memory MOVE.L between two
 // (xxx).L addresses is four words.
-wire [2:0] gather_words = is_move_mm_g ? mm_words :
+wire [2:0] gather_words = is_fp ? fp_words :
+                     is_move_mm_g ? mm_words :
                      is_m16_abs ? 3'd2 : is_m16_pp ? 3'd1 : is_cas2 ? 3'd2 :
                      is_cas ? (3'd1 + {1'b0, ea_ext_words}) :
                      is_ck2 ? (3'd1 + {1'b0, ea_ext_words}) :
@@ -2646,6 +2721,10 @@ always @(posedge clk) begin
 		id_is_rte       <= 1'b0;
 		id_is_rtr       <= 1'b0;
 		id_cond         <= 4'h0;
+		id_fp           <= 1'b0;
+		id_fp_op        <= 9'd0;
+		id_fp_cmd       <= 16'd0;
+		id_fp_imm       <= 96'd0;
 		ext_pending     <= 3'd0;
 		held_is_imm      <= 1'b0;
 		held_imm_mem     <= 1'b0;
@@ -2760,6 +2839,17 @@ always @(posedge clk) begin
 		id_ck2          <= 3'd0;
 		held_cas        <= 1'b0;
 		held_m16        <= 1'b0;
+		held_fp         <= 1'b0;
+		held_fp_op      <= 9'd0;
+		held_fp_nocmd   <= 1'b0;
+		held_fp_first   <= 1'b0;
+		held_fp_gen     <= 1'b0;
+		held_fp_imm     <= 1'b0;
+		held_fp_idx     <= 1'b0;
+		held_fp_abs     <= 1'b0;
+		held_fp_eaw     <= 2'd0;
+		fp_cmd_r        <= 16'd0;
+		fp_acc          <= 96'd0;
 		held_cas2       <= 1'b0;
 		held_m16_form   <= 3'd0;
 		id_m16          <= 4'd0;
@@ -2803,6 +2893,13 @@ always @(posedge clk) begin
 				// fresh opcode.
 				disp_acc <= {disp_acc[15:0], if_opcode};
 				disp_acc3 <= disp_acc[31:16];
+				if (held_fp) begin
+					fp_acc <= {fp_acc[79:0], if_opcode};
+					if (held_fp_first) begin
+						fp_cmd_r      <= if_opcode;
+						held_fp_first <= 1'b0;
+					end
+				end
 				// A memory-to-memory MOVE's last SOURCE word is the one with
 				// exactly the destination's words still to come.
 				if (held_mm && (ext_pending == ({1'b0, held_mm_dwords} + 3'd1)))
@@ -2868,7 +2965,8 @@ always @(posedge clk) begin
 					// An immediate with a memory destination reads An as its
 					// address base, exactly like every other memory form --
 					// the immediate rides in id_imm instead of displacing it.
-					id_src_reg      <= (held_ck2 || held_cas || held_m16) ? {1'b1, held_reg} :
+					id_src_reg      <= held_fp ? {1'b1, held_reg} :
+					                   (held_ck2 || held_cas || held_m16) ? {1'b1, held_reg} :
 					                   held_bf      ? {!held_bf_dn, held_reg} :
 					                   held_ml      ? {!held_ml_dn, held_reg} :
 					                   held_movep   ? {1'b1, held_reg} :
@@ -2921,7 +3019,8 @@ always @(posedge clk) begin
 					                   held_immx_absl  ? {disp_acc[15:0], if_opcode} :
 					                   held_ea_indexed ? {16'd0, if_opcode} :
 					                                     {{16{if_opcode[15]}}, if_opcode};
-					id_imm          <= (held_m16 || held_cas2) ? {disp_acc[15:0], if_opcode} :
+					id_imm          <= held_fp ? fp_eadisp :
+					                   (held_m16 || held_cas2) ? {disp_acc[15:0], if_opcode} :
 					                   (held_bf || held_ck2 || held_cas) ? ml_ea :
 					                   held_ml ? ml_ea :
 					                   held_moves ? moves_eaext :
@@ -3010,7 +3109,7 @@ always @(posedge clk) begin
 					                    !held_is_imm && !held_is_abs && !held_is_stabs && !held_st_disp &&
 					                    !held_is_immsr && !held_is_trapcc && !held_is_pack && !held_is_rtd &&
 					                    !held_mm && !held_moves && !held_movep && !held_ml && !held_bf && !held_ck2 &&
-					                    !held_cas && !held_m16 && !held_cas2 &&
+					                    !held_cas && !held_m16 && !held_cas2 && !held_fp &&
 					                    // This list is NEGATIVE: anything gathered and not
 					                    // named here is a branch, and its id_imm is read as
 					                    // a branch displacement. An Scc left off it had its
@@ -3032,7 +3131,8 @@ always @(posedge clk) begin
 					id_is_abs       <= held_is_abs || held_is_stabs || held_scc_abs || held_immx_abs ||
 					                   (held_mm && held_mm_sabs) || (held_moves && held_moves_abs) ||
 					                   ((held_mvto || held_mvf) && held_mvx_abs) || (held_ml && held_ml_abs) ||
-					                   (held_bf && held_bf_abs) || ((held_ck2 || held_cas) && held_ck2_abs);
+					                   (held_bf && held_bf_abs) || ((held_ck2 || held_cas) && held_ck2_abs) ||
+					                   (held_fp && held_fp_abs);
 					id_is_store     <= held_is_stabs || held_st_disp || (held_moves && moves_wr);
 					// The autoincrement modes of the immediate-to-memory family
 					// (milestone 89); every other gathered form addresses with a
@@ -3118,10 +3218,18 @@ always @(posedge clk) begin
 					id_is_rte       <= 1'b0;
 					id_is_rtr       <= 1'b0;
 					id_cond         <= held_cond;
+					id_fp           <= held_fp;
+					id_fp_op        <= held_fp_op;
+					id_fp_cmd       <= held_fp_first ? if_opcode : fp_cmd_r;
+					id_fp_imm       <= {fp_acc[79:0], if_opcode};
 					ext_pending     <= 3'd0;
 				end else begin
 					id_valid    <= 1'b0;
 					ext_pending <= ext_pending - 3'd1;
+					if (fp_extend) begin
+						ext_pending <= fp_more;
+						held_ext_n  <= held_ext_n + fp_more;
+					end
 				end
 			end else if (is_branch_word || is_branch_long || is_dbcc || is_move_disp || is_jmp_disp ||
 			              is_bsr_word || is_bsr_long || is_jsr_disp || is_movec_opcode ||
@@ -3139,7 +3247,7 @@ always @(posedge clk) begin
 			              is_packunpk || is_link_l || is_rtd || is_move_mm_g || is_ux_g || is_moves ||
 			              is_mvto_g || is_mvto_imm || is_mvf_g || is_tst_imm || is_btst_dimm ||
 			              is_cmpi_pc || is_movep || is_ml || is_bf || is_ck2 || is_cas || is_m16 ||
-			              is_cas2) begin
+			              is_cas2 || (is_fp && (fp_words != 3'd0))) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -3254,7 +3362,8 @@ always @(posedge clk) begin
 				                       is_adda_disp || is_chk_gather) &&
 				                      (ea_indexed_mode || ea_pcidx_mode)) ||
 				                     ((is_move_pcrel || is_alu_pcrel || is_lea_pcrel ||
-				                       is_pea_pcrel || is_jmp_pcrel || is_jsr_pcrel) && ea_pcidx_mode);
+				                       is_pea_pcrel || is_jmp_pcrel || is_jsr_pcrel) && ea_pcidx_mode) ||
+				                     (fp_has_ea && (ea_is_idx || ea_is_pcidx));
 				held_ea_pcrel     <= is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_pea_pcrel ||
 				                     (is_move_mm_g && ea_is_pcrel) || (is_mvto_g && ea_is_pcrel) ||
 				                     ((is_bit_d_gx || is_unary_gather_pc || is_cmpi_pc || is_bit_s_x) && ea_is_pcrel) ||
@@ -3262,7 +3371,8 @@ always @(posedge clk) begin
 				                     (is_bf && ea_is_pcrel) || (is_ck2 && ea_is_pcrel) ||
 				                     is_jmp_pcrel || is_jsr_pcrel ||
 				                     ((is_mul_gather || is_div_gather || is_movea_gather ||
-				                       is_adda_disp || is_chk_gather) && ea_pcrel_mode);
+				                       is_adda_disp || is_chk_gather) && ea_pcrel_mode) ||
+				                     (fp_has_ea && ea_is_pcrel);
 				held_is_scc_mem   <= is_scc_mem_gather;
 				held_scc_abs      <= is_scc_mem_gather && ea_is_abs;
 				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp || is_alu_idx || is_bit_d_gx ||
@@ -3365,10 +3475,21 @@ always @(posedge clk) begin
 				held_m16       <= is_m16;
 				held_cas2      <= is_cas2;
 				held_m16_form  <= is_m16_pp ? 3'd4 : {1'b0, if_opcode[4:3]};
+				held_fp        <= is_fp;
+				held_fp_op     <= if_opcode[8:0];
+				held_fp_nocmd  <= fp_nocmd;
+				held_fp_first  <= is_fp && !fp_nocmd;
+				held_fp_gen    <= is_fp && (fp_kind == 3'b000);
+				held_fp_eaw    <= ea_ext_words;
+				held_fp_imm    <= (if_opcode[5:0] == 6'b111100);
+				held_fp_idx    <= ea_is_idx || ea_is_pcidx;
+				held_fp_abs    <= fp_has_ea && ea_is_abs;
+				fp_acc         <= 96'd0;
 				held_cas_pi    <= ea_is_pi;
 				held_cas_pd    <= ea_is_pd;
 				held_pc_off    <= (is_cmpi_pc && (if_opcode[7:6] == 2'b10)) ? 2'd2 :
-				                  (is_cmpi_pc || is_bit_s_x || is_movem_x || is_ml || is_bf || is_ck2) ? 2'd1 : 2'd0;
+				                  (is_cmpi_pc || is_bit_s_x || is_movem_x || is_ml || is_bf || is_ck2 ||
+				                   (is_fp && !fp_nocmd)) ? 2'd1 : 2'd0;
 				held_is_trapcc<= is_trapcc_gather;
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
@@ -3605,6 +3726,11 @@ always @(posedge clk) begin
 				id_is_rte       <= if_valid && is_rte;
 				id_is_rtr       <= if_valid && is_rtr;
 				id_cond         <= is_trapv ? 4'h9 : if_opcode[11:8];   // TRAPV: VS
+				// FSAVE/FRESTORE through Dn, An, (An), (An)+ or -(An): no words
+				id_fp           <= is_fp;
+				id_fp_op        <= if_opcode[8:0];
+				id_fp_cmd       <= 16'd0;
+				id_fp_imm       <= 96'd0;
 			end
 		end else if (!stall_in) begin
 			// A fetch bubble (milestone 80): the L1 has not returned the next

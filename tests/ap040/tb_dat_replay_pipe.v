@@ -27,7 +27,8 @@
 //
 // SCOPE, narrow on purpose. A round is JUDGED only when its oracle is an
 // instruction that completes normally: no expected exception, no trace, no
-// interrupt level, no FPU state. Everything else is counted and skipped.
+// interrupt level. Everything else is counted and skipped. FPU rounds are
+// judged since 2026-09-24 (ap040_pipe_fpu.v), FP state as tb_dat_replay.v.
 // Following an exception to its frame needs the equivalent of the sequential
 // driver's state-machine watch and is the next piece of work; saying so in
 // the summary is better than judging those rounds by accident.
@@ -49,6 +50,7 @@ localparam [31:0] CAPH  = 32'h4211_0000;
 localparam [31:0] RND2  = 32'h524E4432;
 localparam [31:0] F_FPU        = 32'h0000_0001;
 localparam [31:0] F_IGNORE_EXC = 32'h0000_0002;
+localparam [31:0] F_CHECK_FPIAR = 32'h0000_0020;
 localparam integer EXEC_TIMEOUT = 20000;
 
 reg clk = 0;
@@ -218,10 +220,13 @@ always @(posedge clk) begin
 end
 
 // One cycle per access. Nothing is held back: the pipelined core is held
-// with ce while a round's state goes in, not by starving the bus.
+// with ce while a round's state goes in, not by starving the bus -- except
+// while a released FPU operation finishes (hold_bus, run_round), when the
+// integer side must not move and the FPU needs no bus.
+reg hold_bus = 1'b0;
 always @(posedge clk) begin
 	mem_ready <= 0;
-	if (nreset && busstate != 2'b01 && !mem_ready) mem_ready <= 1;
+	if (nreset && busstate != 2'b01 && !mem_ready && !hold_bus) mem_ready <= 1;
 end
 
 function [7:0] jread8;
@@ -404,6 +409,7 @@ integer errors /* verilator public_flat_rw */;
 integer ran    /* verilator public_flat_rw */;
 integer mism   /* verilator public_flat_rw */;
 integer skipped, unreached, report_lim, timeout;
+integer fpwait;
 // Why a round was skipped, the first reason that applies (milestone 117).
 integer sk_fpu, sk_ign, sk_trace, sk_irq, sk_odd;
 integer sk_tr [0:511];   // trace rounds by {mode 1/2, primary vector}
@@ -559,6 +565,20 @@ task inject_state;
 		// The start address, which this core has no reset vector to fetch.
 		dut.u_cpu.u_if.pc     = i_pc;
 		dut.u_cpu.u_if.issued = 32'd0;
+		// The FPU (2026-09-24), exactly as tb_dat_replay.v injects it into the
+		// same engine: FP0-FP7 live in the mirrored MLAB banks with fr_valid
+		// saying which are written, and fr_s/fr_e/fr_m are simulation mirrors.
+		for (ii = 0; ii < 8; ii = ii + 1) begin
+			dut.u_cpu.u_eaf.u_fpu.fpu.fr_s[ii] = i_fe[ii][15];
+			dut.u_cpu.u_eaf.u_fpu.fpu.fr_e[ii] = i_fe[ii][14:0];
+			dut.u_cpu.u_eaf.u_fpu.fpu.fr_m[ii] = i_fm[ii];
+			dut.u_cpu.u_eaf.u_fpu.fpu.fpregs.bank_a[ii] = {i_fe[ii][15], i_fe[ii][14:0], i_fm[ii]};
+			dut.u_cpu.u_eaf.u_fpu.fpu.fpregs.bank_b[ii] = {i_fe[ii][15], i_fe[ii][14:0], i_fm[ii]};
+			dut.u_cpu.u_eaf.u_fpu.fpu.fr_valid[ii] = 1'b1;
+		end
+		dut.u_cpu.u_eaf.u_fpu.fpu.fpcr  = i_fpcr;
+		dut.u_cpu.u_eaf.u_fpu.fpu.fpsr  = i_fpsr;
+		dut.u_cpu.u_eaf.u_fpu.fpu.fpiar = i_fpiar;
 	end
 endtask
 
@@ -634,6 +654,24 @@ task check_final;
 		         ? cap_sr_stk : dbg_sr;
 		if (((got_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
 			mismatch("SR", e_sr, {16'd0, got_sr});
+		// The FPU's registers, compared as tb_dat_replay.v compares them. They
+		// are read live: run_round let a released operation finish first.
+		if (flags & F_FPU) begin
+			for (fi = 0; fi < 8; fi = fi + 1) begin
+				got = {16'd0, dut.u_cpu.u_eaf.u_fpu.fpu.fr_valid[fi] ? dut.u_cpu.u_eaf.u_fpu.fpu.fpregs.bank_a[fi][79:64] : {1'b0, 15'h7FFF}};
+				if (got[15:0] !== e_fe[fi][15:0]) mismatch("FP sign/exp", e_fe[fi], got);
+				got = dut.u_cpu.u_eaf.u_fpu.fpu.fr_valid[fi] ? dut.u_cpu.u_eaf.u_fpu.fpu.fpregs.bank_a[fi][63:32] : 32'hFFFF_FFFF;
+				if (got !== e_fm[fi][63:32]) mismatch("FP mantissa hi", e_fm[fi][63:32], got);
+				got = dut.u_cpu.u_eaf.u_fpu.fpu.fr_valid[fi] ? dut.u_cpu.u_eaf.u_fpu.fpu.fpregs.bank_a[fi][31:0] : 32'hFFFF_FFFF;
+				if (got !== e_fm[fi][31:0]) mismatch("FP mantissa lo", e_fm[fi][31:0], got);
+			end
+			if (dut.u_cpu.u_eaf.u_fpu.fpu.fpcr !== e_fpcr) mismatch("FPCR", e_fpcr, dut.u_cpu.u_eaf.u_fpu.fpu.fpcr);
+			if (dut.u_cpu.u_eaf.u_fpu.fpu.fpsr !== e_fpsr) mismatch("FPSR", e_fpsr, dut.u_cpu.u_eaf.u_fpu.fpu.fpsr);
+			// cputest validates FPIAR when the record names it, or when the
+			// instruction changed it from the injected value.
+			if ((flags & F_CHECK_FPIAR) || dut.u_cpu.u_eaf.u_fpu.fpu.fpiar !== i_fpiar)
+				if (dut.u_cpu.u_eaf.u_fpu.fpu.fpiar !== e_fpiar) mismatch("FPIAR", e_fpiar, dut.u_cpu.u_eaf.u_fpu.fpu.fpiar);
+		end
 		for (fi = 0; fi < em_cnt; fi = fi + 1)
 			if (read_value(em_a[fi], em_sz[fi]) !== em_v[fi]) begin
 				// which address disagreed, and where the three stack pointers
@@ -749,6 +787,11 @@ task run_round;
 			end
 			if (next_known && seq_known && next_pc == seq_next && next_pc != e_pc) begin
 				multi_rounds = multi_rounds + 1;
+				// Judged on the terminal entry, so on the SR it STACKED: the live one
+				// is the handler's by then. MOVEC2's programs run in supervisor mode
+				// and could not tell; the FPU's (the tested instruction, then
+				// cputest's FNOP) run in either, and every user-mode one read $2000.
+				cap_latest = 1;
 				while (timeout < EXEC_TIMEOUT &&
 				       !(dbg_wb_valid && dbg_wb_pc == e_pc && ce)) begin
 					@(posedge clk); timeout = timeout + 1;
@@ -819,7 +862,23 @@ task run_round;
 		// go quiet is l1_wr_busy, the membus' own "a write is outstanding",
 		// which is the same signal the core stalls on.  clkena_in is not
 		// gated by ce, so this drains with the core held still.
+		// A register-destination FPU operation is released to the background
+		// (ap040_pipe_fpu.v's fpu_bg) and may still be computing when the
+		// round's last instruction retires. The engine runs only with ce, so
+		// ce stays up until it finishes -- and the bus stops answering, so the
+		// integer side cannot move: the terminal ILLEGAL's entry, right behind,
+		// stalls at its first frame beat having changed nothing. Letting it run
+		// instead took the entry and judged the handler's supervisor SR. A
+		// released operation has no stores of its own to be held up.
+		fpwait = 0;
+		if (dut.u_cpu.u_eaf.u_fpu.bg_busy) begin
+			hold_bus = 1;
+			while (fpwait < 4096 && dut.u_cpu.u_eaf.u_fpu.bg_busy) begin
+				@(posedge clk); fpwait = fpwait + 1;
+			end
+		end
 		ce = 0;
+		hold_bus = 0;
 		drain = 0;
 		while (drain < 1024 && (dut.l1_wr_busy || busstate != 2'b01)) begin
 			@(posedge clk); drain = drain + 1;
@@ -932,12 +991,11 @@ initial begin
 
 		// Judged only if the oracle is an instruction that completes. The
 		// rest are counted here rather than guessed at.
-		if ((flags & F_FPU) || (flags & F_IGNORE_EXC) ||
+		if ((flags & F_IGNORE_EXC) ||
 		    e_trace == 1 || i_level != 0 ||
 		    odd_vector != 0 || jr < start_record) begin
 			skipped = skipped + 1;
-			if (flags & F_FPU)              sk_fpu   = sk_fpu + 1;
-			else if (flags & F_IGNORE_EXC)  sk_ign   = sk_ign + 1;
+			if (flags & F_IGNORE_EXC)       sk_ign   = sk_ign + 1;
 			else if (e_trace == 1) begin
 				sk_trace = sk_trace + 1;
 				sk_tr[{e_trace[1], e_exc}] = sk_tr[{e_trace[1], e_exc}] + 1;

@@ -18,8 +18,9 @@
 # target; the real Minimig CPU clock is 35.234 ns.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; rtl="$(cd "$here/../../../rtl/ap040_pipe" && pwd)"
+rtl040="$(cd "$here/../../../rtl/ap040" && pwd)"   # the shared FPU engine
 work="${1:-/home/adam/ap040-audit4/pipe-synth}"; rm -rf "$work"; mkdir -p "$work"
-sed "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" "$here/pipe.qsf" > "$work/pipe.qsf"
+sed -e "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" -e "s#\.\./\.\./\.\./rtl/ap040#$rtl040#g" "$here/pipe.qsf" > "$work/pipe.qsf"
 cp "$here/pipe.sdc" "$here/pipe.qpf" "$here/paths40.tcl" "$work/"; cd "$work"
 Q=/opt/intelFPGA_lite/17.0/quartus/bin; echo "quartus pid $$ in $work"
 # Temporaries go in the work directory, not the shared tmpfs: a full one

@@ -89,6 +89,10 @@ module ap040_ea_calc
 	input       [2:0] id_ck2,
 	input       [4:0] id_cas,
 	input       [3:0] id_m16,
+	input             id_fp,        // the F-line (2026-09-24), see ap040_pipe_fpu.v
+	input       [8:0] id_fp_op,
+	input      [15:0] id_fp_cmd,
+	input      [95:0] id_fp_imm,
 	input       [5:0] id_alu_op,
 	input       [1:0] id_size,
 	input       [5:0] id_shcnt,
@@ -169,6 +173,10 @@ module ap040_ea_calc
 	output reg  [2:0] eac_ck2,
 	output reg  [4:0] eac_cas,
 	output reg  [3:0] eac_m16,
+	output reg        eac_fp,
+	output reg  [8:0] eac_fp_op,
+	output reg [15:0] eac_fp_cmd,
+	output reg [95:0] eac_fp_imm,
 	output reg  [5:0] eac_alu_op,
 	output reg  [1:0] eac_size,
 	output reg  [5:0] eac_shcnt,
@@ -248,6 +256,10 @@ always @(posedge clk) begin
 		eac_ck2          <= 3'd0;
 		eac_cas          <= 5'd0;
 		eac_m16          <= 4'd0;
+		eac_fp           <= 1'b0;
+		eac_fp_op        <= 9'd0;
+		eac_fp_cmd       <= 16'd0;
+		eac_fp_imm       <= 96'd0;
 		eac_alu_op       <= 6'h0;
 		eac_size         <= `AP040_SZ_L;
 		eac_shcnt        <= 6'd1;
@@ -325,6 +337,10 @@ always @(posedge clk) begin
 			eac_ck2          <= id_ck2;
 			eac_cas          <= id_cas;
 			eac_m16          <= id_m16;
+			eac_fp           <= id_fp;
+			eac_fp_op        <= id_fp_op;
+			eac_fp_cmd       <= id_fp_cmd;
+			eac_fp_imm       <= id_fp_imm;
 			eac_alu_op       <= id_alu_op;
 			eac_size         <= id_size;
 			eac_shcnt        <= id_shcnt;

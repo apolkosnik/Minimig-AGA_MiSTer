@@ -3,6 +3,7 @@ set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name TOP_LEVEL_ENTITY ap040_pipe_core
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name SEARCH_PATH ../../../rtl/ap040_pipe
+set_global_assignment -name SEARCH_PATH ../../../rtl/ap040
 set_global_assignment -name SDC_FILE pipe.sdc
 set_parameter -name L1_AW 4
 set_instance_assignment -name VIRTUAL_PIN ON -to *
@@ -19,6 +20,8 @@ set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_memb
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_sys.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_l1.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_regfile.v
+set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_fpu.v
+set_global_assignment -name VERILOG_FILE ../../../rtl/ap040/ap040_fpu.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_writeback.v
 
 set_global_assignment -name LAST_QUARTUS_VERSION "17.0.2 Standard Edition"

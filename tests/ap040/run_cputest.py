@@ -64,6 +64,8 @@ PIPE_SOURCES = [
     PIPE / "ap040_writeback.v",
     PIPE / "ap040_pipe_alu.v",
     PIPE / "ap040_pipe_regfile.v",
+    PIPE / "ap040_pipe_fpu.v",
+    RTL / "ap040_fpu.v",
 ]
 RTL_SOURCES = [
     RTL / "ap040_tg68k_compat.v",
