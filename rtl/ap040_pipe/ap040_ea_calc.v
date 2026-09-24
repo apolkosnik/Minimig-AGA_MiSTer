@@ -82,6 +82,10 @@ module ap040_ea_calc
 	input       [5:0] id_mm,
 	input       [2:0] id_moves,
 	input       [1:0] id_mvfsr,
+	input       [1:0] id_pc_off,
+	input       [2:0] id_movep,
+	input       [6:0] id_ml,
+	input       [4:0] id_bf,
 	input       [5:0] id_alu_op,
 	input       [1:0] id_size,
 	input       [5:0] id_shcnt,
@@ -148,6 +152,14 @@ module ap040_ea_calc
 	output reg  [5:0] eac_mm,
 	output reg  [2:0] eac_moves,
 	output reg  [1:0] eac_mvfsr,
+	// The PC a PC-relative EA is relative to: the address of its displacement
+	// word, which an immediate ahead of it pushes on by two or four bytes
+	// (milestone 115). Registered here so EA-fetch's address path sees a
+	// register where it used to see eac_pc + 2.
+	output reg [31:0] eac_pc_base,
+	output reg  [2:0] eac_movep,
+	output reg  [6:0] eac_ml,
+	output reg  [4:0] eac_bf,
 	output reg  [5:0] eac_alu_op,
 	output reg  [1:0] eac_size,
 	output reg  [5:0] eac_shcnt,
@@ -217,6 +229,10 @@ always @(posedge clk) begin
 		eac_mm           <= 6'd0;
 		eac_moves        <= 3'd0;
 		eac_mvfsr        <= 2'd0;
+		eac_pc_base      <= 32'h0;
+		eac_movep        <= 3'd0;
+		eac_ml           <= 7'd0;
+		eac_bf           <= 5'd0;
 		eac_alu_op       <= 6'h0;
 		eac_size         <= `AP040_SZ_L;
 		eac_shcnt        <= 6'd1;
@@ -284,6 +300,10 @@ always @(posedge clk) begin
 			eac_mm           <= id_mm;
 			eac_moves        <= id_moves;
 			eac_mvfsr        <= id_mvfsr;
+			eac_pc_base      <= id_pc + 32'd2 + {29'd0, id_pc_off, 1'b0};
+			eac_movep        <= id_movep;
+			eac_ml           <= id_ml;
+			eac_bf           <= id_bf;
 			eac_alu_op       <= id_alu_op;
 			eac_size         <= id_size;
 			eac_shcnt        <= id_shcnt;

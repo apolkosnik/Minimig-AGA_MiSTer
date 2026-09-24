@@ -210,6 +210,8 @@ module ap040_execute
 	input             eaf_is_rmw,
 	input             eaf_is_mm,
 	input       [1:0] eaf_mvfsr,
+	input       [6:0] eaf_ml,
+	input       [2:0] eaf_bf,
 	input      [31:0] eaf_ea_target,
 	input             l1_wr_busy,
 	output            ex_st_req,
@@ -299,7 +301,7 @@ module ap040_execute
 
 assign ex_st_req = eaf_valid && eaf_is_rmw;
 wire   rmw_wait  = ex_st_req && l1_wr_busy;
-assign ex_stall  = stall_in || rmw_wait || div_wait;
+assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait;
 
 // ------------------------------------------------------------- divide
 // A 32/16 divide cannot be combinational the way the 16x16 multiply can, so
@@ -323,12 +325,27 @@ assign ex_stall  = stall_in || rmw_wait || div_wait;
 reg        div_busy;
 reg  [5:0] div_cnt;
 reg [31:0] div_dvd;      // shifts left; its low bits collect the quotient
-reg [16:0] div_rem;
-reg [15:0] div_dsr;
+reg [32:0] div_rem;
+reg [31:0] div_dsr;
 reg        div_qneg, div_rneg;
 
+// MULx.L/DIVx.L (milestone 115): {it is one, divide, signed, 64-bit, Dh/Dr}.
+wire        ml      = eaf_ml[6];
+wire        ml_div  = eaf_ml[5];
+wire        ml_s    = eaf_ml[4];
+wire        ml_64   = eaf_ml[3];
+wire  [2:0] ml_dh   = eaf_ml[2:0];
+wire        ml_same = (ml_dh == eaf_dest_reg[2:0]);
+// Dh/Dr is written too -- unless it IS Dl/Dq, where the 68040 keeps only
+// the low product or the quotient (ap040_core.v skips S_MD_WB2). The
+// exclusion is not just tidiness: decode allows an (An)+/-(An) source only
+// when there is one data register to write, precisely so the second port
+// is free for the address step, and taking the port here anyway lost the
+// step -- MULU.L (A6)+,D1:D1 left A6 where it was (milestone 115).
+wire        ml_two  = ml && !ml_same && (ml_div || ml_64);
+
 wire        div_req    = eaf_valid && eaf_is_div;
-wire [16:0] div_rem_sh = {div_rem[15:0], div_dvd[31]};
+wire [32:0] div_rem_sh = {div_rem[31:0], div_dvd[31]};
 wire        div_rem_ge = (div_rem_sh >= {1'b0, div_dsr});
 wire        div_fin    = div_busy && (div_cnt == 6'd0);
 wire        div_wait   = div_req && !div_fin;
@@ -337,15 +354,34 @@ wire        div_wait   = div_req && !div_fin;
 // quotient takes the XOR of the operand signs, the remainder takes the
 // DIVIDEND's sign. That second rule is the one worth stating -- it is not
 // the sign of the divisor and it is not always the sign of the quotient.
-wire [31:0] div_dividend = eaf_operand_b;
-wire [15:0] div_divisor  = eaf_operand_a[15:0];
-wire        dvd_neg = eaf_div_signed && div_dividend[31];
-wire        dsr_neg = eaf_div_signed && div_divisor[15];
-wire [31:0] dvd_mag = dvd_neg ? (~div_dividend + 32'd1) : div_dividend;
-wire [15:0] dsr_mag = dsr_neg ? (~div_divisor  + 16'd1) : div_divisor;
+// Widened for the long divides (milestone 115): a 64-bit dividend {hi, lo}
+// and a 32-bit divisor. The word divide is the case hi = the sign of lo and
+// a sign- or zero-extended 16-bit divisor, and the same 32 steps give it
+// the same answer. The remainder starts from the magnitude's HIGH half
+// rather than from zero; when that is not below the divisor the quotient
+// cannot fit 32 bits, which is the long divide's overflow, caught before
+// the steps rather than after.
+wire [31:0] dv_lo   = eaf_operand_b;
+wire [31:0] dv_hi   = !ml    ? {32{eaf_div_signed && eaf_operand_b[31]}} :
+                      !ml_64 ? {32{ml_s && eaf_operand_b[31]}} :
+                      ml_same ? eaf_operand_b : eaf_an_data;   // Dr, read on port C
+wire [31:0] div_divisor = ml ? eaf_operand_a
+                             : (eaf_div_signed ? {{16{eaf_operand_a[15]}}, eaf_operand_a[15:0]}
+                                               : {16'd0, eaf_operand_a[15:0]});
+wire        dvd_neg = eaf_div_signed && dv_hi[31];
+wire        dsr_neg = eaf_div_signed && div_divisor[31];
+wire [63:0] dvd_mag = dvd_neg ? (~{dv_hi, dv_lo} + 64'd1) : {dv_hi, dv_lo};
+wire [31:0] dsr_mag = dsr_neg ? (~div_divisor + 32'd1) : div_divisor;
+wire        div_pre_ovf = (dvd_mag[63:32] >= dsr_mag);
 
 wire [31:0] q_mag = div_dvd;
 wire [15:0] r_mag = div_rem[15:0];
+wire [31:0] divl_q = div_qneg ? (~q_mag + 32'd1) : q_mag;
+wire [31:0] divl_r = div_rneg ? (~div_rem[31:0] + 32'd1) : div_rem[31:0];
+// The long quotient must fit 32 bits: unsigned, anything the pre-check let
+// through does; signed, the magnitude may reach 2^31 only when negative.
+wire divl_ovf = div_pre_ovf ||
+                (eaf_div_signed && (div_qneg ? (q_mag > 32'h8000_0000) : (q_mag > 32'h7FFF_FFFF)));
 wire [15:0] div_q = div_qneg ? (~q_mag[15:0] + 16'd1) : q_mag[15:0];
 wire [15:0] div_r = div_rneg ? (~r_mag       + 16'd1) : r_mag;
 wire [31:0] div_result = {div_r, div_q};
@@ -368,16 +404,16 @@ always @(posedge clk) begin
 		div_busy <= 1'b0;
 		div_cnt  <= 6'd0;
 		div_dvd  <= 32'h0;
-		div_rem  <= 17'h0;
-		div_dsr  <= 16'h0;
+		div_rem  <= 33'h0;
+		div_dsr  <= 32'h0;
 		div_qneg <= 1'b0;
 		div_rneg <= 1'b0;
 	end else if (ce) begin
 		if (div_req && !div_busy) begin
 			div_busy <= 1'b1;
 			div_cnt  <= 6'd32;
-			div_rem  <= 17'd0;
-			div_dvd  <= dvd_mag;
+			div_rem  <= {1'b0, dvd_mag[63:32]};
+			div_dvd  <= dvd_mag[31:0];
 			div_dsr  <= dsr_mag;
 			div_qneg <= dvd_neg ^ dsr_neg;
 			div_rneg <= dvd_neg;
@@ -390,6 +426,42 @@ always @(posedge clk) begin
 		end
 	end
 end
+
+// The long multiply (milestone 115): a 32x32 product registered for one
+// cycle, which is what lets it map onto the DSP blocks without a
+// combinational 64-bit product on EX's own path. mul_wait holds the stage
+// for that cycle the way div_wait does for the divider's.
+reg         mul_busy;
+reg  [63:0] mul_prod;
+wire        mul_req  = eaf_valid && ml && !ml_div;
+wire        mul_wait = mul_req && !mul_busy;
+wire signed [63:0] mul_s_c = $signed(eaf_operand_a) * $signed(eaf_operand_b);
+wire        [63:0] mul_u_c = {32'd0, eaf_operand_a} * {32'd0, eaf_operand_b};
+always @(posedge clk) begin
+	if (!nreset) begin
+		mul_busy <= 1'b0;
+		mul_prod <= 64'h0;
+	end else if (ce) begin
+		if (mul_req && !mul_busy) begin
+			mul_busy <= 1'b1;
+			mul_prod <= ml_s ? mul_s_c : mul_u_c;
+		end else if (mul_busy) begin
+			mul_busy <= 1'b0;
+		end
+	end
+end
+// ap040_core.v's EK_MD_L rules. Multiply: 32-bit, N/Z from the low half
+// and V when the high half is not its extension; 64-bit, N/Z from all of
+// it, V clear. Divide: V on overflow with N/Z and both registers left
+// alone; otherwise N/Z from the quotient. C is always cleared.
+wire        mull_v32 = ml_s ? (mul_prod[63:32] != {32{mul_prod[31]}}) : (mul_prod[63:32] != 32'd0);
+wire  [4:0] ml_flags = ml_div ? (divl_ovf ? {ccr_in[4], ccr_in[3], ccr_in[2], 1'b1, 1'b0}
+                                          : {ccr_in[4], divl_q[31], (divl_q == 32'd0), 1'b0, 1'b0}) :
+                       ml_64  ? {ccr_in[4], mul_prod[63], (mul_prod == 64'd0), 1'b0, 1'b0}
+                              : {ccr_in[4], mul_prod[31], (mul_prod[31:0] == 32'd0), mull_v32, 1'b0};
+wire [31:0] ml_lo    = ml_div ? divl_q : mul_prod[31:0];
+wire [31:0] ml_hi    = ml_div ? divl_r : mul_prod[63:32];
+wire        ml_wr    = !(ml_div && divl_ovf);
 
 wire [31:0] alu_result;
 wire [4:0]  alu_flags;
@@ -463,7 +535,7 @@ wire [31:0] dbcc_result       = {eaf_operand_a[31:16], dbcc_dec};
 // DIVU/DIVS join DBcc as instructions whose write depends on a RUNTIME
 // value: an overflowing quotient writes nothing at all.
 wire writes_reg_resolved = eaf_is_dbcc ? (eaf_valid && !cond_result) :
-                            eaf_is_div  ? (eaf_writes_reg && !div_ovf) : eaf_writes_reg;
+                            eaf_is_div  ? (eaf_writes_reg && (ml ? ml_wr : !div_ovf)) : eaf_writes_reg;
 
 // Both of DBcc's "don't branch" outcomes -- condition true, or the
 // decremented counter expired -- are architecturally identical to Bcc's
@@ -607,6 +679,7 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                 eaf_is_link || eaf_is_pea || eaf_is_mm || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
+                               ml         ? ml_lo :
                                eaf_is_div ? div_result :
                                                                     alu_sized;
 
@@ -715,7 +788,11 @@ assign ex_fwd_data  = combined_result;
 // The one place the committed flags are chosen; the forward and the
 // register both read it, so they cannot disagree.
 // An in-bounds CHK clears N and C and leaves X, Z and V (milestone 112).
-wire [4:0] exe_flags_c = eaf_chk_ok ? {ccr_in[4], 1'b0, ccr_in[2], ccr_in[1], 1'b0} :
+// A bitfield's N and Z were settled by ap040_ea_fetch.v's sequencer
+// (milestone 116); V and C clear, X untouched.
+wire [4:0] exe_flags_c = eaf_bf[2]  ? {ccr_in[4], eaf_bf[1], eaf_bf[0], 1'b0, 1'b0} :
+                         eaf_chk_ok ? {ccr_in[4], 1'b0, ccr_in[2], ccr_in[1], 1'b0} :
+                         ml         ? ml_flags :
                          eaf_is_div ? div_flags : alu_flags;
 assign ex_ccr_fwd_valid = eaf_valid && eaf_writes_ccr && !ex_stall;   // final this cycle
 // The branch verdict, for EA-fetch's T0 trace arm: a conditional branch
@@ -729,9 +806,11 @@ assign ex_ccr_fwd_data  = exe_flags_c;
 // exe_*2 outputs one cycle later. Wiring it to the registered outputs made
 // the very next instruction read the stale An, which is the whole hazard
 // this path exists to close.
-assign ex_fwd2_valid = eaf_valid && eaf_writes_an;
-assign ex_fwd2_dest  = eaf_an_reg;
-assign ex_fwd2_data  = eaf_an_data;
+// A two-register long multiply or divide writes Dh/Dr through this port
+// from here (milestone 115); decode never lets one also step an An.
+assign ex_fwd2_valid = eaf_valid && (ml_two ? ml_wr : eaf_writes_an);
+assign ex_fwd2_dest  = ml_two ? {1'b0, ml_dh} : eaf_an_reg;
+assign ex_fwd2_data  = ml_two ? ml_hi : eaf_an_data;
 
 assign ex_sr_fwd_valid = exe_writes_sr_c;
 assign ex_sr_fwd_data  = exe_sr_data_c;
@@ -762,9 +841,9 @@ always @(posedge clk) begin
 		// The address update rides alongside, on its own gate -- see
 		// ap040_pipe_regfile.v's second write port.
 		exe_an_sel       <= eaf_an_sel;
-		exe_dest_reg2    <= eaf_an_reg;
-		exe_result_data2 <= eaf_an_data;
-		exe_writes_reg2  <= eaf_writes_an;
+		exe_dest_reg2    <= ml_two ? {1'b0, ml_dh} : eaf_an_reg;
+		exe_result_data2 <= ml_two ? ml_hi : eaf_an_data;
+		exe_writes_reg2  <= ml_two ? ml_wr : eaf_writes_an;
 		exe_writes_reg   <= writes_reg_resolved;
 		exe_writes_ccr   <= eaf_writes_ccr;
 		exe_result_flags <= exe_flags_c;

@@ -118,5 +118,10 @@
 // the ALU itself never sees either code.
 `define AP040_ALU_PACK    6'd35
 `define AP040_ALU_UNPK    6'd36
+// EXG and BTST Dn,#imm (milestone 115), decode's names again: EA-fetch
+// turns EXG into an ALU_MOVE plus a second-port write, and BTST-with-
+// immediate-data into an ordinary BTST with its operands swapped.
+`define AP040_ALU_EXG     6'd37
+`define AP040_ALU_BTSTR   6'd38
 
 `endif // AP040_PIPE_DEFS_SVH

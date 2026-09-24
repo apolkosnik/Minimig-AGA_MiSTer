@@ -271,6 +271,10 @@ module ap040_ea_fetch
 	input       [5:0] eac_mm,
 	input       [2:0] eac_moves,
 	input       [1:0] eac_mvfsr,
+	input      [31:0] eac_pc_base,
+	input       [2:0] eac_movep,
+	input       [6:0] eac_ml,
+	input       [4:0] eac_bf,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -427,6 +431,8 @@ module ap040_ea_fetch
 	output reg        eaf_is_rmw,
 	output reg        eaf_is_mm,
 	output reg  [1:0] eaf_mvfsr,
+	output reg  [6:0] eaf_ml,
+	output reg  [2:0] eaf_bf,       // bitfield: {it is one, N, Z} -- EX takes the flags from here
 	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
 	output            rf3_we,
 	output      [3:0] rf3_addr,
@@ -551,7 +557,7 @@ wire [31:0] idx_disp = {{24{ea_ext[7]}}, ea_ext[7:0]};
 // exception frames, so nothing new reaches this stage. operand_a is simply
 // unused for these modes; decode still points eac_src_reg at the register
 // the mode field nominally names, and reading it is harmless.
-wire [31:0] ea_base = eac_ea_pcrel ? (eac_pc + 32'd2) : operand_a;
+wire [31:0] ea_base = eac_ea_pcrel ? eac_pc_base : operand_a;   // opcode + 2 unless an immediate intervenes
 
 // An immediate with a memory destination (milestone 89) carries its
 // OPERAND in eac_imm, not a displacement, so there is nothing to add to
@@ -622,12 +628,14 @@ wire [31:0] mm_dan_new  = mm_dpi ? (mm_base + mm_dstep) : (mm_base - mm_dstep);
 // own_exc, own_exc is true again by then, and gating store_now had already
 // swung an_wr_reg from the destination An to eac_src_reg -- so MOVE.L
 // D0,(A0)+ at an odd RTE target wrote $11223348 into D0.
-wire        an_wr_any  = (an_write || (eac_valid && (eac_is_link || eac_is_unlk)) ||
+// EXG writes Ry through this port with Rx's value (milestone 115).
+wire        an_wr_any  = (an_write || (eac_valid && (eac_is_link || eac_is_unlk || eac_is_exgop)) ||
                           (mvm_fin && mvm_wb)) && !ae_busy && !moves_priv;
-wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
+wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem || eac_is_exgop) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          store_now ? eac_dest_reg : eac_src_reg;
-wire [31:0] an_wr_data = eac_is_link  ? push_addr            :
+wire [31:0] an_wr_data = eac_is_exgop ? operand_b            :
+                         eac_is_link  ? push_addr            :
                          eac_is_unlk  ? (operand_a + 32'd4)  :
                          eac_is_movem ? mvm_addr             : an_new;
 
@@ -705,6 +713,96 @@ wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_ta
 // below, which writes An through the second port via an_wr_*.
 wire mvm_fin   = mvm_active && !mvm_any && !mvm_rd_pend;
 wire mvm_stall = eac_valid && eac_is_movem && !mvm_fin && !trace_hold && !ae_busy;
+
+// ------------------------------------------------------------------ MOVEP
+// Two or four single-byte accesses at (d16,Ay), +2, +4, +6 (milestone 115).
+// A store takes Dx's bytes high first from port B, which decode pointed at
+// Dx; a load shifts each byte into mvp_acc, and the instruction then leaves
+// through the ordinary retire with mvp_acc as its operand, where EX's Word
+// merge keeps Dx's upper half for MOVEP.W. One beat per cycle for a store
+// the write buffer accepts, two for a load (address, then data), exactly
+// as MOVEM's beats go.
+reg         mvp_active;
+reg   [2:0] mvp_left;       // beats still to go
+reg  [31:0] mvp_addr;
+reg  [31:0] mvp_acc;
+reg         mvp_rd_pend;
+wire        mvp        = eac_movep[2];
+wire        mvp_long   = eac_movep[1];
+wire        mvp_wr     = eac_movep[0];
+wire  [7:0] mvp_byte   = (mvp_left == 3'd4) ? operand_b[31:24] :
+                         (mvp_left == 3'd3) ? operand_b[23:16] :
+                         (mvp_left == 3'd2) ? operand_b[15:8]  : operand_b[7:0];
+wire        mvp_st_want = mvp_active &&  mvp_wr && (mvp_left != 3'd0) && !port_taken;
+wire        mvp_st_go   = mvp_st_want && !l1_wr_busy;
+wire        mvp_ld_go   = mvp_active && !mvp_wr && (mvp_left != 3'd0) && !mvp_rd_pend && !port_taken;
+wire        mvp_fin     = mvp_active && (mvp_left == 3'd0) && !mvp_rd_pend;
+wire        mvp_stall   = eac_valid && mvp && !mvp_fin && !trace_hold && !ae_busy;
+
+// -------------------------------------------------------------- bitfields
+// BFTST/BFEXTU/BFCHG/BFEXTS/BFCLR/BFFFO/BFSET/BFINS (milestone 116), staged
+// the way ap040_core.v's S_BF_* are. The EA is latched on the first cycle,
+// while port C still serves any index; the offset, the width and a
+// register BFINS's source then come through port C one per cycle. A
+// register operand is rotated so the field is left-aligned; a memory one is
+// read as the one to five bytes that hold the field -- one access, and a
+// trailing byte for a three- or five-byte span -- and shifted by the bit
+// offset within the first byte. Four registered stages extract the field,
+// form the new one, and place it back; a modifying op on memory then writes
+// the same one or two accesses. The instruction leaves through the ordinary
+// retire with its register result as operand A, and N/Z in eaf_bf, because
+// a field's sign is bit w-1, not bit 31.
+localparam [3:0] BF_EA = 4'd0, BF_OFF = 4'd1, BF_WID = 4'd2, BF_SRC = 4'd3,
+                 BF_RD1 = 4'd4, BF_RD1W = 4'd5, BF_RD2 = 4'd6, BF_RD2W = 4'd7,
+                 BF_S1 = 4'd8, BF_S2 = 4'd9, BF_S3 = 4'd10, BF_S4 = 4'd11,
+                 BF_WR1 = 4'd12, BF_WR2 = 4'd13, BF_DONE = 4'd14;
+reg         bf_active;
+reg   [3:0] bf_ph;
+reg  [31:0] bf_ea, bf_off, bf_du, bf_addr, bf_w1, bf_field, bf_ones, bf_res;
+reg   [5:0] bf_w;
+reg   [2:0] bf_bib, bf_span;
+reg   [7:0] bf_w2;
+reg  [39:0] bf_t40, bf_maskl;
+reg         bf_n, bf_z;
+wire        bfv     = eac_bf[4];
+wire        bf_reg  = eac_bf[3];
+wire  [2:0] bf_op   = eac_bf[2:0];
+wire [15:0] bfx     = eac_ea_ext[15:0];
+wire        bf_modop = (bf_op == 3'd2) || (bf_op == 3'd4) || (bf_op == 3'd6) || (bf_op == 3'd7);
+wire        bf_fin  = bf_active && (bf_ph == BF_DONE);
+wire        bf_stall = eac_valid && bfv && !bf_fin && !trace_hold && !ae_busy;
+wire        bf_two   = (bf_span == 3'd3) || (bf_span == 3'd5);
+wire  [1:0] bf_sz1   = (bf_span == 3'd1) ? `AP040_SZ_B : (bf_span <= 3'd3) ? `AP040_SZ_W : `AP040_SZ_L;
+wire [31:0] bf_cur_addr = ((bf_ph == BF_RD2) || (bf_ph == BF_WR2))
+                          ? (bf_addr + ((bf_span == 3'd3) ? 32'd2 : 32'd4)) : bf_addr;
+wire  [1:0] bf_cur_sz   = ((bf_ph == BF_RD2) || (bf_ph == BF_WR2)) ? `AP040_SZ_B : bf_sz1;
+wire [31:0] bf_wdata    = (bf_ph == BF_WR2) ? {24'd0, (bf_span == 3'd3) ? bf_w1[15:8] : bf_w2} :
+                          (bf_span == 3'd1) ? {24'd0, bf_w1[31:24]} :
+                          (bf_span <= 3'd3) ? {16'd0, bf_w1[31:16]} : bf_w1;
+wire        bf_ld_go  = bf_active && ((bf_ph == BF_RD1) || (bf_ph == BF_RD2)) && !port_taken;
+wire        bf_st_want = bf_active && ((bf_ph == BF_WR1) || (bf_ph == BF_WR2)) && !port_taken;
+wire        bf_st_go  = bf_st_want && !l1_wr_busy;
+wire  [3:0] bf_rc     = (bf_ph == BF_OFF) ? {1'b0, bfx[8:6]} :
+                        (bf_ph == BF_WID) ? {1'b0, bfx[2:0]} : {1'b0, bfx[14:12]};
+wire        bf_use_c  = bf_active && ((bf_ph == BF_OFF) || (bf_ph == BF_WID) || (bf_ph == BF_SRC));
+// The stage-3 values, from ap040_core.v's bf_newf and S_BF_X3/M3.
+wire [31:0] bf_nf     = (bf_op == 3'd2) ? ((~bf_field) & bf_ones) :
+                        (bf_op == 3'd4) ? 32'd0 :
+                        (bf_op == 3'd6) ? bf_ones : (bf_du & bf_ones);
+wire [31:0] bf_al     = bf_t40[39:8] & bf_maskl[39:8];
+wire  [5:0] bf_clz;
+function [5:0] bf_clz32;
+	input [31:0] v;
+	integer k;
+	begin
+		bf_clz32 = 6'd32;
+		for (k = 0; k < 32; k = k + 1)
+			if (v[k]) bf_clz32 = 6'd31 - k[5:0];
+	end
+endfunction
+assign bf_clz = bf_clz32(bf_al);
+wire [39:0] bf_head   = ~(40'hFF_FFFF_FFFF >> bf_bib);
+wire [39:0] bf_nw40   = ({bf_w1, bf_w2} & bf_head) | (bf_t40 >> bf_bib);
 
 assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
 assign rf3_addr = mvm_rd_reg;
@@ -810,9 +908,10 @@ wire [31:0] div_divisor = eac_is_mem_src ? mem_lane : operand_a;
 // mem_lane is the loaded value, settled whatever EX is doing, and
 // mem_pending && l1_rvalid_b is true for exactly one cycle, so requiring
 // !stall_in there would DROP the fault rather than delay it.
+// A long divide's divisor is all 32 bits (milestone 115).
 wire divzero_now = eac_valid && eac_is_div &&
                    (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
-                   (div_divisor[15:0] == 16'd0);
+                   (eac_ml[6] ? (div_divisor == 32'd0) : (div_divisor[15:0] == 16'd0));
 
 // ...and it has to be LATCHED, not recomputed. mem_lane is l1_q_b, which
 // lives for exactly one cycle: the frame push this very exception starts
@@ -1161,6 +1260,9 @@ wire stop_takes_hold = eac_is_stop && !traced_now;
 // an ALU_MOVE of the finished byte or word. Operand B has to stay Dy: EX's
 // alu_sized takes a Byte/Word result's upper bits from it.
 wire eac_is_packop   = (eac_alu_op == `AP040_ALU_PACK) || (eac_alu_op == `AP040_ALU_UNPK);
+// EXG and BTST Dn,#imm (milestone 115) leave here as ALU_MOVE and ALU_BTST.
+wire eac_is_exgop    = (eac_alu_op == `AP040_ALU_EXG);
+wire eac_is_btstr    = (eac_alu_op == `AP040_ALU_BTSTR);
 wire [15:0] pack_sum = operand_a[15:0] + eac_ea_ext[15:0];
 wire [15:0] unpk_sum = {4'd0, operand_a[7:4], 4'd0, operand_a[3:0]} + eac_ea_ext[15:0];
 wire [31:0] pack_value = (eac_alu_op == `AP040_ALU_PACK) ? {24'd0, pack_sum[11:8], pack_sum[3:0]}
@@ -1306,7 +1408,7 @@ wire ret_stall    = ret_active && !ret_done;
 // eighteen times. The earlier fix gated the ordinary store alone, which was
 // the reported symptom rather than the defect.
 assign l1_rd_b = !stall_self &&
-                 (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go);
+                 (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go);
 
 // Format check (milestone 76). $0 is the four-word frame this core pushes
 // for everything but address error; $2 and $3 are the six-word frames ($3
@@ -1334,7 +1436,7 @@ assign fmterr_now = ret_done && !ret_fmt_ok;
 // puts the read in the commit cycle, where the auxiliary bypass answers
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
 assign eaf_stall = stall_in || creg_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
-                   ret_stall || port_taken || mvm_stall ||
+                   ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // A privilege violation reroutes port B to A7 REGARDLESS of what the
@@ -1353,7 +1455,12 @@ assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // at mem_issue and the destination's at mem_complete, never both at once,
 // so one port serves an indexed-to-indexed MOVE. The select is mem_pending,
 // a register, which is what the milestone-88 rule asks of this path.
-assign raddr_c    = mm_dphase ? mm_didx_reg : idx_reg;
+// ...and for a 64-bit long divide, Dr, the dividend's high half (milestone
+// 115): once any index has been used, or at once when there is none.
+wire        ml_rd_dr  = eac_ml[6] && eac_ml[5] && eac_ml[3] && (eac_ml[2:0] != eac_dest_reg[2:0]);
+assign raddr_c    = mm_dphase ? mm_didx_reg :
+                    bf_use_c  ? bf_rc :
+                    (ml_rd_dr && (!eac_is_mem_src || mem_pending)) ? {1'b0, eac_ml[2:0]} : idx_reg;
 wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == raddr_c);
 wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_c);
 wire [31:0] operand_c = fwd_c_from_ex  ? ex_fwd_data  :
@@ -1562,6 +1669,8 @@ wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
 wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
+                            mvp_active   ? mvp_addr     :
+                            bf_active    ? bf_cur_addr  :
                             // A store with a displacement takes the LOAD's
                             // adder instead of one of its own (milestone
                             // 91): decode points eac_src_reg at An for
@@ -1593,7 +1702,8 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // their own sequencer, which advances per accepted beat, so they post once
 // each without needing this.
 assign l1_wren_b = !stall_self &&
-                   ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want);
+                   ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want || mvp_st_want ||
+                    bf_st_want);
 // The privilege this access carries (milestone 92). An exception's frame
 // writes and vector read are SUPERVISOR accesses whatever mode the faulting
 // instruction ran in, and the switch to supervisor has not committed while
@@ -1605,6 +1715,8 @@ assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
 // -- is a Longword.
 assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
+                   mvp_active   ? `AP040_SZ_B :
+                   bf_active    ? bf_cur_sz :
                    store_now    ? eac_size :
                    eac_is_push  ? `AP040_SZ_L :
                    exc_writing  ? `AP040_SZ_L :
@@ -1624,7 +1736,9 @@ assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
 // rtl/ap040/ap040_core.v, which passes the cputest corpus, follows the
 // later rule. An is not written back until the sequence finishes, so
 // operand_a is still the initial value when this beat goes out.
-assign l1_data_b = mvm_st_want  ? (mvm_base_self ? (operand_a - mvm_step)
+assign l1_data_b = mvp_st_want  ? {24'd0, mvp_byte} :
+                   bf_st_want   ? bf_wdata :
+                   mvm_st_want  ? (mvm_base_self ? (operand_a - mvm_step)
                                                  : operand_a) :
                    exc_writing  ? exc_wdata :
                    store_now    ? (eac_st_disp ? operand_b : eac_moves[0] ? an_new : operand_a) :
@@ -1674,6 +1788,7 @@ always @(posedge clk) begin
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_mm      <= 1'b0;
 		eaf_mvfsr      <= 2'd0;
+		eaf_ml         <= 7'd0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
 		eaf_is_chk     <= 1'b0;
@@ -1693,6 +1808,30 @@ always @(posedge clk) begin
 		eaf_cond       <= 4'h0;
 		mem_pending    <= 1'b0;
 		mvm_active     <= 1'b0;
+		mvp_active     <= 1'b0;
+		mvp_left       <= 3'd0;
+		mvp_addr       <= 32'h0;
+		mvp_acc        <= 32'h0;
+		mvp_rd_pend    <= 1'b0;
+		bf_active      <= 1'b0;
+		bf_ph          <= BF_EA;
+		bf_ea          <= 32'h0;
+		bf_off         <= 32'h0;
+		bf_du          <= 32'h0;
+		bf_addr        <= 32'h0;
+		bf_w1          <= 32'h0;
+		bf_w2          <= 8'h0;
+		bf_field       <= 32'h0;
+		bf_ones        <= 32'h0;
+		bf_res         <= 32'h0;
+		bf_w           <= 6'd0;
+		bf_bib         <= 3'd0;
+		bf_span        <= 3'd0;
+		bf_t40         <= 40'h0;
+		bf_maskl       <= 40'h0;
+		bf_n           <= 1'b0;
+		bf_z           <= 1'b0;
+		eaf_bf         <= 3'd0;
 		mvm_mask       <= 16'h0;
 		mvm_addr       <= 32'h0;
 		mvm_dir        <= 1'b0;
@@ -1839,6 +1978,10 @@ always @(posedge clk) begin
 			mem_pending     <= 1'b0;
 			mvm_active      <= 1'b0;
 			mvm_rd_pend     <= 1'b0;
+			mvp_active      <= 1'b0;
+			mvp_rd_pend     <= 1'b0;
+			bf_active       <= 1'b0;
+			bf_ph           <= BF_EA;
 			exc_pend_divzero <= 1'b0;
 			exc_pend_addrerr <= 1'b0;
 			exc_pend_chk     <= 1'b0;
@@ -1925,6 +2068,8 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= (eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST)) || mm;
 				eaf_is_mm      <= mm;
 				eaf_mvfsr      <= eac_mvfsr;
+				eaf_ml         <= eac_ml;
+				if (!bfv) eaf_bf <= 3'd0;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
 				eaf_ea_target  <= mm ? mm_daddr : ea_target;
@@ -1952,7 +2097,7 @@ always @(posedge clk) begin
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= an_wr_data;
+				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
@@ -2040,7 +2185,10 @@ always @(posedge clk) begin
 					// eac_imm is already the EA: sign-extended for a displacement
 					// or $xxx.W, all 32 bits for $xxx.L, zero for the modes with
 					// none. The mask has its own field since milestone 73.
-					mvm_addr    <= eac_movem_abs   ? eac_imm :
+					// ...and the indexed modes (milestone 115) start from
+					// ea_target; eac_pc_base carries the mask word's two bytes.
+					mvm_addr    <= eac_ea_indexed  ? ea_target :
+					               eac_movem_abs   ? eac_imm :
 					               eac_movem_pcrel ? (eac_pc + 32'd4 + eac_imm) :
 					                                 (operand_a + eac_imm);
 					mvm_rd_pend <= 1'b0;
@@ -2059,6 +2207,115 @@ always @(posedge clk) begin
 					// becomes the new running address.
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
 					mvm_addr    <= mvm_nxt_addr;
+				end
+			end else if (eac_valid && bfv && !bf_fin && !trace_hold && !ae_busy) begin
+				// The bitfield sequencer (see its header). eac_* is frozen by
+				// bf_stall throughout.
+				eaf_valid <= 1'b0;
+				if (!bf_active) begin
+					bf_active <= 1'b1;
+					bf_ea     <= ea_target;      // port C is still the index here
+					bf_ph     <= BF_OFF;
+				end else case (bf_ph)
+				BF_OFF: begin
+					bf_off <= bfx[11] ? operand_c : {27'd0, bfx[10:6]};
+					bf_ph  <= BF_WID;
+				end
+				BF_WID: begin
+					bf_w   <= bfx[5] ? ((operand_c[4:0] == 5'd0) ? 6'd32 : {1'b0, operand_c[4:0]})
+					                 : ((bfx[4:0] == 5'd0)       ? 6'd32 : {1'b0, bfx[4:0]});
+					bf_ph  <= BF_SRC;
+				end
+				BF_SRC: begin
+					// A register BFINS takes its source through port C; a memory
+					// one had decode point port B at it.
+					bf_du <= bf_reg ? operand_c : operand_b;
+					if (bf_reg) begin
+						bf_w1  <= (bf_off[4:0] == 5'd0) ? operand_a
+						          : ((operand_a << bf_off[4:0]) | (operand_a >> (6'd32 - {1'b0, bf_off[4:0]})));
+						bf_w2  <= 8'd0;
+						bf_bib <= 3'd0;
+						bf_ph  <= BF_S1;
+					end else begin
+						bf_addr <= bf_ea + {{3{bf_off[31]}}, bf_off[31:3]};
+						bf_bib  <= bf_off[2:0];
+						bf_span <= ({3'd0, bf_off[2:0]} + bf_w + 6'd7) >> 3;
+						bf_ph   <= BF_RD1;
+					end
+				end
+				BF_RD1: if (bf_ld_go) bf_ph <= BF_RD1W;
+				BF_RD1W: if (l1_rvalid_b) begin
+					bf_w1 <= (bf_span == 3'd1) ? {l1_q_b[7:0], 24'd0} :
+					         (bf_span <= 3'd3) ? {l1_q_b[15:0], 16'd0} : l1_q_b;
+					bf_w2 <= 8'd0;
+					bf_ph <= bf_two ? BF_RD2 : BF_S1;
+				end
+				BF_RD2: if (bf_ld_go) bf_ph <= BF_RD2W;
+				BF_RD2W: if (l1_rvalid_b) begin
+					if (bf_span == 3'd3) bf_w1[15:8] <= l1_q_b[7:0];
+					else                 bf_w2       <= l1_q_b[7:0];
+					bf_ph <= BF_S1;
+				end
+				BF_S1: begin
+					bf_t40 <= {bf_w1, bf_w2} << bf_bib;
+					bf_ph  <= BF_S2;
+				end
+				BF_S2: begin
+					bf_field <= (bf_w == 6'd32) ? bf_t40[39:8] : (bf_t40[39:8] >> (6'd32 - bf_w));
+					bf_ones  <= (bf_w == 6'd32) ? 32'hFFFF_FFFF : ((32'd1 << bf_w) - 32'd1);
+					bf_maskl <= (bf_w == 6'd32) ? {32'hFFFF_FFFF, 8'd0}
+					                            : ({32'hFFFF_FFFF, 8'd0} << (6'd32 - bf_w));
+					bf_ph    <= BF_S3;
+				end
+				BF_S3: begin
+					bf_n <= (bf_op == 3'd7) ? bf_nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
+					bf_z <= (bf_op == 3'd7) ? (bf_nf == 32'd0)   : (bf_field == 32'd0);
+					bf_res <= (bf_op == 3'd3) ? (bf_field | (bf_field[bf_w - 6'd1] ? ~bf_ones : 32'd0)) :
+					          (bf_op == 3'd5) ? (bf_off + {26'd0, (bf_al == 32'd0) ? bf_w : bf_clz}) :
+					                            bf_field;
+					if (bf_modop) begin
+						bf_t40 <= (bf_t40 & ~bf_maskl) | (({bf_nf, 8'd0} << (6'd32 - bf_w)) & bf_maskl);
+						bf_ph  <= BF_S4;
+					end else
+						bf_ph  <= BF_DONE;
+				end
+				BF_S4: begin
+					if (bf_reg) begin
+						bf_res <= (bf_off[4:0] == 5'd0) ? bf_t40[39:8]
+						          : ((bf_t40[39:8] >> bf_off[4:0]) |
+						             (bf_t40[39:8] << (6'd32 - {1'b0, bf_off[4:0]})));
+						bf_ph  <= BF_DONE;
+					end else begin
+						bf_w1 <= bf_nw40[39:8];
+						bf_w2 <= bf_nw40[7:0];
+						bf_ph <= BF_WR1;
+					end
+				end
+				BF_WR1: if (bf_st_go) bf_ph <= bf_two ? BF_WR2 : BF_DONE;
+				BF_WR2: if (bf_st_go) bf_ph <= BF_DONE;
+				default: ;
+				endcase
+			end else if (eac_valid && mvp && !mvp_fin && !trace_hold && !ae_busy) begin
+				// MOVEP: start, then one beat at a time (see its header).
+				// eac_* is frozen by mvp_stall, so ea_target still names
+				// (d16,Ay) on the starting cycle and operand_b is Dx.
+				eaf_valid <= 1'b0;
+				if (!mvp_active) begin
+					mvp_active  <= 1'b1;
+					mvp_left    <= mvp_long ? 3'd4 : 3'd2;
+					mvp_addr    <= ea_target;
+					mvp_acc     <= 32'h0;
+					mvp_rd_pend <= 1'b0;
+				end else if (mvp_ld_go) begin
+					mvp_rd_pend <= 1'b1;
+					mvp_addr    <= mvp_addr + 32'd2;
+					mvp_left    <= mvp_left - 3'd1;
+				end else if (mvp_rd_pend && l1_rvalid_b) begin
+					mvp_rd_pend <= 1'b0;
+					mvp_acc     <= {mvp_acc[23:0], l1_q_b[7:0]};
+				end else if (mvp_st_go) begin
+					mvp_addr    <= mvp_addr + 32'd2;
+					mvp_left    <= mvp_left - 3'd1;
 				end
 			end else if (exc_writing) begin
 				// Posting one beat of the exception frame -- see header.
@@ -2155,7 +2412,7 @@ always @(posedge clk) begin
 				eaf_writes_an  <= an_wr_any && own_exc;
 				eaf_an_sel     <= an_sp_sel;   // a trace entry runs none of the held instruction
 				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= an_wr_data;
+				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
 				// illegal/TRAP already had eac_writes_reg=1 for this exact
@@ -2173,6 +2430,8 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_mm      <= 1'b0;
 				eaf_mvfsr      <= 2'd0;
+				eaf_ml         <= 7'd0;
+				eaf_bf         <= 3'd0;
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
@@ -2288,7 +2547,7 @@ always @(posedge clk) begin
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= an_wr_data;
+				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
 				// header for the real race that forces this (RTE's own SR
@@ -2307,6 +2566,8 @@ always @(posedge clk) begin
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_mm       <= 1'b0;
 				eaf_mvfsr       <= 2'd0;
+				eaf_ml          <= 7'd0;
+				eaf_bf          <= 3'd0;
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
@@ -2345,6 +2606,10 @@ always @(posedge clk) begin
 				// is retired here. Unconditional because it is already low
 				// for every other instruction.
 				mvm_active     <= 1'b0;
+				mvp_active     <= 1'b0;
+				bf_active      <= 1'b0;
+				bf_ph          <= BF_EA;
+				eaf_bf         <= {bfv, bf_n, bf_z};
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
 				if (eac_valid) begin   // a bubble departing here must not drop a pending trace
@@ -2369,6 +2634,11 @@ always @(posedge clk) begin
 				// assignment, not the address path.
 				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
 				                  eac_is_packop                            ? pack_value :
+				                  mvp                                      ? mvp_acc :
+				                  bfv                                      ? bf_res :
+				                  // BTST Dn,#imm: the bit number is Dn (port B), the
+				                  // data the immediate -- ALU_BTST's a and b swapped.
+				                  eac_is_btstr                             ? operand_b :
 				                  eac_st_disp                              ? operand_b :
 				                  eac_sxt_w                                ? sxt_w_of(operand_a) :
 				                                                             operand_a;
@@ -2378,7 +2648,8 @@ always @(posedge clk) begin
 				// than being recomputed in ap040_execute.v.
 				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr || eac_is_pea) ? push_addr :
 				                  eac_is_link                ? (push_addr + eac_imm) :
-				                  mm                         ? mm_dan_new : operand_b;
+				                  mm                         ? mm_dan_new :
+				                  eac_is_btstr               ? operand_a : operand_b;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
@@ -2387,13 +2658,14 @@ always @(posedge clk) begin
 				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
-				eaf_alu_op     <= eac_is_packop ? `AP040_ALU_MOVE : eac_alu_op;
+				eaf_alu_op     <= (eac_is_packop || eac_is_exgop) ? `AP040_ALU_MOVE :
+				                  eac_is_btstr                    ? `AP040_ALU_BTST : eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= an_wr_data;
+				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				eaf_writes_reg <= eac_writes_reg;
 				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
@@ -2403,6 +2675,8 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= mm;
 				eaf_is_mm      <= mm;
 				eaf_mvfsr      <= eac_mvfsr;
+				eaf_ml         <= eac_ml;
+				if (!bfv) eaf_bf <= 3'd0;
 				if (mm) eaf_ea_target <= mm_daddr;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;

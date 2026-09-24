@@ -209,6 +209,10 @@ wire [31:0] id_ea_ext;
 wire  [5:0] id_mm;
 wire  [2:0] id_moves;
 wire  [1:0] id_mvfsr;
+wire  [1:0] id_pc_off;
+wire  [2:0] id_movep;
+wire  [6:0] id_ml;
+wire  [4:0] id_bf;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -275,6 +279,10 @@ wire [31:0] eac_ea_ext;
 wire  [5:0] eac_mm;
 wire  [2:0] eac_moves;
 wire  [1:0] eac_mvfsr;
+wire [31:0] eac_pc_base;
+wire  [2:0] eac_movep;
+wire  [6:0] eac_ml;
+wire  [4:0] eac_bf;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -295,6 +303,8 @@ wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
 wire        eaf_is_rmw, eaf_is_link, eaf_is_mm;
 wire  [1:0] eaf_mvfsr;
+wire  [6:0] eaf_ml;
+wire  [2:0] eaf_bf;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
@@ -749,6 +759,10 @@ ap040_decode u_id
 	.id_mm              (id_mm),
 	.id_moves           (id_moves),
 	.id_mvfsr           (id_mvfsr),
+	.id_pc_off          (id_pc_off),
+	.id_movep           (id_movep),
+	.id_ml              (id_ml),
+	.id_bf              (id_bf),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -822,6 +836,10 @@ ap040_ea_calc u_eac
 	.id_mm               (id_mm),
 	.id_moves            (id_moves),
 	.id_mvfsr            (id_mvfsr),
+	.id_pc_off           (id_pc_off),
+	.id_movep            (id_movep),
+	.id_ml               (id_ml),
+	.id_bf               (id_bf),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -888,6 +906,10 @@ ap040_ea_calc u_eac
 	.eac_mm              (eac_mm),
 	.eac_moves           (eac_moves),
 	.eac_mvfsr           (eac_mvfsr),
+	.eac_pc_base         (eac_pc_base),
+	.eac_movep           (eac_movep),
+	.eac_ml              (eac_ml),
+	.eac_bf              (eac_bf),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -963,6 +985,10 @@ ap040_ea_fetch #(
 	.eac_mm              (eac_mm),
 	.eac_moves           (eac_moves),
 	.eac_mvfsr           (eac_mvfsr),
+	.eac_pc_base         (eac_pc_base),
+	.eac_movep           (eac_movep),
+	.eac_ml              (eac_ml),
+	.eac_bf              (eac_bf),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1027,6 +1053,8 @@ ap040_ea_fetch #(
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
 	.eaf_mvfsr        (eaf_mvfsr),
+	.eaf_ml           (eaf_ml),
+	.eaf_bf           (eaf_bf),
 	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -1173,6 +1201,8 @@ ap040_execute u_ex
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
 	.eaf_mvfsr        (eaf_mvfsr),
+	.eaf_ml           (eaf_ml),
+	.eaf_bf           (eaf_bf),
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
