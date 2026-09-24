@@ -269,6 +269,8 @@ module ap040_ea_fetch
 	input      [31:0] eac_imm,
 	input      [31:0] eac_ea_ext,
 	input       [5:0] eac_mm,
+	input       [2:0] eac_moves,
+	input       [1:0] eac_mvfsr,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -424,6 +426,7 @@ module ap040_ea_fetch
 	output reg [15:0] eaf_sr_snapshot,
 	output reg        eaf_is_rmw,
 	output reg        eaf_is_mm,
+	output reg  [1:0] eaf_mvfsr,
 	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
 	output            rf3_we,
 	output      [3:0] rf3_addr,
@@ -512,7 +515,10 @@ wire        an_is_a7 = (store_now ? eac_dest_reg : eac_src_reg) == 4'd15;
 // size-driven decision on the MEMORY side reads eff_size instead -- both the
 // lane select below and this step, since (A0)+ under ADDA.W must advance by
 // two, not four.
-wire [1:0]  eff_size = eac_sxt_w ? `AP040_SZ_W : eac_size;
+// A MOVES byte load into An reads a byte and sign-extends it (milestone
+// 114), the byte counterpart of eac_sxt_w.
+wire        moves_sxb = eac_moves[1];
+wire [1:0]  eff_size = eac_sxt_w ? `AP040_SZ_W : moves_sxb ? `AP040_SZ_B : eac_size;
 wire [31:0] an_step  = (eff_size == `AP040_SZ_L) ? 32'd4 :
                        (eff_size == `AP040_SZ_W) ? 32'd2 :
                        an_is_a7                  ? 32'd2 : 32'd1;
@@ -573,8 +579,12 @@ wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
 // The source's (An)+/-(An) happens FIRST: MOVE (A0)+,(A0) writes at the
 // incremented A0, and an index register that is the source's An sees its
 // new value. The destination (An)+/-(An) then writes its An through the
-// main port; when that is the same register the source's second-port write
-// is dropped, since the destination's value already includes it.
+// main port. When that is the same register as the source's, both ports
+// write it in the same retirement, and ap040_pipe_regfile.v's w_collide
+// already gives the main port the register (and every read bypass checks
+// it first) -- the right answer, since the destination's value contains the
+// source's step. A drop of the second-port write was written here first and
+// taken out: no bench or mutation could tell it was there.
 wire        mm          = eac_mm[5];
 wire        mm_simm     = eac_mm[4];
 wire        mm_dpi      = eac_mm[3];
@@ -596,7 +606,6 @@ wire [31:0] mm_daddr    = mm_dabs ? eac_ea_ext :
                           mm_didx ? (mm_base + mm_idx_val + mm_idx_disp) :
                                     (mm_base + eac_ea_ext);   // (An), (An)+: zero; (d16,An)
 wire [31:0] mm_dan_new  = mm_dpi ? (mm_base + mm_dstep) : (mm_base - mm_dstep);
-wire        mm_drop_src = mm && mm_same && (mm_dpi || mm_dpd);
 
 // Second write port selection (milestone 49). LINK writes An with the new
 // top of stack, UNLK writes A7 with An+4 -- neither is an autoincrement,
@@ -614,7 +623,7 @@ wire        mm_drop_src = mm && mm_same && (mm_dpi || mm_dpd);
 // swung an_wr_reg from the destination An to eac_src_reg -- so MOVE.L
 // D0,(A0)+ at an odd RTE target wrote $11223348 into D0.
 wire        an_wr_any  = (an_write || (eac_valid && (eac_is_link || eac_is_unlk)) ||
-                          (mvm_fin && mvm_wb)) && !ae_busy;
+                          (mvm_fin && mvm_wb)) && !ae_busy && !moves_priv;
 wire  [3:0] an_wr_reg  = (eac_is_link || eac_is_movem) ? eac_src_reg :
                          eac_is_unlk  ? 4'd15       :
                          store_now ? eac_dest_reg : eac_src_reg;
@@ -999,7 +1008,8 @@ function [31:0] sxt_w_of;
 	sxt_w_of = {{16{v[15]}}, v[15:0]};
 endfunction
 
-wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) : mem_raw;
+wire [31:0] mem_lane = eac_sxt_w ? sxt_w_of(mem_raw) :
+                       moves_sxb ? {{24{mem_raw[7]}}, mem_raw[7:0]} : mem_raw;
 
 // A register-count shift (milestone 87) reads its count through port A,
 // which decode pointed at the count register -- so it forwards from EX and
@@ -1041,7 +1051,8 @@ wire creg_hazard  = live && ex_creg_sp && sp_read_a;
 // keeps the held instruction's requests off the memory while it waits.
 wire stall_self = stall_in || creg_hazard;
 
-wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold && !ae_busy;
+wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold && !ae_busy &&
+                    !moves_priv;
 // ...unless this instruction has just turned out to be an exception. For a
 // memory-source fault the value that CAUSES the fault is the one the load
 // just returned, so both conditions are true in the same cycle -- and the
@@ -1084,7 +1095,8 @@ reg       exc_vec_pending;
 // cycle -- see header for why the check couldn't happen any earlier.
 // The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
 // that is the whole difference between them at this level.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte ||
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || eac_is_rte || eac_moves[2] ||
+                            (eac_mvfsr[1] && !eac_mvfsr[0]) ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
 
@@ -1167,7 +1179,13 @@ reg  trace_arm_cond;
 // eac_is_store outranks exc_writing in l1_addr_word and st_be assumes the
 // store's size, so without this the frame's beats went to the store's
 // address with the store's lanes.
-wire store_now    = eac_is_store && !trace_hold && !ae_busy;
+// MOVES and MOVE to/from SR are the first privileged instructions that
+// touch memory (milestone 114), and a user-mode one must do nothing before
+// its vector-8 entry: no load, no store, no address-register step. Every
+// other privileged form reaches memory, if at all, through its own
+// sequencer, so this is the whole of eac_is_priv.
+wire moves_priv   = eac_is_priv;
+wire store_now    = eac_is_store && !trace_hold && !ae_busy && !moves_priv;
 
 // ae_take sits beside eac_is_trace and OUTSIDE own_exc for the same reason
 // the trace does: both fire while the instruction behind the completed one
@@ -1223,7 +1241,12 @@ wire exc_writing   = exc_go && !exc_vec_pending &&
 // the core's mux drops this stage's wren_b, so the beat never reached the
 // L1 and must be retried rather than counted.
 wire exc_beat_ack  = exc_writing && !l1_wr_busy && !port_taken;
-wire exc_vec_issue = exc_go && !exc_vec_pending && (exc_ph == EXC_VECRD);
+// ...and not while EX holds port B for a store (milestone 114). The
+// bookkeeping below sits under the port_taken branch and records nothing
+// that cycle, so an ungated request reached the L1 unrecorded and went out
+// again the next cycle, a second read on top of the first. MOVEM's load and
+// mem_issue already yielded; these two did not.
+wire exc_vec_issue = exc_go && !exc_vec_pending && (exc_ph == EXC_VECRD) && !port_taken;
 wire exc_vec_done  = exc_go && exc_vec_pending && l1_rvalid_b;
 // An odd exception VECTOR (milestone 110). The handler address read out of
 // the vector table must be even. The reference's rule, recorded in the plan
@@ -1265,7 +1288,7 @@ wire ret_active   = live && eac_is_rte_active;
 // own branch is guarded on exc_active -- because the sequencer that found
 // the fault must stop, or it keeps re-reading underneath the frame push
 // and the instruction never departs.
-wire ret_issue    = ret_active && !ret_pending && !exc_active;
+wire ret_issue    = ret_active && !ret_pending && !exc_active && !port_taken;   // see exc_vec_issue
 wire ret_complete = ret_active && ret_pending && l1_rvalid_b;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
 wire ret_stall    = ret_active && !ret_done;
@@ -1426,11 +1449,20 @@ wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 // CHK sets N from the comparison, and a divide by zero clears C while
 // leaving X/N/Z/V alone -- both are what rtl/ap040/ap040_core.v does, and
 // it is the core that passes the corpus.
-wire [15:0] sr_faulted     = (eac_is_chk_trap && !eac_is_trace)
+//
+// ...but only when that fault is the one being TAKEN (review 12, finding
+// 1). A deferred address error -- behind an odd RTE, or an odd exception
+// vector -- outranks both, and the instruction it holds never executes;
+// its CHK or zero divide still asserted, and the address-error frame
+// stacked C cleared by a divide that was never allowed to run. The trace
+// already had this exclusion. eac_is_addrerr stays true for the whole
+// entry (exc_pend_addrerr && exc_go), so the choice holds while the frame
+// is written.
+wire [15:0] sr_faulted     = (eac_is_chk_trap && !eac_is_trace && !eac_is_addrerr)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:1],
                                  (exc_pend_chk ? exc_pend_chk_c : chk_c)}
-                              : (eac_is_divzero && !eac_is_trace)
+                              : (eac_is_divzero && !eac_is_trace && !eac_is_addrerr)
                               ? {sr_in[15:1], 1'b0}
                               : sr_in;
 wire [15:0] exc_sr_word    = sr_faulted;
@@ -1595,7 +1627,7 @@ assign l1_size_b = mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
 assign l1_data_b = mvm_st_want  ? (mvm_base_self ? (operand_a - mvm_step)
                                                  : operand_a) :
                    exc_writing  ? exc_wdata :
-                   store_now    ? (eac_st_disp ? operand_b : operand_a) :
+                   store_now    ? (eac_st_disp ? operand_b : eac_moves[0] ? an_new : operand_a) :
                    eac_is_pea   ? ea_target :
                    // LINK An,#d decrements the stack pointer BEFORE it
                    // pushes An, so when An IS A7 the value that reaches
@@ -1641,6 +1673,7 @@ always @(posedge clk) begin
 		eaf_sr_snapshot<= 16'h0;
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_mm      <= 1'b0;
+		eaf_mvfsr      <= 2'd0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
 		eaf_is_chk     <= 1'b0;
@@ -1891,6 +1924,7 @@ always @(posedge clk) begin
 				// and writes nothing back (milestone 113).
 				eaf_is_rmw     <= (eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST)) || mm;
 				eaf_is_mm      <= mm;
+				eaf_mvfsr      <= eac_mvfsr;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
 				eaf_ea_target  <= mm ? mm_daddr : ea_target;
@@ -1903,13 +1937,19 @@ always @(posedge clk) begin
 				// header.
 				// RTD adds its displacement to the same sum (milestone 113); it
 				// rides eac_ea_ext, which is zero for a plain RTS.
+				// ...and an <ea>,An whose <ea> steps that same An -- ADDA.W
+				// (A6)+,A6 -- operates on the STEPPED An (milestone 114): the
+				// source's side effect comes first. Port B read the register
+				// before the step. This was the whole of the corpus's
+				// remaining 2,496 wrong rounds.
 				eaf_operand_b  <= mm         ? mm_dan_new :
 				                  eac_is_rts ? (operand_a + 32'd4 + eac_ea_ext) :
-				                  (eac_is_rmw || eac_immrmw) ? mem_lane : operand_b;
+				                  (eac_is_rmw || eac_immrmw) ? mem_lane :
+				                  mm_same    ? an_new : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
-				eaf_writes_an  <= an_wr_any && !mm_drop_src;
+				eaf_writes_an  <= an_wr_any;
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
@@ -2132,6 +2172,7 @@ always @(posedge clk) begin
 				eaf_is_jmp     <= 1'b0;
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_mm      <= 1'b0;
+				eaf_mvfsr      <= 2'd0;
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
@@ -2231,7 +2272,12 @@ always @(posedge clk) begin
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
-				trace_arm       <= traced_now;   // judged on the SR BEFORE the RTE, whatever it restores
+				// ...unless the PC it restores is odd (review 12, finding 2):
+				// the address error that return owes supersedes the trace, as
+				// ap040_core.v's S_RTE_FIN2 checks the PC before the traced
+				// path. Armed, the trace outranked the deferred address error
+				// and took vector 9 with the odd PC in its frame.
+				trace_arm       <= traced_now && !rte_pc_now[0];   // judged on the SR BEFORE the RTE
 				trace_arm_cond  <= 1'b0;         // (RTE is a change of flow, so T0 traces it too)
 				trace_pc        <= eac_pc;
 				eaf_operand_b   <= operand_a +
@@ -2260,6 +2306,7 @@ always @(posedge clk) begin
 				eaf_is_jmp      <= 1'b0;
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_mm       <= 1'b0;
+				eaf_mvfsr       <= 2'd0;
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
@@ -2355,6 +2402,7 @@ always @(posedge clk) begin
 				eaf_is_jmp     <= eac_is_jmp;
 				eaf_is_rmw     <= mm;
 				eaf_is_mm      <= mm;
+				eaf_mvfsr      <= eac_mvfsr;
 				if (mm) eaf_ea_target <= mm_daddr;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;

@@ -296,6 +296,8 @@ module ap040_decode
 	// has no EA extension, which reproduces the old masked displacement.
 	output reg [31:0] id_ea_ext,
 	output reg  [5:0] id_mm,        // MOVE mem-to-mem: {mm, #imm src, dst (An)+, -(An), abs, idx}
+	output reg  [2:0] id_moves,
+	output reg  [1:0] id_mvfsr,     // MOVE from SR/CCR: {it is one, CCR rather than SR}     // MOVES: {moves, byte load into An (sign-extend), store of its own stepped An}
 	output reg  [5:0] id_alu_op,
 	output reg  [1:0] id_size,
 	output reg  [5:0] id_shcnt,
@@ -1212,6 +1214,44 @@ wire movea_w       = (if_opcode[13:12] == 2'b11);
 wire is_movea_reg  = movea_shape && (ea_is_dn || ea_is_an) && !is_movea_rr;
 wire is_movea_memd = movea_shape && (ea_is_ind || ea_is_pi || ea_is_pd);
 
+// MOVES <ea>,Rn / Rn,<ea> (milestone 114): 0000 1110 ss <ea> + a register
+// word {A/D, reg, direction} ahead of the EA's own words. Privileged. The
+// alternate function codes change nothing on a flat memory, so this is a
+// MOVE whose register comes from the extension word and which sets no flags:
+// a load writes Rn -- sign-extended to 32 bits when Rn is an An, as
+// ap040_core.v's S_MOVES_RD does -- and a store writes Rn to <ea> through
+// the MOVE store carriers. Only the alterable memory modes; the others stay
+// illegal, which is what the reference raises for them even in user mode.
+wire is_moves = (if_opcode[15:8] == 8'h0E) && (if_opcode[7:6] != 2'b11) &&
+                (ea_is_ind || ea_is_pi || ea_is_pd || ea_is_d16 || ea_is_idx || ea_is_abs);
+
+// MOVE to SR/CCR from every data mode, and MOVE from SR/CCR to Dn and
+// every alterable memory mode (milestone 114). Until now only MOVE Dn,SR
+// existed (is_movesr).
+//
+// TO: the ORI/ANDI/EORI-to-SR machinery with ALU_MOVE for the operation --
+// the value replaces, as STOP's does. A register or memory source arrives
+// in eaf_operand_a like any load's, an immediate through the gather as the
+// immediate forms'. The SR form is privileged through eac_immsr_to_sr,
+// which eac_is_priv_capable already counts.
+//
+// FROM: the Scc-to-memory carrier (milestone 107), and for the same reason:
+// the value is the live status register, which is only exact in EX, where
+// ccr_in is forwarded. ap040_execute.v builds the word and stores it (or
+// merges it into Dn); the RMW read the carrier performs is unused. The SR
+// form is privileged; the CCR form is not.
+wire mvto_shape = (if_opcode[15:6] == 10'b0100_0110_11) || (if_opcode[15:6] == 10'b0100_0100_11);
+wire mvto_sr    = if_opcode[9];                                   // $46C0 SR, $44C0 CCR
+wire is_mvto_dn   = mvto_shape && !mvto_sr && ea_is_dn;          // MOVE Dn,SR is is_movesr
+wire is_mvto_memd = mvto_shape && (ea_is_ind || ea_is_pi || ea_is_pd);
+wire is_mvto_g    = mvto_shape && (ea_is_d16 || ea_is_idx || ea_is_abs || ea_is_pcrel);
+wire is_mvto_imm  = mvto_shape && ea_is_imm;
+wire mvf_shape  = (if_opcode[15:6] == 10'b0100_0000_11) || (if_opcode[15:6] == 10'b0100_0010_11);
+wire mvf_ccr    = if_opcode[9];                                   // $42C0 CCR, $40C0 SR
+wire is_mvf_dn    = mvf_shape && ea_is_dn;
+wire is_mvf_memd  = mvf_shape && (ea_is_ind || ea_is_pi || ea_is_pd);
+wire is_mvf_g     = mvf_shape && (ea_is_d16 || ea_is_idx || ea_is_abs);
+
 wire is_abs_alu = is_alu_abs || is_unary_abs || is_alu_dst_abs || is_bit_d_abs || is_ux_abs;
 
 // The 8/9/b/c/d families with an IMMEDIATE source (milestone 111). ADD.L
@@ -2079,7 +2119,9 @@ wire is_illegal = !is_nop && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_m
                    !is_movesr && !is_movec_opcode && !is_rts && !is_rte && !is_lea_an &&
                    !is_immsr && !is_chk_abs && !is_bit_s_rr && !is_bit_s_mem && !is_bit_d_mem &&
                    !is_bit_d_gx && !is_packunpk && !is_link_l && !is_rtd && !is_move_mm &&
-                   !is_ux_d && !is_ux_g && !is_movea_reg && !is_movea_memd;
+                   !is_ux_d && !is_ux_g && !is_movea_reg && !is_movea_memd && !is_moves &&
+                   !is_mvto_dn && !is_mvto_memd && !is_mvto_g && !is_mvto_imm &&
+                   !is_mvf_dn && !is_mvf_memd && !is_mvf_g;
 
 // Gather state -- see header comment. 0 = idle/normal decode cycle;
 // 1 = this cycle's if_opcode completes the gather; 2 = one more word
@@ -2180,6 +2222,10 @@ reg  [1:0]  held_mm_swords;     // source extension words
 reg  [1:0]  held_mm_dwords;     // destination extension words
 reg         held_mm_dpi, held_mm_dpd, held_mm_dabs, held_mm_didx;
 reg  [31:0] held_mm_src_ext;    // the source's extension, captured as it completes
+reg         held_moves;         // MOVES
+reg  [1:0]  held_moves_size;
+reg         held_moves_pi, held_moves_pd, held_moves_disp, held_moves_abs, held_moves_idx;
+reg         held_mvto, held_mvto_sr, held_mvf, held_mvf_ccr, held_mvx_abs;   // MOVE to/from SR/CCR
 reg         held_is_immsr;      // ORI/ANDI/EORI to CCR or SR
 reg         held_immsr_sr;      // ...to SR rather than CCR
 reg         held_imm_ccr;       // does this immediate form set condition codes?
@@ -2248,7 +2294,8 @@ wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp 
                              // redirected the fetch to their own displacement
                              // and the next instruction came from there.
                              !held_is_scc_mem &&
-                             !held_is_trapcc && !held_is_pack && !held_is_rtd && !held_mm;
+                             !held_is_trapcc && !held_is_pack && !held_is_rtd && !held_mm &&
+                             !held_moves && !held_mvto && !held_mvf;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -2273,6 +2320,20 @@ wire [31:0] mm_dst_now = (held_mm_dwords == 2'd2) ? {disp_acc[15:0], if_opcode} 
 // had no words and the capture is the zero it started as).
 wire [31:0] mm_imm_now = (held_mm_dwords == 2'd0) ? mm_src_now : held_mm_src_ext;
 
+// MOVES at completion: the register word is the FIRST gathered word, so it
+// is this one, the one before, or the one before that, by how many there
+// were; the EA's words, if any, are the last ones.
+wire [15:0] moves_ext   = (held_ext_n == 3'd1) ? if_opcode :
+                          (held_ext_n == 3'd2) ? disp_acc[15:0] : disp_acc[31:16];
+wire  [3:0] moves_r     = {moves_ext[15], moves_ext[14:12]};
+wire        moves_wr    = moves_ext[11];                    // Rn -> <ea>
+wire        moves_std   = moves_wr && held_moves_disp;      // a store on the displacement carrier
+wire        moves_an_ld = !moves_wr && moves_ext[15];       // a load into An: sign-extended
+wire [31:0] moves_eaext = (held_ext_n == 3'd1) ? 32'h0 :
+                          (held_ext_n == 3'd3) ? {disp_acc[15:0], if_opcode} :
+                          held_moves_idx       ? {16'd0, if_opcode} :
+                                                 {{16{if_opcode[15]}}, if_opcode};
+
 assign id_redirect_valid = redirect_from_byte || redirect_from_gather;
 assign id_redirect_pc    = redirect_from_gather
                           ? (held_pc + 32'd2 + gather_disp)
@@ -2289,6 +2350,7 @@ assign id_redirect_pc    = redirect_from_gather
 // Three bits since milestone 114: a memory-to-memory MOVE.L between two
 // (xxx).L addresses is four words.
 wire [2:0] gather_words = is_move_mm_g ? mm_words :
+                     is_moves ? (3'd1 + {1'b0, ea_ext_words}) :
                      is_quick_gx ? {1'b0, ea_ext_words} :
                      is_bit_s_x ? (3'd1 + {1'b0, ea_ext_words}) :
                      is_immx ? (((if_opcode[7:6] == 2'b10) ? 3'd2 : 3'd1) + {1'b0, ea_ext_words}) :
@@ -2311,7 +2373,8 @@ wire [2:0] gather_words = is_move_mm_g ? mm_words :
                       (is_scc_mem_gather && ea_ext_words == 2'd2) ||
                       // CHK.L #imm and CHK <(xxx).L>, and LINK.L's
                       // displacement -- in held_is_long above too.
-                      (is_chk_imm && chk_is_long) || is_chk_abs_l || is_link_l) ? 3'd2 : 3'd1;
+                      (is_chk_imm && chk_is_long) || is_chk_abs_l || is_link_l ||
+                      ((is_mvto_g || is_mvf_g) && ea_is_absl)) ? 3'd2 : 3'd1;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -2449,6 +2512,20 @@ always @(posedge clk) begin
 		held_mm_didx    <= 1'b0;
 		held_mm_src_ext <= 32'h0;
 		id_mm           <= 6'd0;
+		held_moves      <= 1'b0;
+		held_moves_size <= 2'd0;
+		held_moves_pi   <= 1'b0;
+		held_moves_pd   <= 1'b0;
+		held_moves_disp <= 1'b0;
+		held_moves_abs  <= 1'b0;
+		held_moves_idx  <= 1'b0;
+		held_mvto       <= 1'b0;
+		held_mvto_sr    <= 1'b0;
+		held_mvf        <= 1'b0;
+		held_mvf_ccr    <= 1'b0;
+		held_mvx_abs    <= 1'b0;
+		id_mvfsr        <= 2'd0;
+		id_moves        <= 3'd0;
 		held_is_immsr   <= 1'b0;
 		held_immsr_sr   <= 1'b0;
 		held_imm_ccr    <= 1'b0;
@@ -2500,7 +2577,8 @@ always @(posedge clk) begin
 					// A store's address register is its DESTINATION, at
 					// ir[11:9] -- the opposite end of the opcode from a
 					// load's, which is why this sits above the rest.
-					id_dest_reg     <= held_mm      ? {1'b1, held_dest_reg} :
+					id_dest_reg     <= held_moves   ? ((moves_wr && !moves_std) ? {1'b1, held_reg} : moves_r) :
+					                   held_mm      ? {1'b1, held_dest_reg} :
 					                   held_is_pack ? {1'b0, held_dest_reg} :
 					                   held_is_rtd  ? 4'd15 :
 					                   held_st_disp ? {held_st_an, held_reg} :
@@ -2539,7 +2617,8 @@ always @(posedge clk) begin
 					// An immediate with a memory destination reads An as its
 					// address base, exactly like every other memory form --
 					// the immediate rides in id_imm instead of displacing it.
-					id_src_reg      <= held_mm      ? {1'b1, held_reg} :
+					id_src_reg      <= held_moves   ? ((moves_wr && !moves_std) ? moves_r : {1'b1, held_reg}) :
+					                   held_mm      ? {1'b1, held_reg} :
 					                   held_is_pack ? {1'b0, held_reg} :
 					                   held_is_rtd  ? 4'd15 :
 					                   held_st_disp ? {1'b1, held_dest_reg} :
@@ -2552,6 +2631,7 @@ always @(posedge clk) begin
 					                    // (xxx).W/(xxx).L are the mode-7 selector --
 					                    // so the absolute case must not reach here.
 					                    (held_is_scc_mem && !held_scc_abs) ? {1'b1, held_reg} :
+					                    ((held_mvto || held_mvf) && !held_mvx_abs) ? {1'b1, held_reg} :
 					                    held_is_dbcc ? {1'b0, held_reg} :
 					                    (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                     held_is_movem || held_is_jmp || held_is_jsr) ? {1'b1, held_reg} :
@@ -2585,7 +2665,8 @@ always @(posedge clk) begin
 					                   held_immx_absl  ? {disp_acc[15:0], if_opcode} :
 					                   held_ea_indexed ? {16'd0, if_opcode} :
 					                                     {{16{if_opcode[15]}}, if_opcode};
-					id_imm          <= held_mm ? mm_imm_now :
+					id_imm          <= held_moves ? moves_eaext :
+					                   held_mm ? mm_imm_now :
 					                   held_immx ? (held_immx_quick ? {28'd0, held_quick_val} :
 					                                held_immx_l     ? disp_acc :
 					                                held_immx_absl  ? {{16{disp_acc[31]}}, disp_acc[31:16]} :
@@ -2597,7 +2678,7 @@ always @(posedge clk) begin
 					                   (held_is_move_disp || held_is_alu_disp || held_is_lea || held_is_link ||
 					                    held_is_movem || held_is_jmp || held_is_jsr ||
 					                    held_is_imm || held_is_abs || held_is_stabs || held_st_disp ||
-					                    held_is_immsr || held_is_scc_mem ||
+					                    held_is_immsr || held_is_scc_mem || held_mvto || held_mvf ||
 					                    // ...and the branches, whose displacement EA-fetch
 					                    // needs to see whether the target is odd.
 					                    held_is_branch || held_is_bsr || held_is_dbcc) ? gather_disp :
@@ -2608,9 +2689,11 @@ always @(posedge clk) begin
 					                   held_is_imm      ? held_imm_op :
 					                   (held_is_alu_disp || held_abs_alu) ? held_alu_op :
 					                                                        `AP040_ALU_MOVE;
-					id_size         <= held_is_pack ? (held_pack_unpk ? `AP040_SZ_W : `AP040_SZ_B) :
+					id_size         <= held_moves ? (moves_an_ld ? `AP040_SZ_L : held_moves_size) :
+					                   held_is_pack ? (held_pack_unpk ? `AP040_SZ_W : `AP040_SZ_B) :
 					                   held_is_imm ? held_imm_size :
 					                   held_is_scc_mem ? `AP040_SZ_B :
+					                   (held_mvto || held_mvf) ? `AP040_SZ_W :
 					                   (held_is_move_disp || held_is_alu_disp || held_is_abs ||
 					                    held_st_disp || held_is_stabs || held_mm) ? held_mv_size :
 					                                                        `AP040_SZ_L;
@@ -2641,6 +2724,7 @@ always @(posedge clk) begin
 					// both forms wrote D7 (milestone 106).
 					id_writes_reg   <= held_is_move_disp || held_is_bsr || held_is_jsr || held_is_pack || held_is_rtd ||
 					                    (held_mm && (held_mm_dpi || held_mm_dpd)) ||
+					                    (held_moves && !moves_wr) ||
 					                    (held_is_abs && held_abs_jsr) ||
 					                    (held_is_abs && !held_abs_jmp &&
 					                     (!held_abs_alu || !held_alu_nowrite)) ||
@@ -2659,40 +2743,48 @@ always @(posedge clk) begin
 					                    !held_is_bsr && !held_is_jsr && !held_is_movec &&
 					                    !held_is_imm && !held_is_abs && !held_is_stabs && !held_st_disp &&
 					                    !held_is_immsr && !held_is_trapcc && !held_is_pack && !held_is_rtd &&
-					                    !held_mm &&
+					                    !held_mm && !held_moves &&
 					                    // This list is NEGATIVE: anything gathered and not
 					                    // named here is a branch, and its id_imm is read as
 					                    // a branch displacement. An Scc left off it had its
 					                    // destination displacement checked for an odd branch
 					                    // target, which raised an address error on every
 					                    // gathered form landing on an odd byte.
-					                    !held_is_scc_mem;
+					                    !held_is_scc_mem && !held_mvto && !held_mvf;
 					id_is_scc       <= held_is_scc_mem;
 					id_is_dbcc      <= held_is_dbcc;
 					// LEA and PEA deliver the address itself, so unlike every
 					// other absolute form they read nothing.
 					id_is_mem_src   <= held_is_move_disp || held_is_alu_disp || held_imm_mem || held_is_rtd ||
-					                   (held_mm && !held_mm_simm) ||
-					                   held_is_scc_mem ||
+					                   (held_mm && !held_mm_simm) || (held_moves && !moves_wr) ||
+					                   held_is_scc_mem || held_mvto || held_mvf ||
 					                   (held_is_abs && !held_abs_lea && !held_abs_push &&
 					                    !held_abs_jmp && !held_abs_jsr);
 					id_is_abs       <= held_is_abs || held_is_stabs || held_scc_abs || held_immx_abs ||
-					                   (held_mm && held_mm_sabs);
-					id_is_store     <= held_is_stabs || held_st_disp;
+					                   (held_mm && held_mm_sabs) || (held_moves && held_moves_abs) ||
+					                   ((held_mvto || held_mvf) && held_mvx_abs);
+					id_is_store     <= held_is_stabs || held_st_disp || (held_moves && moves_wr);
 					// The autoincrement modes of the immediate-to-memory family
 					// (milestone 89); every other gathered form addresses with a
 					// displacement, an index or an absolute, none of which steps An.
-					id_is_postinc   <= held_imm_mem_pi || (held_mm && held_mm_spi);
-					id_is_predec    <= held_imm_mem_pd || (held_mm && held_mm_spd);
+					id_is_postinc   <= held_imm_mem_pi || (held_mm && held_mm_spi) || (held_moves && held_moves_pi);
+					id_is_predec    <= held_imm_mem_pd || (held_mm && held_mm_spd) || (held_moves && held_moves_pd);
+					// A MOVES store of the An its own (An)+/-(An) steps writes the
+					// STEPPED value, as ap040_core.v's S_MOVES_WR reads Rn after
+					// ea_start (milestone 114). A MOVE stores the original.
+					id_moves        <= {held_moves, held_moves && moves_an_ld && (held_moves_size == `AP040_SZ_B),
+					                    held_moves && moves_wr && (held_moves_pi || held_moves_pd) &&
+					                    (moves_r == {1'b1, held_reg})};
 					id_mm           <= {held_mm, held_mm_simm, held_mm_dpi, held_mm_dpd,
 					                    held_mm_dabs, held_mm_didx};
 					id_is_jmp       <= held_is_jmp || (held_is_abs && held_abs_jmp);
 					id_is_lea       <= (held_is_lea && !held_lea_push) || (held_is_abs && held_abs_lea);
 					id_sxt_w        <= (held_is_alu_disp && held_alu_sxt) ||
+					                   (held_moves && moves_an_ld && (held_moves_size == `AP040_SZ_W)) ||
 					                   (held_is_abs && held_abs_sxt);
-					id_st_disp      <= held_st_disp;
+					id_st_disp      <= held_st_disp || (held_moves && moves_std);
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw ||
-					                    (held_imm_mem && !held_imm_nowrite) || held_is_scc_mem;
+					                    (held_imm_mem && !held_imm_nowrite) || held_is_scc_mem || held_mvf;
 					id_immrmw       <= held_imm_mem;
 					id_ea_indexed   <= held_ea_indexed;
 					id_ea_pcrel     <= held_ea_pcrel;
@@ -2701,8 +2793,9 @@ always @(posedge clk) begin
 					                   ((held_is_alu_disp || held_is_abs) && held_alu_chk);
 					id_chk_long     <= held_chk_l;
 					id_is_trapcc    <= held_is_trapcc;
-					id_is_immsr     <= held_is_immsr;
-					id_immsr_to_sr  <= held_immsr_sr;
+					id_is_immsr     <= held_is_immsr || held_mvto;
+					id_immsr_to_sr  <= held_immsr_sr || (held_mvto && held_mvto_sr);
+					id_mvfsr        <= {held_mvf, held_mvf_ccr};
 					id_is_stop      <= held_is_stop;
 					id_is_link      <= held_is_link;
 					id_is_div       <= (held_is_imm && held_imm_div) ||
@@ -2753,7 +2846,8 @@ always @(posedge clk) begin
 			              is_jmp_idx || is_jmp_pcrel || is_jsr_idx || is_jsr_pcrel ||
 			              is_jmpjsr_abs || is_trapcc_gather || is_scc_mem_gather ||
 			              is_stop || is_chk_abs || is_bit_s_rr || is_bit_s_mem || is_bit_d_gx ||
-			              is_packunpk || is_link_l || is_rtd || is_move_mm_g || is_ux_g) begin
+			              is_packunpk || is_link_l || is_rtd || is_move_mm_g || is_ux_g || is_moves ||
+			              is_mvto_g || is_mvto_imm || is_mvf_g) begin
 				// Opcode word of a word/long-form branch, a DBcc,
 				// MOVE.L (d16,An),Dn, JMP (d16,An), a word/long-form BSR,
 				// JSR (d16,An), or MOVEC (all word-form except long-branch/
@@ -2770,7 +2864,8 @@ always @(posedge clk) begin
 				                 is_abs_alu_l || is_eaonly_abs_l || is_movem_disp ||
 				                 is_jmpjsr_abs_l || is_trapcc_l || is_muldiv_abs_l || is_movea_absl || is_adda_abs_l ||
 				                 (is_scc_mem_gather && ea_is_absl) ||
-				                 (is_chk_imm && chk_is_long) || is_chk_abs_l || is_link_l;
+				                 (is_chk_imm && chk_is_long) || is_chk_abs_l || is_link_l ||
+				                 ((is_mvto_g || is_mvf_g) && ea_is_absl);
 				held_is_imm      <= is_quick_gx || is_alu_immsrc || is_imm_alu || is_immmem || is_move_imm || is_movea_imm || is_adda_imm ||
 				                    is_bit_s_rr || is_bit_s_mem ||
 				                    is_muldiv_imm || is_chk_imm;
@@ -2782,12 +2877,12 @@ always @(posedge clk) begin
 				held_imm_mem_pd  <= is_immmem_pd || (is_bit_s_mem && ea_is_pd);
 				held_imm_chk     <= is_chk_imm;
 				held_imm_chk_l   <= is_chk_imm && chk_is_long;
-				held_is_immsr    <= is_immsr || is_stop;
-				held_immsr_sr    <= is_immsr_sr || is_stop;
+				held_is_immsr    <= is_immsr || is_stop || is_mvto_imm;
+				held_immsr_sr    <= is_immsr_sr || is_stop || (is_mvto_imm && mvto_sr);
 				held_is_stop     <= is_stop;
 				held_imm_op      <= (is_bit_s_rr || is_bit_s_mem) ? bitop_op :
 				                    is_quick_gx ? quick_op :
-				                    is_stop     ? `AP040_ALU_MOVE :
+				                    (is_stop || is_mvto_imm) ? `AP040_ALU_MOVE :
 				                    is_alu_immsrc ? alu_nib_op :
 				                    is_immsr    ? immsr_op :
 				                    is_mul_imm  ? (is_muldiv_imm_signed ? `AP040_ALU_MULS : `AP040_ALU_MULU) :
@@ -2853,6 +2948,8 @@ always @(posedge clk) begin
 				                     ((is_immx || is_quick_gx || is_bit_s_x || is_bit_d_gx) && ea_is_idx) ||
 				                     (is_move_st_disp && (if_opcode[8:6] == 3'b110)) ||
 				                     (is_ux_g && ea_is_idx) ||
+				                     (is_moves && ea_is_idx) ||
+				                     (is_mvto_g && (ea_is_idx || ea_is_pcidx)) || (is_mvf_g && ea_is_idx) ||
 				                     (is_move_mm_g && (ea_is_idx || ea_is_pcidx)) ||
 				                     ((is_mul_gather || is_div_gather || is_movea_gather ||
 				                       is_adda_disp || is_chk_gather) &&
@@ -2860,7 +2957,7 @@ always @(posedge clk) begin
 				                     ((is_move_pcrel || is_alu_pcrel || is_lea_pcrel ||
 				                       is_pea_pcrel || is_jmp_pcrel || is_jsr_pcrel) && ea_pcidx_mode);
 				held_ea_pcrel     <= is_move_pcrel || is_alu_pcrel || is_lea_pcrel || is_pea_pcrel ||
-				                     (is_move_mm_g && ea_is_pcrel) ||
+				                     (is_move_mm_g && ea_is_pcrel) || (is_mvto_g && ea_is_pcrel) ||
 				                     is_jmp_pcrel || is_jsr_pcrel ||
 				                     ((is_mul_gather || is_div_gather || is_movea_gather ||
 				                       is_adda_disp || is_chk_gather) && ea_pcrel_mode);
@@ -2930,6 +3027,18 @@ always @(posedge clk) begin
 				held_mm_dabs   <= mvd_absw || mvd_absl;
 				held_mm_didx   <= mvd_idx;
 				held_mm_src_ext<= 32'h0;
+				held_moves     <= is_moves;
+				held_moves_size<= if_opcode[7:6];
+				held_moves_pi  <= ea_is_pi;
+				held_moves_pd  <= ea_is_pd;
+				held_moves_disp<= ea_is_d16 || ea_is_idx;
+				held_moves_abs <= ea_is_abs;
+				held_moves_idx <= ea_is_idx;
+				held_mvto      <= is_mvto_g;
+				held_mvto_sr   <= mvto_sr;
+				held_mvf       <= is_mvf_g;
+				held_mvf_ccr   <= mvf_ccr;
+				held_mvx_abs   <= ea_is_abs;
 				held_is_trapcc<= is_trapcc_gather;
 				held_is_movem <= is_movem;
 				held_movem_dir<= is_movem_ld;
@@ -2957,7 +3066,8 @@ always @(posedge clk) begin
 				                    is_movea_reg || is_movea_memd) ? {1'b1, d_reg9} :
 				                    (is_alu_dst || is_bit_d_mem) ? {1'b0, d_reg9} :
 				                    is_unlk ? {1'b1, d_rn} :
-				                    (is_unary_mem || is_ux_d) ? 4'h0 :
+				                    (is_unary_mem || is_ux_d || is_mvf_memd) ? 4'h0 :
+				                    is_mvf_dn ? {1'b0, d_rn} :
 				                    is_pea_an ? 4'd15 :
 				                    is_chk ? {1'b0, d_reg9} :
 				                    (is_mul || is_div) ? {1'b0, d_reg9} :
@@ -2989,6 +3099,7 @@ always @(posedge clk) begin
 				// getting its own sequencer the way RTE needs.
 				id_src_reg      <= (bitop_shape || is_eor_rr || shift_reg_cnt) ? {1'b0, d_reg9} :
 				                    (is_move_mem_l || is_jmp_an || is_jsr_an || is_move_ax || is_alu_mem || is_lea_an || is_pea_an || is_an_src || is_adda_areg_src || is_alu_dst || is_bit_d_mem || is_move_mm_d || is_ux_d || is_movea_memd ||
+				                     is_mvto_memd || is_mvf_memd ||
 				                     (is_movea_reg && ea_is_an) || is_unlk || is_mul_mem || is_div_mem || is_unary_mem || is_chk_mem || quick_mem_shape || is_scc_mem_direct) ? {1'b1, d_rn} :
 				                    (is_rts || is_rte) ? 4'd15 :
 				                    is_move_st ? {if_opcode[3], d_rn} : {1'b0, d_rn};
@@ -3012,7 +3123,8 @@ always @(posedge clk) begin
 				id_imm          <= (is_move_mem_l || is_jmp_an || is_jsr_an || is_rts || is_rte ||
 				                    is_move_ax || is_move_st || is_alu_mem || is_lea_an || is_pea_an ||
 				                    is_an_src || is_adda || is_alu_dst || is_bit_d_mem || is_move_mm_d || is_unlk || is_mul || is_div || is_unary_mem || is_chk || is_scc_mem_direct ||
-				                    is_ux_d || is_movea_reg || is_movea_memd) ? 32'h0 :
+				                    is_ux_d || is_movea_reg || is_movea_memd || is_mvto_dn || is_mvto_memd ||
+				                    is_mvf_dn || is_mvf_memd) ? 32'h0 :
 				                    is_trap ? (32'd32 + {28'd0, if_opcode[3:0]}) :
 				                    quick_any ? {28'd0, quick_val} :
 				                              {{24{if_opcode[7]}}, if_opcode[7:0]};
@@ -3037,7 +3149,8 @@ always @(posedge clk) begin
 				                   is_extswap_rr ? extswap_op  : `AP040_ALU_MOVE;
 				// Everything else here (MOVEQ, Scc, the memory/branch forms)
 				// is Long or drives its own width, so Long stays the default.
-				id_size         <= is_ux_d ? ux_size :
+				id_size         <= (is_mvto_memd || is_mvf_dn || is_mvf_memd) ? `AP040_SZ_W :
+				                   is_ux_d ? ux_size :
 				                   is_bit_d_mem ? `AP040_SZ_B :
 				                   (is_move_mem_l || is_move_ax || is_move_st || is_move_mm_d) ? move_op_size :
 				                   is_scc_mem_direct ? `AP040_SZ_B :
@@ -3050,7 +3163,7 @@ always @(posedge clk) begin
 				id_writes_reg   <= if_valid && (is_moveq || is_move_rr || (is_alu_rr && !is_cmp_rr) || (is_alu_mem && !is_cmp_mem) || (is_alu_an && !is_cmp_an) || is_move_an || is_eor_rr || is_x_rr || shift_shape ||
 				                               (bitop_shape && !is_btst_rr) ||
 				                               (is_move_mm_d && (mvd_pi || mvd_pd)) ||
-				                               is_movea_reg || is_movea_memd ||
+				                               is_movea_reg || is_movea_memd || is_mvf_dn ||
 				                               is_bcd1_rr || is_bcd2_rr || quick_shape || quick_an_shape || (is_unary_rr && !is_tst_rr) || is_extswap_rr || is_scc_rr || is_move_mem_l || is_move_ax || is_movea_rr || is_bsr_byte || is_jsr_an || is_trap || is_illegal || is_rts || is_rte || is_lea_an || is_pea_an || (is_adda && !is_cmpa) || is_unlk || is_mul || is_div);
 				id_writes_ccr   <= if_valid && (is_moveq || is_move_rr || is_alu_rr || is_alu_mem || is_alu_an || is_move_an || is_eor_rr || is_alu_dst || is_bit_d_mem || is_move_mm_d || is_ux_d || is_unary_rr || is_extswap_rr || is_x_rr || shift_shape || bitop_shape || is_bcd1_rr || is_bcd2_rr || quick_shape || quick_mem_shape || is_move_mem_l || is_move_ax || is_move_st || is_cmpa || is_mul || is_div || is_unary_mem);
 				id_is_branch    <= if_valid && is_branch_byte;
@@ -3068,12 +3181,13 @@ always @(posedge clk) begin
 				// else does.
 				id_is_mem_src   <= if_valid && (is_move_mem_l || is_rts || is_move_ax || is_alu_mem ||
 				                               is_adda_mem || is_alu_dst || is_bit_d_mem || is_move_mm_d || is_ux_d || is_movea_memd ||
+				                               is_mvto_memd || is_mvf_memd ||
 				                               is_unlk || is_mul_mem || is_div_mem ||
 				                               is_unary_mem || is_chk_mem || quick_mem_shape || is_scc_mem_direct);
 				id_is_abs       <= 1'b0;
 				id_is_store     <= if_valid && is_move_st;
-				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi || is_alu_pi || is_adda_pi || is_alu_dst_pi || (is_bit_d_mem && ea_is_pi) || (is_move_mm_d && ea_is_pi) || ((is_ux_d || is_movea_memd) && ea_is_pi) || is_mul_pi || is_div_pi || is_unary_mem_pi || is_chk_pi || is_quick_mem_pi || is_scc_mem_pi);
-				id_is_predec    <= if_valid && (is_move_pd || is_move_st_pd || is_alu_pd || is_adda_pd || is_alu_dst_pd || (is_bit_d_mem && ea_is_pd) || (is_move_mm_d && ea_is_pd) || ((is_ux_d || is_movea_memd) && ea_is_pd) || is_mul_pd || is_div_pd || is_unary_mem_pd || is_chk_pd || is_quick_mem_pd || is_scc_mem_pd);
+				id_is_postinc   <= if_valid && (is_move_pi || is_move_st_pi || is_alu_pi || is_adda_pi || is_alu_dst_pi || (is_bit_d_mem && ea_is_pi) || (is_move_mm_d && ea_is_pi) || ((is_ux_d || is_movea_memd || is_mvto_memd || is_mvf_memd) && ea_is_pi) || is_mul_pi || is_div_pi || is_unary_mem_pi || is_chk_pi || is_quick_mem_pi || is_scc_mem_pi);
+				id_is_predec    <= if_valid && (is_move_pd || is_move_st_pd || is_alu_pd || is_adda_pd || is_alu_dst_pd || (is_bit_d_mem && ea_is_pd) || (is_move_mm_d && ea_is_pd) || ((is_ux_d || is_movea_memd || is_mvto_memd || is_mvf_memd) && ea_is_pd) || is_mul_pd || is_div_pd || is_unary_mem_pd || is_chk_pd || is_quick_mem_pd || is_scc_mem_pd);
 				id_is_jmp       <= if_valid && is_jmp_an;
 				// No memory access, no condition codes: the whole
 				// instruction is ea_target landing in An via ALU_MOVE.
@@ -3082,9 +3196,10 @@ always @(posedge clk) begin
 				id_is_chk       <= if_valid && is_chk;
 				id_chk_long     <= if_valid && is_chk && chk_is_long;
 				id_is_trapcc    <= if_valid && is_trapcc;
-				id_is_immsr     <= 1'b0;
+				id_is_immsr     <= if_valid && (is_mvto_dn || is_mvto_memd);
 				id_is_stop      <= 1'b0;
-				id_immsr_to_sr  <= 1'b0;
+				id_immsr_to_sr  <= if_valid && is_mvto_memd && mvto_sr;
+				id_mvfsr        <= {if_valid && (is_mvf_dn || is_mvf_memd), mvf_ccr};
 				// id_size stays Long for the ALU; this forces the READ (and
 				// the auto-increment step) to Word and sign-extends it.
 				// Long for the ALU and the writeback; Word for the memory read
@@ -3100,10 +3215,12 @@ always @(posedge clk) begin
 				// store that MOVE-to-memory uses. Like CLR above it performs
 				// a read its result does not need -- noted rather than
 				// silently divergent; the 68040 does not.
-				id_is_rmw       <= if_valid && (is_alu_dst || is_bit_d_mem || is_ux_d || is_unary_rmw || quick_mem_shape || is_scc_mem_direct);
+				id_is_rmw       <= if_valid && (is_alu_dst || is_bit_d_mem || is_ux_d || is_unary_rmw || quick_mem_shape || is_scc_mem_direct ||
+				                               is_mvf_memd);
 				id_immrmw       <= if_valid && quick_mem_shape;
 				id_ea_ext       <= 32'h0;
 				id_mm           <= {is_move_mm_d && if_valid, 1'b0, mvd_pi, mvd_pd, 2'b00};
+				id_moves        <= 3'd0;
 				id_st_disp      <= 1'b0;
 				id_ea_indexed   <= 1'b0;
 				id_ea_pcrel     <= 1'b0;

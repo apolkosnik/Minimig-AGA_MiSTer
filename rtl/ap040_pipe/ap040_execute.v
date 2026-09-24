@@ -209,6 +209,7 @@ module ap040_execute
 	// on the retry.
 	input             eaf_is_rmw,
 	input             eaf_is_mm,
+	input       [1:0] eaf_mvfsr,
 	input      [31:0] eaf_ea_target,
 	input             l1_wr_busy,
 	output            ex_st_req,
@@ -579,13 +580,19 @@ assign ex_st_size = eaf_size;
 // result: there is no ALU operation in an Scc at all. The register form
 // merges the same byte into the destination's low eight bits through
 // scc_merged below; the memory form is a plain byte store of it.
-assign ex_st_data = eaf_is_scc ? {24'd0, scc_fill[7:0]} : alu_result;
+// MOVE from SR/CCR (milestone 114) stores the status word, built here from
+// the forwarded CCR for the same reason Scc's byte is.
+wire [15:0] mvf_word = eaf_mvfsr[0] ? {11'd0, ccr_in}
+                                    : ({eaf_sr_snapshot[15:8], 3'b000, ccr_in} & `AP040_SR_MASK);
+assign ex_st_data = eaf_is_scc   ? {24'd0, scc_fill[7:0]} :
+                    eaf_mvfsr[1] ? {16'd0, mvf_word} : alu_result;
 
 wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_result[7:0]}  :
                         (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :
                                                       alu_result;
 
 wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
+                               eaf_mvfsr[1] ? {eaf_operand_b[31:16], mvf_word} :
                                eaf_is_dbcc ? dbcc_result :
                                // LINK joins this bypass (milestone 49): its A7 value was
                                // computed in ap040_ea_fetch.v as push_addr + d16 and has no
@@ -637,7 +644,9 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
 // ANDI #$FE,CCR must leave the upper byte alone, and a 16-bit AND with an
 // immediate whose high byte is zero would clear the whole of it.
 wire [15:0] immsr_imm = eaf_operand_a[15:0];
-wire  [7:0] immsr_ccr = (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot[7:0] & immsr_imm[7:0]) :
+// MOVE to CCR (milestone 114) replaces the low byte, as STOP does the SR.
+wire  [7:0] immsr_ccr = (eaf_alu_op == `AP040_ALU_MOVE) ? immsr_imm[7:0] :
+                        (eaf_alu_op == `AP040_ALU_AND) ? (eaf_sr_snapshot[7:0] & immsr_imm[7:0]) :
                         (eaf_alu_op == `AP040_ALU_EOR) ? (eaf_sr_snapshot[7:0] ^ immsr_imm[7:0]) :
                                                          (eaf_sr_snapshot[7:0] | immsr_imm[7:0]);
 // STOP (milestone 108) REPLACES the SR rather than combining with it, which
