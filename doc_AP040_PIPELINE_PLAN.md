@@ -1688,6 +1688,113 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Bundle 10 (2026-09-24, in progress): the sequential core's programs, then the MMU
+
+   WIP 817ba673, 0debfa4d, 48f9c864.
+
+   **`tb_ap040_pipe_program.v`** runs `tests/ap040/asm`'s self-checking
+   programs -- `tb_ap040_program.v`'s 64 KB map, its three bus phases and its
+   protocol registers around `ap040_pipe_bus16.v` -- and
+   `run_pipe_verilator.py` runs it once per program. REQUIRED, passing all
+   three phases: t_integer, t_fastpaths, t_fpu, t_fpu_frames, t_fpu_resume,
+   Dhrystone. OPEN, run on every suite and reported with the gap that holds
+   them: t_exceptions (bus errors, PTEST), t_moves_fc, t_mmu,
+   t_bitfield_mmu, t_bitfield_cache, t_atcprobe, t_movem_restart -- every
+   one of them the MMU or the access-error frame. t_cache and bench_* are
+   excluded as `run_verilator.py` excludes them for a core without caches.
+
+   What the programs found, all fixed:
+   - No reset exception processing: the ISP and PC now come from $0/$4
+     (`RESET_VECTORS`, default 0 for the milestone benches).
+   - CINV/CPUSH were F-line exceptions. Now privileged instructions that
+     retire with a refetch (`eaf_refetch`) and empty the prefetch stream.
+   - A store onto an instruction already fetched behind it ran the old
+     instruction (t_integer 192). Stores from EA-fetch (judged a cycle late,
+     off the port-B address path) and EX's store beat are snooped against
+     EA-calc, decode's gather and the fetch word; a hit refetches.
+     `tb_ap040_pipe_smcdual.v` rewrites an instruction 0-3 ahead through all
+     four store routes on both cores (480 cases) and found membus handing
+     over a fill that landed in the very cycle a write to it was accepted.
+   - MOVES went out under the S bit's function code; port B carried only
+     that bit. SFC/DFC now reach the bus.
+   - TRAPcc judged the forwarded CCR, putting EX's shifter flags on the
+     path into the output chain (ae1116d8's worst path).
+
+   Dhrystone, zero wait, phase 0: 1,442,504 cycles, CPI about 11 -- the
+   sequential core with its internal caches is about 7.7. Every data access
+   crosses the 16-bit bus here; internal caches are the performance item
+   after the MMU.
+
+   **Next: the MMU.** `rtl/ap040/ap040_mmu.v` unmodified, between membus and
+   the adapter (its request port IS the external memory port membus
+   drives), with the walker port and a physical bus error. Faults: a
+   prefetch fault stops the stream and is re-raised only by a demand
+   fetch; a read fault returns with its data; with translation on, a write
+   is tentative until the MMU forwards it, and EA-fetch only presents one
+   once nothing older remains in EX. The format $7 frame (30 words) is
+   built in EA-fetch; an RMW whose write faults in EX refetches itself
+   owing the fault; RTE format $7; PTEST/PFLUSH/MMUSR; page-crossing
+   splits; the MOVEM restart (CM). A physical bus error on a POSTED write
+   stays a gap for now (a 68040 reports it through the write-back fields).
+
+   ### Bundle 9 (2026-09-24): full-format EA, interrupts, and 40 MHz
+
+   WIP fd399c09, 710c0692, 63f63af4, 82ad8e7e, ae1116d8; benches 2cedfe9d,
+   da63f47b, 30325472.
+
+   **The full-format extension** (68020 BS/IS/bd/od, pre- and post-indexed
+   memory indirection, the reserved encodings): FFEXT_SRC 1055/1055 and
+   FFEXT_DST 794/794, from 0; `tb_ap040_pipe_fxdual.v` puts the format on
+   every other memory-EA instruction on both cores, 15/15 mutations caught.
+
+   **Interrupts** (`ap040_pipe_irq.v`, the reference's input chain): the
+   boundary instruction is held and becomes a format-$0 entry at 24 + level;
+   STOP wakes; an interrupt with M set pushes the format-$1 throwaway and
+   clears M, and RTE continues through a throwaway on the stack its SR
+   names. IRQ 115/115 and ODD_IRQ 8/8. At a boundary owing both, the
+   interrupt goes first and the trace is carried into its handler, as the
+   reference's texc_pend does. `tb_ap040_pipe_irqdual.v` takes interrupts
+   INSIDE programs on both cores -- after MOVE/ANDI to SR, RTE, STOP
+   wake-ups, level 7, from user mode and with M set, RTEs through built
+   throwaways, traced events, nested interrupts, trapping instructions
+   held -- and found what no IRQ round can see, since a round ends when
+   the entry retires: the level just taken re-qualified against the old
+   mask and was taken twice; the arm was sampled before an SR write's mask
+   was forwarded; STOP flushed without redirecting and the word after it
+   was lost on a bus; a verdict latched in the arm's re-sample cycle kept
+   writing its frame after the interrupt took the instruction over; and an
+   interrupt entry stacked the held CHK/zero divide's flags and format.
+
+   **ODD_EXC 33/33**: odd-vector rounds run on to the nested address error,
+   and the generator artifacts are skipped by `tb_dat_replay.v`'s own rule
+   (36,752 rounds, counted).
+
+   **Timing: 25 ns met.** Every fit had the same worst path, EX's ALU,
+   multiplier or divider result forwarded into an address base or index.
+   Address arithmetic and the in-stage trap verdicts now read operand views
+   without that forward and hold a cycle behind it (the 68040's change/use
+   stall); EX reads `sr_base` rather than its own SR forward. 710c0692
+   37.32 MHz (-1.794); 63f63af4 38.63 (-0.885); **82ad8e7e 42.2 MHz,
+   +1.304, 16,816 ALMs**; ae1116d8 39.94 (-0.038, TRAPcc on the forwarded
+   CCR, moved off in 817ba673).
+
+   Corpus at ae1116d8: Basic 658/658, Default 532/532, AE 38/38, ODD_STK
+   6/6, ODD_EXC 33/33, ODD_IRQ 8/8, IRQ 115/115, FFEXT_SRC 1055/1055,
+   FFEXT_DST 794/794, BasicFPU 362/366 (the reference's four), PackedFPU
+   196/196; wrong 0 outside BasicFPU's four. Suites: 159/161 -- irqdual
+   could not build (its `berr` tie was committed ahead of the port, fixed
+   in 817ba673) and rmwsup, whose memory model pulsed port A's valid for one
+   cycle against the L1's hold-until-next-request contract (48f9c864).
+   Mutations: interrupts 16/16, trace carry 4/4 (one only after the nesting
+   extension), address views and verdicts all caught, port C's hold term
+   removed as unreachable (gathered instructions are never straight behind
+   their producer; a Verilator check asserts it).
+
+   Rules: a differential bench has to run the feature INSIDE programs, not
+   one instruction at a time, or everything after the entry goes unjudged;
+   a hold cycle must not latch a verdict; and a bench's memory model is
+   held to the same port contract the RTL is.
+
    ### Bundle 8 (2026-09-24): fetch bandwidth, timing, review 15, the FPU
 
    WIP commits a0bdc57e, 9d94eada, 9c73aa5d, e818618b; benches 4e8b71c1 and
