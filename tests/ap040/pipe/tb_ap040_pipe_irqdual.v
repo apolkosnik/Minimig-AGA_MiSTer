@@ -37,7 +37,9 @@
 //                                                                          //
 // Traced events run T1 through the instruction that lowers the mask, so   //
 // a trace and an interrupt fall due at the same boundary; a trace handler //
-// logs every format-$2 frame and returns.                                 //
+// logs every format-$2 frame and returns. A level raised as a core reads   //
+// the first interrupt's autovector nests a second interrupt in its        //
+// handler, behind a carried trace where there is one.                     //
 //                                                                          //
 // Not generated, because ap040_ea_fetch.v deliberately differs there (see  //
 // ret_f1): a second throwaway behind the first, or a bad frame behind a    //
@@ -64,6 +66,7 @@ localparam [31:0] RESUME     = 32'h0000_1200;
 localparam [31:0] LOGPTR     = 32'h0000_1204;
 localparam [31:0] IRQ_SET    = 32'h0000_1210;
 localparam [31:0] IRQ_DLY    = 32'h0000_1212;
+localparam [31:0] IRQ_CHAIN  = 32'h0000_1214;   // raised when an autovector is read
 localparam [31:0] LOG_BASE   = 32'h0000_1300;
 localparam [31:0] LOG_END    = 32'h0000_1B00;
 localparam [31:0] DUMP_BASE  = 32'h0000_1000;
@@ -114,7 +117,7 @@ endfunction
 
 // Counted as generated, so a run that never reached a case says so.
 integer n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp;
-integer n_trace, n_trace_ev, fill_n, c1, t_new;
+integer n_trace, n_trace_ev, fill_n, c1, t_new, n_chain, hl;
 
 integer k, r1, r2, r3, ev, lvl, msk, s, m, m0, fmt, v, irq_on, tgt_at;
 reg [15:0] sr;
@@ -151,6 +154,21 @@ task raise;
 		emit(16'h4A78); emit(IRQ_SET[15:0]);                   // TST.W IRQ_SET.W
 		emit(16'h67FA);                                        // BEQ.S *-4
 		emit(16'h4E71); emit(16'h4E71); emit(16'h4E71);
+	end
+endtask
+
+// A higher level, raised by the bench the moment a core reads the first
+// interrupt's autovector: it is pending by the time that handler's first
+// instruction arrives, on both cores, so the second interrupt nests there
+// -- behind the trace an interrupt carried into the handler, where there
+// is one. Level 7 is the edge-triggered one.
+task chain;
+	input integer l;
+	begin
+		hl = l + 1 + (rbits(32) % (7 - l));
+		emit(16'h31FC); emit(hl[15:0]); emit(IRQ_CHAIN[15:0]);   // MOVE.W #h,IRQ_CHAIN.W
+		n_chain = n_chain + 1;
+		count_irq(1, 0);   // taken in the first handler: supervisor, M clear
 	end
 endtask
 
@@ -233,6 +251,7 @@ task gen_program;
 			0: begin                                                  // MOVE #sr,SR
 				emit(16'h46FC); emit({3'b001, m0[0], 12'h700});
 				raise(lvl);
+				if (rbits(2) == 0) chain(lvl);
 				filler(0, 2);
 				emit(16'h46FC); emit(mk_sr(s, m, msk, rbits(5)));
 				count_irq(s, m);
@@ -321,6 +340,7 @@ task gen_program;
 				// would log as many traces as each core happened to spin.
 				emit(16'h46FC); emit(16'h2700);
 				raise(lvl);
+				if (rbits(1)) chain(lvl);
 				r1 = rbits(5);
 				emit(16'h46FC); emit({8'hA7, 3'b000, r1[4:0]});         // MOVE #$A7xx,SR: T1
 				filler(1, 2); c1 = fill_n;
@@ -436,7 +456,7 @@ task build_memory;
 		put_handlers;
 		put(RESUME, 16'h0000); put(RESUME + 2, 16'h0000);
 		put(LOGPTR, LOG_BASE[31:16]); put(LOGPTR + 2, LOG_BASE[15:0]);
-		put(IRQ_SET, 16'h0000); put(IRQ_DLY, 16'h0000);
+		put(IRQ_SET, 16'h0000); put(IRQ_DLY, 16'h0000); put(IRQ_CHAIN, 16'h0000);
 		for (i = LOG_BASE >> 1; i < LOG_END >> 1; i = i + 1) begin memp[i] = 16'h0000; memf[i] = 16'h0000; end
 		for (i = DUMP_BASE >> 1; i < (DUMP_BASE >> 1) + 40; i = i + 1) begin memp[i] = 16'h0000; memf[i] = 16'h0000; end
 		for (i = STK_LO >> 1; i < MSP_TOP >> 1; i = i + 1) begin memp[i] = 16'h0000; memf[i] = 16'h0000; end
@@ -492,6 +512,10 @@ always @(posedge clk) begin
 				if (!p_nuds) memp[p_widx][15:8] <= p_dwrite[15:8];
 				if (!p_nlds) memp[p_widx][7:0]  <= p_dwrite[7:0];
 				if (p_widx == (IRQ_DLY >> 1)) begin p_dly <= DELAY; p_dly_v <= p_dwrite[2:0]; end
+			end else if (p_addr[31:0] >= 32'h64 && p_addr[31:0] <= 32'h7C && p_addr[1:0] == 2'b00 &&
+			             memp[IRQ_CHAIN >> 1] != 16'd0) begin
+				memp[IRQ_SET >> 1]   <= memp[IRQ_CHAIN >> 1];
+				memp[IRQ_CHAIN >> 1] <= 16'd0;
 			end
 		end
 	end
@@ -545,6 +569,10 @@ always @(posedge clk) begin
 				if (!f_nuds) memf[f_widx][15:8] <= f_dwrite[15:8];
 				if (!f_nlds) memf[f_widx][7:0]  <= f_dwrite[7:0];
 				if (f_widx == (IRQ_DLY >> 1)) begin f_dly <= DELAY; f_dly_v <= f_dwrite[2:0]; end
+			end else if (f_addr[31:0] >= 32'h64 && f_addr[31:0] <= 32'h7C && f_addr[1:0] == 2'b00 &&
+			             memf[IRQ_CHAIN >> 1] != 16'd0) begin
+				memf[IRQ_SET >> 1]   <= memf[IRQ_CHAIN >> 1];
+				memf[IRQ_CHAIN >> 1] <= 16'd0;
 			end
 		end
 	end
@@ -604,7 +632,7 @@ endtask
 initial begin
 	n_irq = 0; n_irq_m1 = 0; n_irq_user = 0; n_stop = 0; n_nmi = 0; n_rte = 0;
 	n_f1 = 0; n_f1_msp = 0; n_f1_isp = 0; n_f1_usp = 0; logged = 0;
-	n_trace = 0; n_trace_ev = 0;
+	n_trace = 0; n_trace_ev = 0; n_chain = 0;
 	for (round = 0; round < NROUND; round = round + 1) begin
 		seed = 32'h1A2B_3C4D + round * 32'h9E37_79B9;
 		nreset = 0;
@@ -654,15 +682,15 @@ initial begin
 		$display("round %0d: seed %h, %0d program words, %0d cycles, %0d log bytes, %0d mismatches",
 		         round, seed, pw, cyc, rd32f(LOGPTR) - LOG_BASE, mism);
 	end
-	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events",
-	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev);
+	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events, %0d nested",
+	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev, n_chain);
 	// Every interrupt logs 22 bytes and every trace 12; nothing else writes
 	// the log here.
 	if (logged != 22 * n_irq + 12 * n_trace) begin
 		errors = errors + 1;
 		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each) and %0d traces (12 each)", logged, n_irq, n_trace);
 	end
-	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0) begin
+	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0 || n_chain == 0) begin
 		errors = errors + 1;
 		$display("FAIL: a case went ungenerated");
 	end
