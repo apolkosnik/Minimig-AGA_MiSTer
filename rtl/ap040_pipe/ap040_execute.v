@@ -133,6 +133,7 @@ module ap040_execute
 	input             eaf_is_fmterr,
 	input             eaf_is_trace,
 	input             eaf_is_chk,
+	input             eaf_chk_ok,
 	input             eaf_is_immsr,
 	input             eaf_is_stop,
 	input             eaf_immsr_to_sr,
@@ -676,7 +677,9 @@ assign ex_fwd_data  = combined_result;
 
 // The one place the committed flags are chosen; the forward and the
 // register both read it, so they cannot disagree.
-wire [4:0] exe_flags_c = eaf_is_div ? div_flags : alu_flags;
+// An in-bounds CHK clears N and C and leaves X, Z and V (milestone 112).
+wire [4:0] exe_flags_c = eaf_chk_ok ? {ccr_in[4], 1'b0, ccr_in[2], ccr_in[1], 1'b0} :
+                         eaf_is_div ? div_flags : alu_flags;
 assign ex_ccr_fwd_valid = eaf_valid && eaf_writes_ccr && !ex_stall;   // final this cycle
 // The branch verdict, for EA-fetch's T0 trace arm: a conditional branch
 // arms provisionally when it leaves that stage and this settles it.

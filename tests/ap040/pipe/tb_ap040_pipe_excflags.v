@@ -9,6 +9,12 @@
 // leaving X, N, Z and V alone. Both are what rtl/ap040/ap040_core.v does,  //
 // and it is the core that passes the cputest corpus.                       //
 //                                                                          //
+// CHK sets C as well, which this bench did not check until milestone 112:  //
+// a trapping CHK sets it for a negative operand against a non-negative     //
+// bound, for an operand at or above a non-negative bound, and for a        //
+// negative operand above a negative bound. -1 against 20 is the first      //
+// case, so the frame carries N and C: $2709, not $2708.                    //
+//                                                                          //
 // This core applied CHK's N to the STACKED status word and not to the      //
 // register the handler runs with, so the two disagreed: a negative operand //
 // with N clear on entry stacked $2708 and entered the handler with $2700.  //
@@ -119,9 +125,9 @@ initial begin
 		$display("FAIL: D3 = %h, expected 00000033. The CHK handler's FIRST instruction branched on N and found it clear. CHK sets N from its comparison, and the operand was negative -- the status register the handler runs with has to say so, not just the word on the stack.",
 		         dbg_d3);
 	end
-	if (dut.u_l1.mem[1530] !== 16'h2708) begin
+	if (dut.u_l1.mem[1530] !== 16'h2709) begin
 		errors = errors + 1;
-		$display("FAIL: the stacked status word = %h, expected 2708 (supervisor, interrupts masked, N set by the CHK)",
+		$display("FAIL: the stacked status word = %h, expected 2709 (supervisor, interrupts masked, N and C set by the CHK)",
 		         dut.u_l1.mem[1530]);
 	end
 

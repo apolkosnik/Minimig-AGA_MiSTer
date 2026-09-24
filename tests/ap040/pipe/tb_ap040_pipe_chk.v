@@ -12,8 +12,20 @@
 // N is DEFINED on the two trapping paths and nowhere else: SET when the    //
 // value is negative, CLEARED when it merely exceeds the bound. It is       //
 // written into the STACKED SR, which is what a handler reads and what RTE  //
-// restores. The non-trapping case leaves N, Z, V and C undefined on a real //
-// 68040; this core leaves them unchanged, which is one legal reading.      //
+// restores.                                                                //
+//                                                                          //
+// Milestone 112 replaced this bench's old reading of the non-trapping case //
+// ("undefined, so left unchanged") with the rule the cputest corpus holds  //
+// the 68040 to, as rtl/ap040/ap040_core.v implements it: N tracks the      //
+// value's sign on every path, C is CLEARED in bounds, and a trap sets C    //
+// for a negative value against a non-negative bound or a value at or above //
+// a non-negative bound. Z, V and X are never touched. Both traps here are  //
+// one of those cases, so both frames must carry C; and the live C before   //
+// each is clear (the MOVEQ poison clears it), so an unchanged C fails.     //
+//                                                                          //
+// The in-bounds rule gets a fourth CHK at the end, after ORI #$1F,CCR sets //
+// every flag: CHK #30,D0 with D0 = 20 must leave X, Z and V set and N and  //
+// C clear, CCR = $16. RTL that left the flags alone keeps $1F.             //
 //                                                                          //
 // All three outcomes run in ONE program, because the handler returns with  //
 // RTE -- which milestone 54 made trustworthy:                              //
@@ -22,6 +34,7 @@
 //   MOVE.L #-1,D0    / CHK #10,D0   traps, N must be SET                   //
 //   MOVE.L #5,D0     / CHK #10,D0   must NOT trap                          //
 //   MOVE.L #20,D0    / CHK #10,D0   traps, N must be CLEAR                 //
+//   ORI #$1F,CCR     / CHK #30,D0   in bounds: CCR must become $16         //
 //                                                                          //
 //   handler: MOVE.L (A7),D2    the stacked {SR, PC_hi}                     //
 //            MOVE.L D2,(A0)+   filed away, one slot per trap               //
@@ -55,7 +68,7 @@
 
 module tb_ap040_pipe_chk;
 
-localparam PROG_WORDS      = 40;
+localparam PROG_WORDS      = 48;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -130,6 +143,10 @@ initial begin
 	dut.u_l1.mem[18] = 16'h76FF;   // MOVEQ #-1,D3  -- live N := 1, the OPPOSITE of CHK's
 	dut.u_l1.mem[19] = 16'h41BC;   // CHK #10,D0   -- over bound: traps, stacked N must be 0
 	dut.u_l1.mem[20] = 16'h000A;
+	dut.u_l1.mem[21] = 16'h003C;   // ORI #$1F,CCR  -- every flag set
+	dut.u_l1.mem[22] = 16'h001F;
+	dut.u_l1.mem[23] = 16'h41BC;   // CHK #30,D0   -- 20 is in bounds: CCR := $16
+	dut.u_l1.mem[24] = 16'h001E;
 
 	// CHK handler @ word idx 512 (byte $800)
 	dut.u_l1.mem[512] = 16'h2417;  // MOVE.L (A7),D2   -- stacked {SR, PC_hi}
@@ -171,6 +188,23 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: stacked SR of trap 2 = %h, N must be CLEAR (the value merely exceeded the bound)",
 		         dut.u_l1.mem[130]);
+	end
+	// SR bit 0 is C. Both traps are cases that set it, and the MOVEQ before
+	// each left the live C clear.
+	if (dut.u_l1.mem[128][0] !== 1'b1) begin
+		errors = errors + 1;
+		$display("FAIL: stacked SR of trap 1 = %h, C must be SET (negative value, non-negative bound)",
+		         dut.u_l1.mem[128]);
+	end
+	if (dut.u_l1.mem[130][0] !== 1'b1) begin
+		errors = errors + 1;
+		$display("FAIL: stacked SR of trap 2 = %h, C must be SET (value at or above a non-negative bound)",
+		         dut.u_l1.mem[130]);
+	end
+	if (dbg_ccr !== 5'h16) begin
+		errors = errors + 1;
+		$display("FAIL: CCR = %h after the in-bounds CHK, expected 16 (X, Z, V kept; N from the value, C cleared)",
+		         dbg_ccr);
 	end
 	if (dbg_d0 !== 32'h0000_0014) begin
 		errors = errors + 1;

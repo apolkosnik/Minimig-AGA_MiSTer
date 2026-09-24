@@ -267,6 +267,7 @@ module ap040_ea_fetch
 	input       [3:0] eac_dest_reg,
 	input       [3:0] eac_src_reg,
 	input      [31:0] eac_imm,
+	input      [31:0] eac_ea_ext,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -429,6 +430,8 @@ module ap040_ea_fetch
 	output reg        eaf_div_signed,
 	output reg        eaf_is_trapcc,
 	output reg        eaf_is_chk,
+	// A CHK that retired WITHOUT trapping, which still writes N and C.
+	output reg        eaf_chk_ok,
 	output reg        eaf_is_immsr,
 	output reg        eaf_is_stop,
 	output reg        eaf_immsr_to_sr,
@@ -518,11 +521,17 @@ wire [31:0] an_step  = (eff_size == `AP040_SZ_L) ? 32'd4 :
 // (a Word index is SIGN-extended, not truncated), [10:9] the scale, and
 // [7:0] a signed BYTE displacement -- not the 16-bit one every other mode
 // uses.
-wire  [3:0] idx_reg  = {eac_imm[15], eac_imm[14:12]};
-wire [31:0] idx_raw  = eac_imm[11] ? operand_c
+// The EA's extension value (milestone 112). For an operand-plus-EA form --
+// eac_immrmw set -- eac_imm is the OPERAND and the EA's own word is
+// eac_ea_ext; for everything else they are the same thing. A mux of two
+// registers selected by a register, which is what milestone 88 permits on
+// the address path, and it replaces the mask that sat here before.
+wire [31:0] ea_ext   = eac_immrmw ? eac_ea_ext : eac_imm;
+wire  [3:0] idx_reg  = {ea_ext[15], ea_ext[14:12]};
+wire [31:0] idx_raw  = ea_ext[11] ? operand_c
                                    : {{16{operand_c[15]}}, operand_c[15:0]};
-wire [31:0] idx_val  = idx_raw << eac_imm[10:9];
-wire [31:0] idx_disp = {{24{eac_imm[7]}}, eac_imm[7:0]};
+wire [31:0] idx_val  = idx_raw << ea_ext[10:9];
+wire [31:0] idx_disp = {{24{ea_ext[7]}}, ea_ext[7:0]};
 
 // PC-relative addressing (milestone 57) changes only the BASE: the program
 // counter of the EXTENSION WORD, which is the opcode's PC plus two, rather
@@ -543,8 +552,8 @@ wire [31:0] ea_base = eac_ea_pcrel ? (eac_pc + 32'd2) : operand_a;
 // feeds the carry chain where a fifth mux way would be another level after
 // it. eac_immrmw is a register, which is what the milestone-88 rule
 // requires of anything selecting on this path.
-wire [31:0] ea_disp   = eac_imm & {32{~eac_immrmw}};
-wire [31:0] ea_target = eac_is_abs     ? eac_imm            :
+wire [31:0] ea_disp   = ea_ext;
+wire [31:0] ea_target = eac_is_abs     ? ea_ext             :
                         eac_is_predec  ? (an_base - an_step) :
                         eac_ea_indexed ? (ea_base + idx_val + idx_disp) :
                                          (ea_base + ea_disp);
@@ -795,11 +804,24 @@ wire signed [31:0] chk_bound_l = chk_src;
 wire chk_long     = eac_chk_long;
 wire chk_negative = chk_long ? (chk_value_l < 32'sd0) : (chk_value < 16'sd0);
 wire chk_over     = chk_long ? (chk_value_l > chk_bound_l) : (chk_value > chk_bound);
+// The 68040's CHK flags (milestone 112), from ap040_core.v:2899, which the
+// cputest reference measured on hardware. N always tracks the value's sign;
+// C is cleared when the value is in bounds and, on a trap, set only for
+// these sign combinations; Z, V and X are left alone. This core used to
+// leave the CCR untouched on the in-bounds path and C untouched on a trap,
+// which is every one of the CHK corpus rounds that disagreed.
+wire chk_c = chk_long ? (((chk_value_l < 32'sd0) && (chk_bound_l >= 32'sd0)) ||
+                         ((chk_bound_l >= 32'sd0) && (chk_value_l >= chk_bound_l)) ||
+                         ((chk_value_l < 32'sd0) && (chk_bound_l < chk_value_l)))
+                      : (((chk_value < 16'sd0) && (chk_bound >= 16'sd0)) ||
+                         ((chk_bound >= 16'sd0) && (chk_value >= chk_bound)) ||
+                         ((chk_value < 16'sd0) && (chk_bound < chk_value)));
 wire chk_now = eac_valid && eac_is_chk &&
                (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                (chk_negative || chk_over);
 reg exc_pend_chk;
 reg exc_pend_chk_n;
+reg exc_pend_chk_c;
 wire eac_is_chk_trap = chk_now || exc_pend_chk;
 
 // TRAPcc (milestone 74). The condition is evaluated HERE, on sr_in's low
@@ -1358,7 +1380,8 @@ wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 // it is the core that passes the corpus.
 wire [15:0] sr_faulted     = (eac_is_chk_trap && !eac_is_trace)
                               ? {sr_in[15:4],
-                                 (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:0]}
+                                 (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:1],
+                                 (exc_pend_chk ? exc_pend_chk_c : chk_c)}
                               : (eac_is_divzero && !eac_is_trace)
                               ? {sr_in[15:1], 1'b0}
                               : sr_in;
@@ -1569,6 +1592,7 @@ always @(posedge clk) begin
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
 		eaf_is_chk     <= 1'b0;
+		eaf_chk_ok     <= 1'b0;
 		eaf_is_trapcc     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
 		eaf_is_stop    <= 1'b0;
@@ -1605,6 +1629,7 @@ always @(posedge clk) begin
 		ae_tgt_r           <= 32'd0;
 		exc_pend_chk     <= 1'b0;
 		exc_pend_chk_n   <= 1'b0;
+		exc_pend_chk_c   <= 1'b0;
 		exc_pend_trapcc  <= 1'b0;
 		exc_pend_fmterr  <= 1'b0;
 		exc_pend_trace   <= 1'b0;
@@ -1694,6 +1719,7 @@ always @(posedge clk) begin
 		else if (chk_now && !exc_go) begin
 			exc_pend_chk   <= 1'b1;
 			exc_pend_chk_n <= chk_negative;
+			exc_pend_chk_c <= chk_c;
 		end
 
 		if (exc_vec_done && !stall_in)  exc_pend_trapcc <= 1'b0;
@@ -1789,6 +1815,7 @@ always @(posedge clk) begin
 				// ninth.
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_is_chk     <= 1'b0;
+				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_immsr   <= eac_is_immsr;
 				eaf_is_stop    <= stop_takes_hold;
 				eaf_is_link    <= eac_is_link;
@@ -1819,7 +1846,7 @@ always @(posedge clk) begin
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;
-				eaf_writes_ccr <= eac_writes_ccr;
+				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
@@ -2036,6 +2063,7 @@ always @(posedge clk) begin
 				// ...except a double fault, which halts (milestone 110).
 				eaf_is_stop    <= exc_vec_dbl;
 				eaf_is_chk     <= eac_is_chk_trap && own_exc;
+				eaf_chk_ok     <= 1'b0;
 				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
 				eaf_is_div     <= 1'b0;
 				eaf_div_signed <= 1'b0;
@@ -2161,6 +2189,7 @@ always @(posedge clk) begin
 				eaf_is_immsr    <= 1'b0;
 				eaf_is_stop     <= 1'b0;
 				eaf_is_chk      <= 1'b0;
+				eaf_chk_ok      <= 1'b0;
 				eaf_is_trapcc      <= 1'b0;
 				eaf_is_div      <= 1'b0;
 				eaf_div_signed  <= 1'b0;
@@ -2230,6 +2259,7 @@ always @(posedge clk) begin
 				eaf_is_immsr   <= eac_is_immsr;
 				eaf_is_stop    <= stop_takes_hold;
 				eaf_is_chk     <= 1'b0;
+				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
 				eaf_alu_op     <= eac_alu_op;
@@ -2240,7 +2270,7 @@ always @(posedge clk) begin
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
 				eaf_writes_reg <= eac_writes_reg;
-				eaf_writes_ccr <= eac_writes_ccr;
+				eaf_writes_ccr <= eac_writes_ccr || eac_is_chk;
 				eaf_is_branch  <= eac_is_branch;
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;

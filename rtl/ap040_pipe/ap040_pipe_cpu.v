@@ -205,6 +205,7 @@ wire        if_valid;  wire [31:0] if_pc;  wire [15:0] if_opcode;
 wire        id_valid;  wire [31:0] id_pc;  wire [31:0] id_next_pc;
 wire  [3:0] id_dest_reg, id_src_reg;
 wire [31:0] id_imm;
+wire [31:0] id_ea_ext;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -267,6 +268,7 @@ wire  [3:0] id_cond;
 wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
 wire  [3:0] eac_dest_reg, eac_src_reg;
 wire [31:0] eac_imm;
+wire [31:0] eac_ea_ext;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -276,6 +278,7 @@ wire        eac_is_branch, eac_is_scc, eac_is_dbcc, eac_is_mem_src, eac_is_jmp;
 wire        eac_is_lea, eac_sxt_w, eac_is_rmw, eac_immrmw, eac_st_disp, eac_is_link, eac_is_unlk, eac_ea_indexed, eac_ea_pcrel, eac_is_pea, eac_is_immsr, eac_immsr_to_sr, eac_is_chk, eac_is_trapcc;
 wire        eaf_is_trapcc, eaf_is_fmterr, eaf_is_trace;
 wire        eaf_is_chk;
+wire        eaf_chk_ok;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
 wire        id_is_stop, eac_is_stop, eaf_is_stop, ex_flush;
 wire        eaf_is_pea;
@@ -715,6 +718,7 @@ ap040_decode u_id
 	.id_dest_reg     (id_dest_reg),
 	.id_src_reg      (id_src_reg),
 	.id_imm          (id_imm),
+	.id_ea_ext          (id_ea_ext),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -784,6 +788,7 @@ ap040_ea_calc u_eac
 	.id_dest_reg      (id_dest_reg),
 	.id_src_reg       (id_src_reg),
 	.id_imm           (id_imm),
+	.id_ea_ext           (id_ea_ext),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -846,6 +851,7 @@ ap040_ea_calc u_eac
 	.eac_dest_reg     (eac_dest_reg),
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
+	.eac_ea_ext          (eac_ea_ext),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -917,6 +923,7 @@ ap040_ea_fetch #(
 	.eac_dest_reg     (eac_dest_reg),
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
+	.eac_ea_ext          (eac_ea_ext),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -967,6 +974,7 @@ ap040_ea_fetch #(
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
+	.eaf_chk_ok       (eaf_chk_ok),
 	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_fmterr    (eaf_is_fmterr),
 	.eaf_is_trace     (eaf_is_trace),
@@ -1117,6 +1125,7 @@ ap040_execute u_ex
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
+	.eaf_chk_ok       (eaf_chk_ok),
 	.eaf_is_trapcc    (eaf_is_trapcc),
 	.eaf_is_fmterr    (eaf_is_fmterr),
 	.eaf_is_trace     (eaf_is_trace),
