@@ -258,25 +258,31 @@ task gen_program;
 				ib_put({10'b1111_0010_00, 3'b101, 3'd3});
 				ib_put({3'b011, fmt[2:0], fpm[2:0], 7'd0});
 				ib_put(disp[15:0]); ib_flush; end
-			// ---- stores through -(A4) and back up: a balanced pair
+			// ---- a store through -(A4) and a load back up through (A4)+, or a
+			// store through (A4)+ and a load back down through -(A4): balanced
+			// pairs, both steps both ways
 			17: begin
 				case (rbits(2)) 0: fmt = 0; 1: fmt = 5; default: fmt = 2; endcase
-				ib_put({10'b1111_0010_00, 3'b100, 3'd4});                          // FMOVE FPm,-(A4)
+				r1 = rbits(1);
+				ib_put({10'b1111_0010_00, r1[0] ? 3'b011 : 3'b100, 3'd4});          // FMOVE FPm,(A4)+ / -(A4)
 				ib_put({3'b011, fmt[2:0], fpm[2:0], 7'd0}); ib_flush;
 				in_ = 0;
-				ib_put({10'b1111_0010_00, 3'b011, 3'd4});                          // FMOVE (A4)+,FPn
+				ib_put({10'b1111_0010_00, r1[0] ? 3'b100 : 3'b011, 3'd4});          // FMOVE -(A4) / (A4)+,FPn
 				ib_put({3'b010, fmt[2:0], fpn[2:0], 7'h00}); ib_flush; end
 			// ---- FMOVEM.X: a static list out through -(A4) and back through (A4)+
-			18, 19: begin list = rbits(8);
+			// The store's list convention is either one: the predecrement
+			// convention matches -(An), the other makes the 68040 write each
+			// register's longwords in reverse (ap040_core.v's fp_rev).
+			18, 19: begin list = rbits(8); r1 = rbits(1);
 				ib_put(16'hF224);                                                   // FMOVEM.X list,-(A4)
-				ib_put({3'b111, 2'b00, 3'b000, list[7:0]}); ib_flush;
+				ib_put({3'b111, r1[0], 1'b0, 3'b000, list[7:0]}); ib_flush;
 				in_ = 0;
 				ib_put(16'hF21C);                                                   // FMOVEM.X (A4)+,list
 				ib_put({3'b110, 2'b10, 3'b000, list[7:0]}); ib_flush; end
 			// ---- FMOVEM.X to (d16,A3) and back, static or a dynamic list in Dn
-			20: begin list = rbits(8); disp = 128 * rbits(3);
+			20: begin list = rbits(8); disp = 128 * rbits(3); r1 = rbits(1);
 				if (rbits(1)) begin
-					ib_put(16'hF22B); ib_put({3'b111, 2'b10, 3'b000, list[7:0]}); ib_put(disp[15:0]); ib_flush;
+					ib_put(16'hF22B); ib_put({3'b111, r1[0], 1'b0, 3'b000, list[7:0]}); ib_put(disp[15:0]); ib_flush;
 					in_ = 0;
 					ib_put(16'hF22B); ib_put({3'b110, 2'b10, 3'b000, list[7:0]}); ib_put(disp[15:0]); ib_flush;
 				end else begin
