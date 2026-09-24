@@ -5,10 +5,14 @@
 // tb_ap040_pipe_trace_t0.v - T0 set, and only the flow changes traced      //
 //                                                                          //
 // With T1T0 = 01 a trace exception follows each instruction that changes   //
-// the flow: a taken branch or DBcc, BSR/JMP/JSR, RTS/RTE, any exception    //
-// entry, and the non-branch instructions the 68040 defines as flow changes //
-// because they resynchronise the pipeline -- MOVE to SR, ORI/ANDI/EORI to  //
-// SR, MOVEC to a control register, NOP. A not-taken branch is not one.     //
+// the flow: a taken branch or DBcc, BSR/JMP/JSR, RTS/RTE, and the         //
+// non-branch instructions the 68040 defines as flow changes because they   //
+// resynchronise the pipeline -- MOVE to SR, ORI/ANDI/EORI to SR, MOVEC to  //
+// a control register, NOP. A not-taken branch is not one, and neither is   //
+// an exception entry: this bench used to expect a trace after the TRAP,    //
+// the 68000/68020 rule; ap040_core.v's S_EXC0 arms none, and its notes     //
+// record cputest on hardware reporting "Got unexpected trace exception"    //
+// when T0 was carried through an ILLEGAL (review 14).                      //
 // The frame is the same as T1's: vector 9, format $2, PC field = next      //
 // instruction, address field = the instruction that changed the flow.     //
 //                                                                          //
@@ -28,8 +32,8 @@
 //              $0426  MOVEQ #$7F,D1     skipped -- poison                  //
 //   K13 $0428  DBF D4,+4                not taken (D4 0 -> -1): NOT traced; //
 //                                       taken would skip the TRAP          //
-//   K14 $042C  TRAP #1                  traced after the entry: PC field =  //
-//                                       the handler ($0840), SR $2700      //
+//   K14 $042C  TRAP #1                  NOT traced: no exception entry     //
+//                                       leaves a trace behind it           //
 //              (TRAP handler: MOVEQ #$42,D5 / RTE -- untraced)             //
 //   K16 $042E  MOVE.L #$2700,D0         -                                  //
 //   K17 $0434  MOVE D0,SR               traced, SR $2700: tracing off      //
@@ -37,21 +41,21 @@
 //   sub $0880  MOVEQ #7,D3              -   (past $0800, out of            //
 //   K9  $0882  RTS                      traced, PC field = $041C  fall-through reach) //
 //                                                                          //
-// Expected log, eight entries of {address, PC, SR} (fmt/vec $2024 each):   //
+// Expected log, seven entries of {address, PC, SR} (fmt/vec $2024 each):   //
 //   1 {$0410, $0414, $6700}    5 {$041C, $0420, $6708}                     //
 //   2 {$0414, $0416, $6700}    6 {$0422, $0428, $6700}                     //
-//   3 {$0416, $0880, $6700}    7 {$042C, $0840, $2700}                     //
-//   4 {$0882, $041C, $6700}    8 {$0434, $0436, $2700}                     //
+//   3 {$0416, $0880, $6700}    7 {$0434, $0436, $2700}                     //
+//   4 {$0882, $041C, $6700}                                                //
 //                                                                          //
 // (A first draft of this listing was one word off from K12 on -- the DBF's //
 // displacement word -- so the taken DBF landed in the poison slot, and it   //
 // put the subroutine at $0440 where the end of the program fell into its    //
 // RTS. Both were the bench's errors; the RTL traced exactly what ran.)      //
 //                                                                          //
-// D7 = 8. D1 = 2 says neither poison ran; D3 = 7 the subroutine ran;       //
+// D7 = 7. D1 = 2 says neither poison ran; D3 = 7 the subroutine ran;       //
 // D4 = $0000FFFF the DBF pair counted down; D5 = $42; D6 = $55; ISP $0600; //
-// SR $2700. Eight entries and not nine or ten is the point: K3 and K13,    //
-// the not-taken pair, must leave nothing.                                  //
+// SR $2700. Seven entries and not eight or more is the point: K3 and K13, //
+// the not-taken pair, and the TRAP must leave nothing.                     //
 //                                                                          //
 // On milestone-78 RTL T0 is ignored: D7 = 0.                               //
 //--------------------------------------------------------------------------//
@@ -124,7 +128,7 @@ task check32;
 	end
 endtask
 
-localparam N_TRACE = 8;
+localparam N_TRACE = 7;
 reg [31:0] exp_addr [0:N_TRACE-1];
 reg [31:0] exp_pc   [0:N_TRACE-1];
 reg [15:0] exp_sr   [0:N_TRACE-1];
@@ -135,8 +139,7 @@ initial begin
 	exp_addr[3] = 32'h0882; exp_pc[3] = 32'h041C; exp_sr[3] = 16'h6700;   // RTS
 	exp_addr[4] = 32'h041C; exp_pc[4] = 32'h0420; exp_sr[4] = 16'h6708;   // ORI to SR (sets N)
 	exp_addr[5] = 32'h0422; exp_pc[5] = 32'h0428; exp_sr[5] = 16'h6700;   // DBF taken (MOVEQ #1 cleared N)
-	exp_addr[6] = 32'h042C; exp_pc[6] = 32'h0840; exp_sr[6] = 16'h2700;   // TRAP: handler, post-entry SR
-	exp_addr[7] = 32'h0434; exp_pc[7] = 32'h0436; exp_sr[7] = 16'h2700;   // MOVE to SR clearing T0
+	exp_addr[6] = 32'h0434; exp_pc[6] = 32'h0436; exp_sr[6] = 16'h2700;   // MOVE to SR clearing T0 (the TRAP left nothing)
 end
 
 function [31:0] want_log;

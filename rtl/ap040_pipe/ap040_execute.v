@@ -209,6 +209,7 @@ module ap040_execute
 	// on the retry.
 	input             eaf_is_rmw,
 	input             eaf_is_mm,
+	input             eaf_is_xm,
 	input       [1:0] eaf_mvfsr,
 	input       [6:0] eaf_ml,
 	input       [2:0] eaf_bf,
@@ -295,6 +296,12 @@ module ap040_execute
 	// ...and any control register at all (milestone 117): a MOVEC read
 	// behind it takes the registered value, which is a cycle late.
 	output            ex_creg_any,
+	// MULL/DIVL with two results and an (An)+/-(An) step (milestone 117):
+	// the step, written straight to the register file's second port.
+	output            ex_an_early_we,
+	output      [3:0] ex_an_early_reg,
+	output     [31:0] ex_an_early_data,
+	output      [1:0] ex_an_early_sel,
 	// The privilege of EX's own memory write (milestone 93). When EX takes
 	// port B its address, size and data all come from here; the privilege
 	// used to come from EA-fetch, where a YOUNGER exception forces
@@ -349,6 +356,26 @@ wire        ml_same = (ml_dh == eaf_dest_reg[2:0]);
 // is free for the address step, and taking the port here anyway lost the
 // step -- MULU.L (A6)+,D1:D1 left A6 where it was (milestone 115).
 wire        ml_two  = ml && !ml_same && (ml_div || ml_64);
+// Three registers, two retire ports (milestone 117). The first cycle in EX
+// always stalls -- mul_wait, div_wait -- so from the second, nothing
+// commits (exe_fresh is low) and port 2 is free: the An step goes then,
+// once, and Dl/Dh retire together at the end as for every long op.
+// ap040_ea_fetch.v sends the step's value in eaf_ea_target. A younger
+// reader of that An is held behind this instruction, and the register
+// file's same-cycle bypass answers one that samples it as the write lands.
+reg         ml3_an_done;
+wire        ml3 = eaf_valid && ml_two && eaf_writes_an;
+assign ex_an_early_we   = ml3 && (mul_busy || div_busy) && !ml3_an_done;
+assign ex_an_early_reg  = eaf_an_reg;
+assign ex_an_early_data = eaf_ea_target;
+assign ex_an_early_sel  = eaf_an_sel;
+always @(posedge clk) begin
+	if (!nreset)                 ml3_an_done <= 1'b0;
+	else if (ce) begin
+		if (!ex_stall)           ml3_an_done <= 1'b0;
+		else if (ex_an_early_we) ml3_an_done <= 1'b1;
+	end
+end
 
 wire        div_req    = eaf_valid && eaf_is_div;
 wire [32:0] div_rem_sh = {div_rem[31:0], div_dvd[31]};
@@ -669,7 +696,11 @@ wire [31:0] alu_sized = (eaf_size == `AP040_SZ_B) ? {eaf_operand_b[31:8],  alu_r
                         (eaf_size == `AP040_SZ_W) ? {eaf_operand_b[31:16], alu_result[15:0]} :
                                                       alu_result;
 
-wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
+// ADDX/SUBX/ABCD/SBCD/CMPM to memory (milestone 117): the result goes to
+// memory; the register written is the destination's An, whose new value
+// ap040_ea_fetch.v sent in eaf_ea_target.
+wire [31:0] combined_result = eaf_is_xm   ? eaf_ea_target :
+                               eaf_is_scc  ? scc_merged :
                                eaf_mvfsr[1] ? {eaf_operand_b[31:16], mvf_word} :
                                eaf_is_dbcc ? dbcc_result :
                                // LINK joins this bypass (milestone 49): its A7 value was

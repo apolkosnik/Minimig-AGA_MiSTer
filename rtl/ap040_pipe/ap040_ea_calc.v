@@ -79,7 +79,7 @@ module ap040_ea_calc
 	input       [3:0] id_src_reg,
 	input      [31:0] id_imm,
 	input      [31:0] id_ea_ext,
-	input       [5:0] id_mm,
+	input       [6:0] id_mm,
 	input       [2:0] id_moves,
 	input       [1:0] id_mvfsr,
 	input       [1:0] id_pc_off,
@@ -87,7 +87,8 @@ module ap040_ea_calc
 	input       [6:0] id_ml,
 	input       [4:0] id_bf,
 	input       [2:0] id_ck2,
-	input       [3:0] id_cas,
+	input       [4:0] id_cas,
+	input       [3:0] id_m16,
 	input       [5:0] id_alu_op,
 	input       [1:0] id_size,
 	input       [5:0] id_shcnt,
@@ -153,7 +154,7 @@ module ap040_ea_calc
 	output reg  [3:0] eac_src_reg,
 	output reg [31:0] eac_imm,
 	output reg [31:0] eac_ea_ext,
-	output reg  [5:0] eac_mm,
+	output reg  [6:0] eac_mm,
 	output reg  [2:0] eac_moves,
 	output reg  [1:0] eac_mvfsr,
 	// The PC a PC-relative EA is relative to: the address of its displacement
@@ -165,7 +166,8 @@ module ap040_ea_calc
 	output reg  [6:0] eac_ml,
 	output reg  [4:0] eac_bf,
 	output reg  [2:0] eac_ck2,
-	output reg  [3:0] eac_cas,
+	output reg  [4:0] eac_cas,
+	output reg  [3:0] eac_m16,
 	output reg  [5:0] eac_alu_op,
 	output reg  [1:0] eac_size,
 	output reg  [5:0] eac_shcnt,
@@ -234,7 +236,7 @@ always @(posedge clk) begin
 		eac_src_reg      <= 4'h0;
 		eac_imm          <= 32'h0;
 		eac_ea_ext       <= 32'h0;
-		eac_mm           <= 6'd0;
+		eac_mm           <= 7'd0;
 		eac_moves        <= 3'd0;
 		eac_mvfsr        <= 2'd0;
 		eac_pc_base      <= 32'h0;
@@ -242,7 +244,8 @@ always @(posedge clk) begin
 		eac_ml           <= 7'd0;
 		eac_bf           <= 5'd0;
 		eac_ck2          <= 3'd0;
-		eac_cas          <= 4'd0;
+		eac_cas          <= 5'd0;
+		eac_m16          <= 4'd0;
 		eac_alu_op       <= 6'h0;
 		eac_size         <= `AP040_SZ_L;
 		eac_shcnt        <= 6'd1;
@@ -318,6 +321,7 @@ always @(posedge clk) begin
 			eac_bf           <= id_bf;
 			eac_ck2          <= id_ck2;
 			eac_cas          <= id_cas;
+			eac_m16          <= id_m16;
 			eac_alu_op       <= id_alu_op;
 			eac_size         <= id_size;
 			eac_shcnt        <= id_shcnt;

@@ -11,9 +11,9 @@
 // did come belonged to a later change of flow (review 13). CAS arrived in  //
 // the same milestone and is checked here with it.                          //
 //                                                                          //
-// ISP = $1000, SR = $2708 then ORI #$4000,SR (T0). Five MOVES, a CAS and //
-// two MOVE USP, each followed by a MOVEQ #k,D3 that must NOT have run at  //
-// a trace:                                                                 //
+// ISP = $1000, SR = $2708 then ORI #$4000,SR (T0). Five MOVES, a CAS, two //
+// MOVE USP and a CAS2, each followed by a MOVEQ #k,D3 that must NOT have   //
+// run at a trace:                                                         //
 //   $44C MOVES.L (A0),D1          load, (An)                              //
 //   $452 MOVES.W D2,(A1)+         store, the An steps to $822              //
 //   $458 MOVES.B $10(A2),D4       load, a gathered displacement           //
@@ -22,8 +22,9 @@
 //   $46E CAS.L D2,D6,(A0)         not equal: D2 = $A1B2C3D4, N            //
 //   $474 MOVE USP,A6              NOT traced: only the write direction is //
 //   $478 MOVE A0,USP              traced (ap040_core.v's t0_special)       //
+//   $47C CAS2.L D0:D0,D6:D6,(A0):(A0)   $A1B2C3D4 vs 8: not equal, N     //
 // The vector-9 handler at $780 appends {D3, the frame's three longwords}  //
-// to a log at $900 -- 16 bytes an entry -- and RTEs; on the seventh entry //
+// to a log at $900 -- 16 bytes an entry -- and RTEs; on the eighth entry  //
 // it saves D1, D4, A1, A4 and D2 to $980 and stops. Each frame is        //
 // format 2: SR, the next instruction's address, $2024, the traced         //
 // instruction's own address.                                               //
@@ -92,7 +93,7 @@ endtask
 
 // One log entry: D3 at the trace, then the frame's SR/PC/format/address.
 task chk_entry;
-	input integer   n;          // 1..7
+	input integer   n;          // 1..8
 	input [31:0]    d3;
 	input [15:0]    sr;
 	input [31:0]    pc;
@@ -149,7 +150,9 @@ initial begin
 	dut.u_l1.mem[59] = 16'h7644;                                                             // $476 MOVEQ #$44,D3
 	dut.u_l1.mem[60] = 16'h4E60;                                                             // $478 MOVE A0,USP
 	dut.u_l1.mem[61] = 16'h7655;                                                             // $47A MOVEQ #$55,D3
-	dut.u_l1.mem[62] = 16'h60FE;                                                             // $47C BRA.B -2
+	dut.u_l1.mem[62] = 16'h0EFC;  dut.u_l1.mem[63] = 16'h8180;  dut.u_l1.mem[64] = 16'h8180;  // $47C CAS2.L D0:D0,D6:D6,(A0):(A0)
+	dut.u_l1.mem[65] = 16'h7666;                                                             // $482 MOVEQ #$66,D3
+	dut.u_l1.mem[66] = 16'h60FE;                                                             // $484 BRA.B -2
 
 	// Operands.
 	dut.u_l1.mem[520] = 16'hA1B2;  dut.u_l1.mem[521] = 16'hC3D4;   // $810
@@ -165,7 +168,7 @@ initial begin
 	dut.u_l1.mem[450] = 16'h2AD7;                                // $784 MOVE.L (A7),(A5)+
 	dut.u_l1.mem[451] = 16'h2AEF;  dut.u_l1.mem[452] = 16'h0004;  // $786 MOVE.L 4(A7),(A5)+
 	dut.u_l1.mem[453] = 16'h2AEF;  dut.u_l1.mem[454] = 16'h0008;  // $78A MOVE.L 8(A7),(A5)+
-	dut.u_l1.mem[455] = 16'h7E07;                                // $78E MOVEQ #7,D7
+	dut.u_l1.mem[455] = 16'h7E08;                                // $78E MOVEQ #8,D7
 	dut.u_l1.mem[456] = 16'hBA87;                                // $790 CMP.L D7,D5
 	dut.u_l1.mem[457] = 16'h6702;                                // $792 BEQ.B $796
 	dut.u_l1.mem[458] = 16'h4E73;                                // $794 RTE
@@ -187,13 +190,13 @@ initial begin
 
 	repeat ((PROG_WORDS + 1200) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dbg_d5 !== 32'h0000_0007) begin
+	if (dbg_d5 !== 32'h0000_0008) begin
 		errors = errors + 1;
-		$display("FAIL: D5 = %h, expected 00000007 (one trace per MOVES, CAS and MOVE A0,USP)", dbg_d5);
+		$display("FAIL: D5 = %h, expected 00000008 (one trace per MOVES, CAS, MOVE A0,USP and CAS2)", dbg_d5);
 	end
-	if (dbg_d3 !== 32'h0000_0044) begin
+	if (dbg_d3 !== 32'h0000_0055) begin
 		errors = errors + 1;
-		$display("FAIL: D3 = %h, expected 00000044 (the last MOVEQ must not run)", dbg_d3);
+		$display("FAIL: D3 = %h, expected 00000055 (the last MOVEQ must not run)", dbg_d3);
 	end
 	chk_entry(1, 32'hDEAD_BEEF, 16'h6708, 32'h0000_0450, 32'h0000_044C);
 	chk_entry(2, 32'h0000_0055, 16'h6700, 32'h0000_0456, 32'h0000_0452);
@@ -202,6 +205,7 @@ initial begin
 	chk_entry(5, 32'h0000_0011, 16'h6700, 32'h0000_046C, 32'h0000_0466);
 	chk_entry(6, 32'h0000_0022, 16'h6708, 32'h0000_0472, 32'h0000_046E);
 	chk_entry(7, 32'h0000_0044, 16'h6700, 32'h0000_047A, 32'h0000_0478);
+	chk_entry(8, 32'h0000_0055, 16'h6708, 32'h0000_0482, 32'h0000_047C);
 	// The transfers themselves.
 	chk("D1 ($980)",           704, 16'hA1B2);  chk("D1 ($982)", 705, 16'hC3D4);
 	chk("D4 ($984)",           706, 16'hFFFF);  chk("D4 ($986)", 707, 16'hFF5A);

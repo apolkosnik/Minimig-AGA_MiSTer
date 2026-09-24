@@ -206,7 +206,7 @@ wire        id_valid;  wire [31:0] id_pc;  wire [31:0] id_next_pc;
 wire  [3:0] id_dest_reg, id_src_reg;
 wire [31:0] id_imm;
 wire [31:0] id_ea_ext;
-wire  [5:0] id_mm;
+wire  [6:0] id_mm;
 wire  [2:0] id_moves;
 wire  [1:0] id_mvfsr;
 wire  [1:0] id_pc_off;
@@ -214,7 +214,8 @@ wire  [2:0] id_movep;
 wire  [6:0] id_ml;
 wire  [4:0] id_bf;
 wire  [2:0] id_ck2;
-wire  [3:0] id_cas;
+wire  [4:0] id_cas;
+wire  [3:0] id_m16;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -247,6 +248,10 @@ wire        exe_writes_reg2;
 wire  [1:0] exe_an_sel;
 wire        ex_creg_sp;
 wire        ex_creg_any;
+wire        ex_an_early_we;
+wire  [3:0] ex_an_early_reg;
+wire [31:0] ex_an_early_data;
+wire  [1:0] ex_an_early_sel;
 wire        ex_st_sup;
 // A write to A7 that has not landed in the register file yet: one in EX
 // through either port, or one committing this cycle, whose value the file
@@ -258,6 +263,7 @@ wire        a7_busy = (ex_fwd_valid  && (ex_fwd_dest  == 4'd15)) ||
                       (ex_fwd2_valid && (ex_fwd2_dest == 4'd15)) ||
                       (commit_reg    && (exe_dest_reg  == 4'd15)) ||
                       (commit_reg2   && (exe_dest_reg2 == 4'd15)) ||
+                      (ex_an_early_we && (ex_an_early_reg == 4'd15)) ||
                       aux_we || ex_creg_sp;
 wire        ex_fwd2_valid;
 wire  [3:0] ex_fwd2_dest;
@@ -279,7 +285,7 @@ wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
 wire  [3:0] eac_dest_reg, eac_src_reg;
 wire [31:0] eac_imm;
 wire [31:0] eac_ea_ext;
-wire  [5:0] eac_mm;
+wire  [6:0] eac_mm;
 wire  [2:0] eac_moves;
 wire  [1:0] eac_mvfsr;
 wire [31:0] eac_pc_base;
@@ -287,7 +293,8 @@ wire  [2:0] eac_movep;
 wire  [6:0] eac_ml;
 wire  [4:0] eac_bf;
 wire  [2:0] eac_ck2;
-wire  [3:0] eac_cas;
+wire  [4:0] eac_cas;
+wire  [3:0] eac_m16;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -306,7 +313,7 @@ wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
 wire        rf3_we;
 wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
-wire        eaf_is_rmw, eaf_is_link, eaf_is_mm;
+wire        eaf_is_rmw, eaf_is_link, eaf_is_mm, eaf_is_xm;
 wire  [1:0] eaf_mvfsr;
 wire  [6:0] eaf_ml;
 wire  [2:0] eaf_bf;
@@ -627,7 +634,7 @@ ap040_pipe_regfile u_regfile
 	// ...and the architectural view for the write side -- see the port's
 	// own comment in ap040_pipe_regfile.v (milestone 92).
 	.sr_s_w   (sr_base[13]),
-	.sp_sel2_w(exe_an_sel),
+	.sp_sel2_w(ex_an_early_we ? ex_an_early_sel : exe_an_sel),
 	.sr_m_w   (sr_base[12]),
 
 	.we       (commit_reg),
@@ -644,9 +651,11 @@ ap040_pipe_regfile u_regfile
 	.we3      (rf3_we),
 	.waddr3   (rf3_addr),
 	.wdata3   (rf3_data),
-	.we2      (commit_reg2),
-	.waddr2   (exe_dest_reg2),
-	.wdata2   (exe_result_data2),
+	// Port 2 also takes a MULL/DIVL's early An step (milestone 117), in a
+	// cycle EX's own stall keeps commit_reg2 low.
+	.we2      (commit_reg2 || ex_an_early_we),
+	.waddr2   (ex_an_early_we ? ex_an_early_reg  : exe_dest_reg2),
+	.wdata2   (ex_an_early_we ? ex_an_early_data : exe_result_data2),
 
 	.aux_we   (aux_we),
 	.aux_sel  (aux_sel),
@@ -773,6 +782,7 @@ ap040_decode u_id
 	.id_bf              (id_bf),
 	.id_ck2             (id_ck2),
 	.id_cas             (id_cas),
+	.id_m16             (id_m16),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -854,6 +864,7 @@ ap040_ea_calc u_eac
 	.id_bf               (id_bf),
 	.id_ck2              (id_ck2),
 	.id_cas              (id_cas),
+	.id_m16              (id_m16),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -928,6 +939,7 @@ ap040_ea_calc u_eac
 	.eac_bf              (eac_bf),
 	.eac_ck2             (eac_ck2),
 	.eac_cas             (eac_cas),
+	.eac_m16             (eac_m16),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1011,6 +1023,7 @@ ap040_ea_fetch #(
 	.eac_bf              (eac_bf),
 	.eac_ck2             (eac_ck2),
 	.eac_cas             (eac_cas),
+	.eac_m16             (eac_m16),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1074,6 +1087,7 @@ ap040_ea_fetch #(
 	.ex_br_taken      (ex_br_taken),
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
+	.eaf_is_xm        (eaf_is_xm),
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),
@@ -1228,6 +1242,7 @@ ap040_execute u_ex
 
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
+	.eaf_is_xm        (eaf_is_xm),
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),
@@ -1289,6 +1304,10 @@ ap040_execute u_ex
 	.ex_creg_sp       (ex_creg_sp),
 	.ex_creg_any      (ex_creg_any),
 	.ex_st_sup        (ex_st_sup),
+	.ex_an_early_we   (ex_an_early_we),
+	.ex_an_early_reg  (ex_an_early_reg),
+	.ex_an_early_data (ex_an_early_data),
+	.ex_an_early_sel  (ex_an_early_sel),
 	.exe_writes_creg  (exe_writes_creg),
 	.exe_creg_sel     (exe_creg_sel),
 	.exe_creg_data    (exe_creg_data)

@@ -16,10 +16,9 @@
 //   I3  $040E  BRA.B I5                 PC field must be the TARGET        //
 //   I4  $0410  MOVEQ #$7F,D1            skipped -- poison                  //
 //   I5  $0412  MOVE.L D1,(A6)           a store, traced like anything else //
-//   I6  $0414  TRAP #1                  the trace comes AFTER the TRAP's   //
-//                                       exception processing: PC field =   //
-//                                       the TRAP handler ($0840), SR has   //
-//                                       T clear and S set                  //
+//   I6  $0414  TRAP #1                  NOT traced: on the 68040 no        //
+//                                       exception leaves a trace pending   //
+//                                       (review 14; see below)             //
 //              (TRAP handler: MOVEQ #$42,D2 / RTE -- untraced, T is clear) //
 //   I7  $0416  MOVEQ #3,D3              traced again: RTE restored T1      //
 //   J1  $0418  MOVEQ #0,D0              a format-$0 frame built by hand:   //
@@ -37,31 +36,35 @@
 //                                       off                                //
 //   I9  $0436  MOVEQ #$55,D5            not traced                         //
 //                                                                          //
-// Expected log, fifteen entries of {address, PC, SR, fmt/vec}; the SR     //
+// Expected log, fourteen entries of {address, PC, SR, fmt/vec}; the SR    //
 // carries each instruction's own CCR result (MOVEQ #0 sets Z, MOVE.W of    //
 // $A700 sets N):                                                           //
-//    1 {$040A, $040C, $A700}     9 {$041C, $0422, $A700}                   //
-//    2 {$040C, $040E, $A700}    10 {$0422, $0424, $A700}                   //
-//    3 {$040E, $0412, $A700}    11 {$0424, $042A, $A700}                   //
-//    4 {$0412, $0414, $A700}    12 {$042A, $042C, $A708}                   //
-//    5 {$0414, $0840, $2700}    13 {$042C, $042E, $A700}   the RTE        //
-//    6 {$0416, $0418, $A700}    14 {$042E, $0434, $A700}                   //
-//    7 {$0418, $041A, $A704}    15 {$0434, $0436, $2700}   T1 cleared     //
-//    8 {$041A, $041C, $A704}                                               //
+//    1 {$040A, $040C, $A700}     8 {$041C, $0422, $A700}                   //
+//    2 {$040C, $040E, $A700}     9 {$0422, $0424, $A700}                   //
+//    3 {$040E, $0412, $A700}    10 {$0424, $042A, $A700}                   //
+//    4 {$0412, $0414, $A700}    11 {$042A, $042C, $A708}                   //
+//    5 {$0416, $0418, $A700}    12 {$042C, $042E, $A700}   the RTE        //
+//    6 {$0418, $041A, $A704}    13 {$042E, $0434, $A700}                   //
+//    7 {$041A, $041C, $A704}    14 {$0434, $0436, $2700}   T1 cleared     //
 // and fmt/vec $2024 in every one.                                          //
 //                                                                          //
-// D7 = 15 counts the entries. D1 = 3 (I4 skipped), D2 = $42 (TRAP handler //
+// D7 = 14 counts the entries. D1 = 3 (I4 skipped), D2 = $42 (TRAP handler //
 // ran), D3 = 3, D5 = $55, [$0B00] = 3 (I5's store landed exactly once),    //
 // ISP back at $0600, SR $2700 at the end.                                  //
 //                                                                          //
 // What the entries prove. 1: the instruction right after the MOVE to SR    //
 // is the first traced (the SR write is forwarded from EX). 3: a taken      //
-// branch's PC field is its target. 5: a traced TRAP traces its handler's   //
-// first instruction with the post-entry SR. 6: T1 restored by an RTE       //
-// resumes tracing on the very next instruction. 8: the MOVE to SR that     //
-// clears T1 is itself traced, with T1 clear in the frame. 13: a traced    //
-// RTE is traced on its own start SR, and the frame carries the SR it       //
-// restored and the PC it went to. Entry 4's store landing once says the    //
+// branch's PC field is its target. Between 4 and 5 the TRAP leaves        //
+// nothing. This bench used to expect an entry there -- the handler's      //
+// first instruction, traced with the post-entry SR -- which is the 68000/  //
+// 68020 rule. The 68040 keeps no trace pending across TRAP, TRAPV, CHK or  //
+// divide by zero (WinUAE's exception_check_trace: "Except on 68040 or      //
+// 68060"), and ap040_core.v's S_EXC0 arms none; review 14 found the pipe   //
+// stacking a second frame after every traced exception. 5: T1 restored by //
+// an RTE resumes tracing on the very next instruction. 14: the MOVE to SR  //
+// that clears T1 is itself traced, with T1 clear in the frame. 12: a       //
+// traced RTE is traced on its own start SR, and the frame carries the SR   //
+// it restored and the PC it went to. Entry 4's store landing once says the //
 // traced instruction ran exactly once and the held instruction behind it   //
 // ran nothing.                                                             //
 //                                                                          //
@@ -139,7 +142,7 @@ task check32;
 endtask
 
 // expected log: entry e (0-based), field f (0 address, 1 PC, 2 SR, 3 fmt/vec)
-localparam N_TRACE = 15;
+localparam N_TRACE = 14;
 reg [31:0] exp_addr [0:N_TRACE-1];
 reg [31:0] exp_pc   [0:N_TRACE-1];
 reg [15:0] exp_sr   [0:N_TRACE-1];
@@ -148,17 +151,16 @@ initial begin
 	exp_addr[1]  = 32'h040C; exp_pc[1]  = 32'h040E; exp_sr[1]  = 16'hA700;
 	exp_addr[2]  = 32'h040E; exp_pc[2]  = 32'h0412; exp_sr[2]  = 16'hA700;   // BRA: PC field is the target
 	exp_addr[3]  = 32'h0412; exp_pc[3]  = 32'h0414; exp_sr[3]  = 16'hA700;
-	exp_addr[4]  = 32'h0414; exp_pc[4]  = 32'h0840; exp_sr[4]  = 16'h2700;   // TRAP: its handler, post-entry SR
-	exp_addr[5]  = 32'h0416; exp_pc[5]  = 32'h0418; exp_sr[5]  = 16'hA700;
-	exp_addr[6]  = 32'h0418; exp_pc[6]  = 32'h041A; exp_sr[6]  = 16'hA704;   // MOVEQ #0: Z
-	exp_addr[7]  = 32'h041A; exp_pc[7]  = 32'h041C; exp_sr[7]  = 16'hA704;   // MOVE.W of 0: Z
-	exp_addr[8]  = 32'h041C; exp_pc[8]  = 32'h0422; exp_sr[8]  = 16'hA700;
-	exp_addr[9]  = 32'h0422; exp_pc[9]  = 32'h0424; exp_sr[9]  = 16'hA700;
-	exp_addr[10] = 32'h0424; exp_pc[10] = 32'h042A; exp_sr[10] = 16'hA700;
-	exp_addr[11] = 32'h042A; exp_pc[11] = 32'h042C; exp_sr[11] = 16'hA708;   // MOVE.W of $A700: N
-	exp_addr[12] = 32'h042C; exp_pc[12] = 32'h042E; exp_sr[12] = 16'hA700;   // RTE: where it went, what it restored
-	exp_addr[13] = 32'h042E; exp_pc[13] = 32'h0434; exp_sr[13] = 16'hA700;
-	exp_addr[14] = 32'h0434; exp_pc[14] = 32'h0436; exp_sr[14] = 16'h2700;   // MOVE to SR clearing T1
+	exp_addr[4]  = 32'h0416; exp_pc[4]  = 32'h0418; exp_sr[4]  = 16'hA700;
+	exp_addr[5]  = 32'h0418; exp_pc[5]  = 32'h041A; exp_sr[5]  = 16'hA704;   // MOVEQ #0: Z
+	exp_addr[6]  = 32'h041A; exp_pc[6]  = 32'h041C; exp_sr[6]  = 16'hA704;   // MOVE.W of 0: Z
+	exp_addr[7]  = 32'h041C; exp_pc[7]  = 32'h0422; exp_sr[7]  = 16'hA700;
+	exp_addr[8]  = 32'h0422; exp_pc[8]  = 32'h0424; exp_sr[8]  = 16'hA700;
+	exp_addr[9]  = 32'h0424; exp_pc[9]  = 32'h042A; exp_sr[9]  = 16'hA700;
+	exp_addr[10] = 32'h042A; exp_pc[10] = 32'h042C; exp_sr[10] = 16'hA708;   // MOVE.W of $A700: N
+	exp_addr[11] = 32'h042C; exp_pc[11] = 32'h042E; exp_sr[11] = 16'hA700;   // RTE: where it went, what it restored
+	exp_addr[12] = 32'h042E; exp_pc[12] = 32'h0434; exp_sr[12] = 16'hA700;
+	exp_addr[13] = 32'h0434; exp_pc[13] = 32'h0436; exp_sr[13] = 16'h2700;   // MOVE to SR clearing T1
 end
 
 function [31:0] want_log;
