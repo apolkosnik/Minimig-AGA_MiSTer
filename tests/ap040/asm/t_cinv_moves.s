@@ -11,9 +11,11 @@
 ; Test 1-4: code at $3500 is fetched, rewritten by the DMA poke, and run
 ; again. The poke is not a CPU store to $3500, so nothing but CINVA can make
 ; the new instruction visible: a prefetch stream, a queue or an I-cache that
-; kept the old one runs MOVEQ #1 where MOVEQ #2 is now. CINVA is followed by
-; the code straight away, so what was fetched behind the CINVA itself has to
-; go too.
+; kept the old one runs MOVEQ #1 where MOVEQ #2 is now. A divide ahead of the
+; poke keeps the fetch running on through $3500 before the poke's write goes
+; out -- without it the fetch never gets there first, the new word simply
+; arrives, and CINVA is never needed. CINVA is followed by the code
+; straight away, so what was fetched behind the CINVA itself has to go too.
 ;
 ; Test 5: MOVEC D0,DFC straight ahead of MOVES.B, so the MOVES reaches the
 ; point where it uses DFC as the MOVEC commits.
@@ -43,25 +45,26 @@ start:
 
 ;------------------------------------------------------------ CINVA, DMA
 	moveq	#0,d0
-	jsr	$34F0		; runs MOVEQ #1 at $3500 once: it is fetched
+	jsr	$34E4		; runs MOVEQ #1 at $3500 once: it is fetched
 	cmp.l	#1,d0
 	beq.s	t1ok
 	failt	1
 t1ok:
-	jsr	$34F4		; the rewrite, CINVA, and the new code, in one run
+	moveq	#100,d2		; the divide below must run its full length
+	jsr	$34EE		; the rewrite, CINVA, and the new code, in one run
 	cmp.l	#2,d0
 	beq.s	t2ok
 	failt	2
 t2ok:
 	; again, with the rewrite undone the same way
-	jsr	$34F0
+	jsr	$34E4
 	cmp.l	#2,d0		; MOVEQ #2 stays until poked back
 	beq.s	t3ok
 	failt	3
 t3ok:
 	move.w	#$7001,(DMAPOKE).l
 	cinva	ic
-	jsr	$34F0
+	jsr	$34E4
 	cmp.l	#1,d0
 	beq.s	t4ok
 	failt	4
@@ -99,14 +102,19 @@ unexp:
 halt2:
 	bra.s	halt2
 
-; The code the tests call. $34F0: straight into $3500. $34F4: poke $3500
-; to MOVEQ #2,D0, CINVA, and fall into $3500 -- which is already fetched
-; behind the CINVA by the time the CINVA runs.
-	org	$34F0
-	bra.s	code3500
-	nop
-	move.w	#$7002,(DMAPOKE).l	; $34F4
-	cinva	ic			; $34FC
+; The code the tests call. $34E4: straight into $3500. $34EE: a divide,
+; the poke of $3500 to MOVEQ #2,D0, CINVA, and on into $3500 -- which the
+; fetch reached during the divide, before the poke went out.
+	org	$34E4
+	bra.s	code3500		; $34E4
+	nop				; $34E6
+	moveq	#100,d2			; $34E8
+	nop				; $34EA
+	nop				; $34EC
+	divu.w	#3,d2			; $34EE: the fetch runs on through $3500
+	move.w	#$7002,(DMAPOKE).l	; $34F2
+	cinva	ic			; $34FA
+	nop				; $34FC
 	nop				; $34FE
 code3500:
 	moveq	#1,d0			; $3500, rewritten by the poke

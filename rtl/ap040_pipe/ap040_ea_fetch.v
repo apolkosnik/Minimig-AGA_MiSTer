@@ -1636,6 +1636,16 @@ wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw ||
 // path; the hold term only cost a bubble whenever a stale index field
 // happened to name EX's destination. The check below holds the invariant.
 wire addr_hz      = live && (eac_uses_ea || eac_is_chk || eac_is_div) && (lf_a || lf_b);
+// MOVES reads SFC/DFC here, and needs no wait behind the MOVEC that sets
+// them: both carry an extension word, and the gathers keep MOVES back until
+// the MOVEC has committed (the hold this used to have survived its
+// mutation against t_cinv_moves.s, which puts the two straight together).
+// The check below holds the invariant.
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live && eac_moves[2] && creg_busy)
+		$error("ap040_ea_fetch: MOVES at %h reads SFC/DFC with a control-register write still in flight", eac_pc);
+`endif
 `ifdef VERILATOR
 always @(posedge clk)
 	if (nreset && ce && live && eac_ea_indexed && lf_c)
@@ -1651,8 +1661,7 @@ wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_ha
                       (live && fx_hold_go) ||                      // a full-format pointer read
                       (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
                       addr_hz ||                                   // an address from a long forward
-                      trapcc_hz ||                                 // TRAPcc behind a flag producer
-                      (live && eac_moves[2] && creg_busy);         // MOVES behind a MOVEC to SFC/DFC
+                      trapcc_hz;                                   // TRAPcc behind a flag producer
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
