@@ -116,13 +116,17 @@ always @(posedge clk) begin
 		l1_rvalid_a <= 1'b0; l1_rvalid_b <= 1'b0;
 		l1_wr_busy  <= 1'b0; wbusy_cnt   <= 3'd0;
 	end else begin
-		// ---- port A: a fetch answers the cycle after it is asked for
-		l1_rvalid_a <= l1_req_a;
-		if (l1_req_a) l1_rdata_a <= mem[ia[11:0]];
+		// ---- port A: a fetch answers the cycle after it is asked for, and the
+		// word and its valid HOLD until the next request -- ap040_pipe_l1.v's
+		// contract (milestone 80), which the fetch stage relies on while decode
+		// is stalled. This model pulsed the valid for one cycle, and passed
+		// only while decode never happened to stall on a returning word; the
+		// interrupt arm's bubble behind MOVE to SR (2026-09-24) moved a stall
+		// onto exactly that cycle, and TRAP #0's opcode was dropped.
+		if (l1_req_a) begin l1_rvalid_a <= 1'b1; l1_rdata_a <= mem[ia[11:0]]; end
 
-		// ---- port B reads, Long only in this program
-		l1_rvalid_b <= l1_rd_b;
-		if (l1_rd_b) l1_q_b <= {mem[ib[11:0]], mem[ib[11:0] + 1]};
+		// ---- port B reads, Long only in this program; held the same way
+		if (l1_rd_b) begin l1_rvalid_b <= 1'b1; l1_q_b <= {mem[ib[11:0]], mem[ib[11:0] + 1]}; end
 
 		// ---- port B writes, and the backpressure that opens the window
 		if (l1_wr_busy) begin
