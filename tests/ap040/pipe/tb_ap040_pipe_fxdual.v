@@ -7,8 +7,9 @@
 // word on NOT, MOVE and ADD. This bench puts it on everything else that   //
 // takes a memory EA -- loads and stores in every size, register and       //
 // memory arithmetic, immediate-to-memory, LEA, PEA, MOVEM, the bitfields,  //
-// CAS, MULU.L, the FPU, and MOVE memory-to-memory with the full format on  //
-// either side -- and runs the same generated program on the pipelined core //
+// CAS, MULU.L, CHK.L, the FPU, and MOVE memory-to-memory with the full     //
+// format on either side and destination words after a full-format source //
+// -- and runs the same generated program on the pipelined core            //
 // and on rtl/ap040/ap040_core.v, comparing what each leaves in memory      //
 // (tb_ap040_pipe_dual.v's method).                                         //
 //                                                                          //
@@ -213,7 +214,7 @@ task gen_program;
 		end
 
 		for (n = 0; n < NINSN; n = n + 1) begin
-			kind = rbits(32) % 24;
+			kind = rbits(32) % 27;
 			dn = 4 + rbits(2);
 			gen_fx;
 			case (kind)
@@ -257,6 +258,15 @@ task gen_program;
 			21: begin ib_put({10'b1111_0010_00, 3'b110, fx_reg[2:0]});                            // FMOVE.S FP1,<fx>
 			          ib_put(16'h6480); put_fx; end
 			22: begin ib_put({4'b0010, 3'b010, 3'b011, 3'b110, fx_reg[2:0]}); put_fx; end         // MOVE.L <fx>,(A2)+
+			// CHK.L: traps about half the time, a format $2 frame that stacks the
+			// NEXT instruction's address -- where a full-format EA's length shows.
+			24: begin ib_put({4'b0100, dn[2:0], 3'b100, 3'b110, fx_reg[2:0]}); put_fx; end        // CHK.L <fx>,Dn
+			// A full-format SOURCE with destination words after it: the gather
+			// extends in the middle.
+			25: begin r3 = rbits(6);                                                             // MOVE.L <fx>,(d16,A2)
+			          ib_put({4'b0010, 3'b010, 3'b101, 3'b110, fx_reg[2:0]}); put_fx; ib_put({8'd0, r3[5:0], 2'b00}); end
+			26: begin r3 = rbits(8);                                                             // MOVE.L <fx>,($7xxx).W
+			          ib_put({4'b0010, 3'b000, 3'b111, 3'b110, fx_reg[2:0]}); put_fx; ib_put({4'h7, 2'b00, r3[7:0], 2'b00}); end
 			default: begin                                                                        // MOVE.L (A2)+,<fx>
 			          ib_put({4'b0010, fx_reg[2:0], 3'b110, 3'b011, 3'b010}); put_fx; end
 			endcase
