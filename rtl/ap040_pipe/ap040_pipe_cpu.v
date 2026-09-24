@@ -1153,6 +1153,8 @@ ap040_ea_fetch #(
 	.ex_creg_sp       (ex_creg_sp),
 	.ex_creg_any      (ex_creg_any),
 	.a7_busy          (a7_busy),
+	.vbr_in           (vbr),
+	.creg_busy        (ex_creg_any || commit_creg),
 	.eaf_an_reg       (eaf_an_reg),
 	.eaf_an_data      (eaf_an_data),
 	.eaf_writes_reg   (eaf_writes_reg),

@@ -404,6 +404,10 @@ integer errors /* verilator public_flat_rw */;
 integer ran    /* verilator public_flat_rw */;
 integer mism   /* verilator public_flat_rw */;
 integer skipped, unreached, report_lim, timeout;
+// Why a round was skipped, the first reason that applies (milestone 117).
+integer sk_fpu, sk_ign, sk_trace, sk_irq, sk_odd;
+integer sk_tr [0:511];   // trace rounds by {mode 1/2, primary vector}
+integer sk_i;
 // An opcode census of the rounds that failed because the core never decoded
 // the instruction at all.  The printed mismatch lines are capped, so counting
 // them undercounts and biases towards whatever slice printed first; this is
@@ -426,6 +430,7 @@ reg saw_illegal;
 // Sampled once: $test$plusargs on every edge is not free.
 reg trace_bus;
 reg trace_ex;
+reg trace_wb;   // +wbtrace: EA-fetch, trace arm and register commits, per cycle
 reg        next_known;
 reg [31:0] next_pc;
 reg        seq_known;
@@ -453,9 +458,20 @@ integer trace_round;
 // own commits have landed.
 //--------------------------------------------------------------------------
 reg        p_exc_go, cap_pend, cap_done;
+// A traced program runs on through several trace entries to its terminal
+// ILLEGAL; while this is set every entry is captured, so the last one --
+// the ILLEGAL's -- is what the round is judged on (milestone 117).
+reg        cap_latest;
+// The first trace frame of a standalone-trace round, read as soon as its
+// entry retires: a later trace pushes onto the same stack slot.
+reg        t_done;
+reg [7:0]  t_vec;
+reg [15:0] t_sr;
+reg [31:0] t_pc;
 reg [7:0]  cap_vec;
 reg [15:0] cap_sr;
 reg [31:0] cap_sp;
+reg [31:0] cap_pc;   // the faulting instruction's address, whose entry retires under it
 integer    ci;
 
 always @(posedge clk) begin
@@ -470,7 +486,7 @@ always @(posedge clk) begin
 			seq_next  <= dut.u_cpu.u_ex.eaf_next_pc;
 		end
 		p_exc_go <= dut.u_cpu.u_eaf.exc_go;
-		if (dut.u_cpu.u_eaf.exc_go && !p_exc_go && !cap_done)
+		if (dut.u_cpu.u_eaf.exc_go && !p_exc_go && (!cap_done || cap_latest))
 			cap_pend <= 1;
 		else if (cap_pend) begin
 			cap_pend <= 0;
@@ -478,9 +494,17 @@ always @(posedge clk) begin
 			cap_vec  <= dut.u_cpu.u_eaf.exc_vec_r;
 			cap_sr   <= dut.u_cpu.u_eaf.sr_faulted;
 			cap_sp   <= dut.u_cpu.u_eaf.exc_new_sp;
+			cap_pc   <= dut.u_cpu.u_eaf.eac_pc;
 		end
 	end
 end
+
+always @(posedge clk) if (trace_wb && round_active && ce)
+	$display("  WB t%0t eac %0d %08x arm %0d hold %0d eaf %0d %08x | commit %0d r%0d=%08x c2 %0d r%0d | exc_go %0d",
+	         $time, dut.u_cpu.u_eaf.eac_valid, dut.u_cpu.u_eaf.eac_pc, dut.u_cpu.u_eaf.trace_arm,
+	         dut.u_cpu.u_eaf.trace_hold, dut.u_cpu.u_ex.eaf_valid, dut.u_cpu.u_ex.eaf_pc,
+	         dut.u_cpu.commit_reg, dut.u_cpu.exe_dest_reg, dut.u_cpu.exe_result_data,
+	         dut.u_cpu.commit_reg2, dut.u_cpu.exe_dest_reg2, dut.u_cpu.u_eaf.exc_go);
 
 task mismatch;
 	input [255:0] what;
@@ -553,8 +577,29 @@ task check_final;
 		// An exception round is judged on the entry snapshot, which is the
 		// architectural state the corpus recorded; one that completed is
 		// judged on the live register file.
-		if (cap_done && cap_vec !== e_exc)
+		// A standalone-trace round's own entry is its trace (t_vec, below);
+		// only a traced program's has a terminal entry to compare here.
+		if (cap_done && (e_trace != 2 || cap_latest) && cap_vec !== e_exc)
 			mismatch("exception vector", {24'd0, e_exc}, {24'd0, cap_vec});
+		// The trace frame, where the oracle has one: its stacked SR under the
+		// record's own mask, and its PC (tb_dat_replay.v's check_trace_frame).
+		if (e_trace == 2) begin
+			if (!t_done || t_vec !== 8'd9)
+				mismatch("missing trace", 32'd9, {24'd0, t_vec});
+			else begin
+				if (((t_sr ^ e_trace_sr) & e_trace_srmask) != 0)
+					mismatch("trace SR", {16'd0, e_trace_sr}, {16'd0, t_sr});
+				if (t_pc !== e_trace_pc)
+					mismatch("trace PC", e_trace_pc, t_pc);
+			end
+		end
+		// ...and none where it does not. A trace still armed when a round is
+		// judged is one the oracle says never happens: the sequential driver
+		// calls it "unexpected trace", cputest "Got unexpected trace
+		// exception". Every exception entry arming one (review 14) would have
+		// shown here across the whole corpus.
+		if (e_trace == 0 && e_exc != 9 && dut.u_cpu.u_eaf.trace_arm)
+			mismatch("unexpected trace", 32'd0, 32'd1);
 		// Live, for an exception round as much as a completed one: the
 		// round now stops at the entry's retirement, so everything the
 		// oracle names has committed and nothing younger has. A snapshot
@@ -614,6 +659,7 @@ task run_round;
 	begin
 		ran = ran + 1;
 		cap_done = 0; cap_pend = 0; cap_vec = 8'hff; p_exc_go = 0;
+		cap_latest = 0; t_done = 0; t_vec = 8'hff; t_sr = 16'h0; t_pc = 32'h0;
 		saw_illegal = 0;
 		boot_pc = i_pc; boot_msp = i_msp; cur_pc = i_pc;
 		hold_fetch = 0; round_active = 1;
@@ -676,7 +722,7 @@ task run_round;
 		// end PC is not a fall-through marker, and the first version of this
 		// rule, which asked only "is the next instruction at the end PC",
 		// sent 305,432 branch rounds on to a marker they never reach.
-		if (timeout < EXEC_TIMEOUT && e_exc == 4 && !cap_pend && !cap_done) begin
+		if (timeout < EXEC_TIMEOUT && e_exc == 4 && e_trace == 0 && !cap_pend && !cap_done) begin
 			next_known = 0;
 			while (timeout < EXEC_TIMEOUT && !next_known && !cap_pend && !cap_done) begin
 				if (dbg_ex_valid)       begin next_known = 1; next_pc = dbg_ex_pc;  end
@@ -690,6 +736,60 @@ task run_round;
 				while (timeout < EXEC_TIMEOUT &&
 				       !(dbg_wb_valid && dbg_wb_pc == e_pc && ce)) begin
 					@(posedge clk); timeout = timeout + 1;
+				end
+			end
+		end
+		// A standalone-trace round (e_trace == 2; every trace round in Basic,
+		// 4,509,254 of them, milestone 117): the tested instruction runs with
+		// T set, and the oracle records the trace frame's stacked SR and PC
+		// before its handler returns into the terminal ILLEGAL. The state to
+		// judge is the one at the instruction's retirement, as for any other
+		// round; the trace entry is followed as well, so its frame can be
+		// read. The pipeline drains before it takes a trace, so the first WB
+		// retirement after the entry is captured is the entry itself.
+		// A round whose recorded result IS the trace (e_exc == 9, no separate
+		// trace record: T1, and the tested instruction completed) is followed
+		// to the same place and judged as the exception round it is. It used
+		// to stop at the retirement with nothing captured, so whether the
+		// trace happened at all was never looked at.
+		if (timeout < EXEC_TIMEOUT && (e_trace == 2 || (e_exc == 9 && !cap_done))) begin
+			while (timeout < EXEC_TIMEOUT && !cap_done) begin
+				@(posedge clk); timeout = timeout + 1;
+			end
+			@(posedge clk); timeout = timeout + 1;
+			while (timeout < EXEC_TIMEOUT && !(dbg_wb_valid && ce)) begin
+				@(posedge clk); timeout = timeout + 1;
+			end
+			if (e_trace == 2) begin
+				repeat (4) @(posedge clk);   // the frame's last beat out of the write buffer
+				t_done = 1;
+				t_vec  = cap_vec;
+				t_sr   = read_value(cap_sp, 1);
+				t_pc   = read_value(cap_sp + 32'd2, 2);
+				// A traced PROGRAM (MOVEC2's) continues past its first trace
+				// to the end marker, as the untraced one does above, and
+				// cputest records its final state there: the trace handler,
+				// an RTE at vector 9's slot, returns into the next
+				// instruction. A single-instruction round's first trace is
+				// already AT the end PC -- the marker, or a taken branch's
+				// target -- so any other PC there means a program; under T0
+				// the first trace can come several instructions in. Every
+				// later entry is captured; the round ends when the
+				// ILLEGAL's -- the one under e_exc -- retires at the end PC.
+				// A trace entry retires under the instruction it held, so
+				// the one before the ILLEGAL retires at the end PC too; and
+				// the marker is cputest's NOP (MOVEA.L A0,A0) at the end PC
+				// with the ILLEGAL after it. So the round ends when the
+				// terminal entry is captured and has retired under the
+				// address of the instruction that took it.
+				if (t_pc != e_pc) begin
+					multi_rounds = multi_rounds + 1;
+					cap_latest = 1;
+					while (timeout < EXEC_TIMEOUT &&
+					       !(cap_done && !cap_pend && cap_vec == e_exc && ce &&
+					         dbg_wb_valid && dbg_wb_pc == cap_pc)) begin
+						@(posedge clk); timeout = timeout + 1;
+					end
 				end
 			end
 		end
@@ -727,9 +827,12 @@ initial begin
 	hold_fetch = 0; round_active = 0; cur_pc = 0; boot_pc = 0; boot_msp = 0;
 	nreset = 0; errors = 0; ran = 0; mism = 0;
 	skipped = 0; unreached = 0; report_lim = 40; trace_round = -1;
+	sk_fpu = 0; sk_ign = 0; sk_trace = 0; sk_irq = 0; sk_odd = 0;
+	for (sk_i = 0; sk_i < 512; sk_i = sk_i + 1) sk_tr[sk_i] = 0;
 	undec_rounds = 0; wrong_rounds = 0; multi_rounds = 0;
 	trace_bus = $test$plusargs("buswr");
 	trace_ex  = $test$plusargs("extrace");
+	trace_wb  = $test$plusargs("wbtrace");
 	for (uo = 0; uo < 65536; uo = uo + 1) begin
 		undec_cnt[uo] = 0; wrong_cnt[uo] = 0;
 	end
@@ -814,9 +917,17 @@ initial begin
 		// Judged only if the oracle is an instruction that completes. The
 		// rest are counted here rather than guessed at.
 		if ((flags & F_FPU) || (flags & F_IGNORE_EXC) ||
-		    e_trace != 0 || i_level != 0 ||
+		    e_trace == 1 || i_level != 0 ||
 		    odd_vector != 0 || jr < start_record) begin
 			skipped = skipped + 1;
+			if (flags & F_FPU)              sk_fpu   = sk_fpu + 1;
+			else if (flags & F_IGNORE_EXC)  sk_ign   = sk_ign + 1;
+			else if (e_trace == 1) begin
+				sk_trace = sk_trace + 1;
+				sk_tr[{e_trace[1], e_exc}] = sk_tr[{e_trace[1], e_exc}] + 1;
+			end
+			else if (i_level != 0)          sk_irq   = sk_irq + 1;
+			else if (odd_vector != 0)       sk_odd   = sk_odd + 1;
 			apply_deferred;
 		end else begin
 			run_round;
@@ -826,6 +937,11 @@ initial begin
 
 	$display("pipe replay: %0d judged, %0d mismatches, %0d unreached, %0d skipped (exception/trace/irq/fpu)",
 	         ran, mism, unreached, skipped);
+	$display("pipe skipped: fpu %0d ignore-exc %0d trace %0d irq %0d odd-vector %0d",
+	         sk_fpu, sk_ign, sk_trace, sk_irq, sk_odd);
+	for (sk_i = 0; sk_i < 512; sk_i = sk_i + 1)
+		if (sk_tr[sk_i] != 0)
+			$display("SKIPTRACE mode%0d vec%0d %0d", (sk_i >= 256) ? 2 : 1, sk_i % 256, sk_tr[sk_i]);
 	if (multi_rounds != 0)
 		$display("pipe multi: %0d rounds ran on to an end marker past their first instruction", multi_rounds);
 	// A slice where NOTHING was judged is not a slice that passed. cputest

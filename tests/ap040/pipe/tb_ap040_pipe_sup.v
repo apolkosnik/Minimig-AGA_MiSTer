@@ -182,14 +182,17 @@ initial begin
 	dut.u_l1.mem[256] = 16'h7C55; // MOVEQ #$55,D6
 	dut.u_l1.mem[257] = 16'h4E71; // NOP (drain)
 
-	// Vector table: vector 8 (privilege violation) -> $500. Word index
-	// computed the same PC_RESET-relative-wraparound way every exception
-	// test since milestone 14 has used -- see ap040_ea_fetch.v's header.
-	dut.u_l1.mem[3600] = 16'h0000;
-	dut.u_l1.mem[3601] = 16'h0500;
-	// Vector 33 (TRAP #1) -> $600: byte $84, same mapping.
-	dut.u_l1.mem[3650] = 16'h0000;
-	dut.u_l1.mem[3651] = 16'h0600;
+	// Vector table at VBR = $40, which the program sets first (milestone 117):
+	// vector n at byte $40 + 4n, word index (($40 + 4n - $400) mod $2000) / 2
+	// = 3616 + 2n. This bench used to put its entries at 4n, the table at 0,
+	// and passed only because the core fetched vectors without VBR; with the
+	// entries at VBR they prove the base is used.
+	// Vector 8 (privilege violation) -> $500: byte $60.
+	dut.u_l1.mem[3632] = 16'h0000;
+	dut.u_l1.mem[3633] = 16'h0500;
+	// Vector 33 (TRAP #1) -> $600: byte $C4.
+	dut.u_l1.mem[3682] = 16'h0000;
+	dut.u_l1.mem[3683] = 16'h0600;
 end
 
 initial begin

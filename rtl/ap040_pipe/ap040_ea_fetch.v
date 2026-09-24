@@ -260,6 +260,10 @@ module ap040_ea_fetch
 	// clears -- and half a frame went to the old address and half to the
 	// new one when it did not wait.
 	input             a7_busy,
+	// The vector base (milestone 117), and whether a control-register write
+	// that could change it is still in EX or committing in WB.
+	input      [31:0] vbr_in,
+	input             creg_busy,
 	input             flush,      // EX detected a misprediction: force a bubble
 
 	input             eac_valid,
@@ -1512,6 +1516,7 @@ reg  exc_fmt2_r;
 // address is a register, a register minus a constant, or a mux of those
 // selected by a register.
 reg  [7:0] exc_vec_r;
+reg [31:0] exc_vbase_r;   // VBR, latched with the vector (milestone 117)
 reg        exc_m_r;
 reg [31:0] exc_sp_r;
 wire exc_writing   = exc_go && !exc_vec_pending &&
@@ -1842,7 +1847,11 @@ wire [31:0] exc_wdata     = (exc_ph == EXC_BEAT0) ? {exc_sr_word, exc_pc_field[3
 // Vector table address: vector*4, used as an ABSOLUTE address fed through
 // the SAME PC_RESET-relative conversion below -- see header for why no
 // special-casing (a real VBR, a separate low-memory region) is needed.
-wire [31:0] exc_vec_addr = {22'd0, exc_vec_r, 2'b00};   // the latched vector (milestone 88), never the live mux
+// VBR + 4 * vector (milestone 117). Until then this read 4 * vector and
+// ignored VBR altogether: every handler came from the table at 0, wherever
+// a MOVEC had put the base. Both terms are registers latched at the verdict
+// -- the milestone-88 rule, nothing combinational on the L1 address path.
+wire [31:0] exc_vec_addr = exc_vbase_r + {22'd0, exc_vec_r, 2'b00};
 
 // RTE's own two read-beat addresses: A7 (dword0), A7+4 (dword1) -- via
 // operand_a/port A, same as RTS's mem_issue/mem_complete reuse (decode set
@@ -2098,6 +2107,7 @@ always @(posedge clk) begin
 		exc_go          <= 1'b0;
 		exc_fmt2_r      <= 1'b0;
 		exc_vec_r       <= 8'd0;
+		exc_vbase_r     <= 32'd0;
 		exc_m_r         <= 1'b0;
 		exc_sp_r        <= 32'd0;
 		ret_ph          <= RET_BEAT0;
@@ -2109,11 +2119,12 @@ always @(posedge clk) begin
 		// lose it -- or with a flush, which kills the instruction it was
 		// set for.
 		if (flush || (exc_vec_done && !stall_in)) exc_go <= 1'b0;
-		else if (exc_active && !a7_busy) begin
+		else if (exc_active && !a7_busy && !creg_busy) begin
 			exc_go <= 1'b1;
 			if (!exc_go) begin   // fixed at the verdict, not re-read per beat
 				exc_fmt2_r <= eac_is_fmt2;
 				exc_vec_r  <= exc_vec_num;
+				exc_vbase_r <= vbr_in;   // creg_busy: no MOVEC to VBR still in flight
 				exc_m_r    <= sr_in[12];
 				exc_sp_r   <= exc_sp_live;
 			end
@@ -2180,7 +2191,7 @@ always @(posedge clk) begin
 			// 4 * vector, and deliberately NOT vbr + 4 * vector.
 			vecodd_pc_r  <= {22'd0, exc_vec_r, 2'b00};
 			vecodd_tgt_r <= {l1_q_b[31:1], 1'b0};
-		end else if (exc_active && !a7_busy && !exc_go) vecodd_pend <= 1'b0;
+		end else if (exc_active && !a7_busy && !creg_busy && !exc_go) vecodd_pend <= 1'b0;
 
 		if (exc_vec_done && !stall_in) exc_pend_chk <= 1'b0;
 		else if (chk_now && !exc_go) begin
