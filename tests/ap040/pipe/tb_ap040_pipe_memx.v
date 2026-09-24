@@ -28,13 +28,18 @@
 //                        100 / 2; the step lands in USP, $17FC -> $1800 //
 // A LEA reads that An straight behind each, and every An is saved.        //
 // ABCD/SBCD leave N and V undefined, so their CCRs are checked on X Z C.  //
+// Then, in user mode, ADDX.L/SUBX.W/ABCD/CMPM.W/ADDX.L/ADDX.L/CMPM.L with //
+// the destination An from the instruction straight ahead, two ahead, one //
+// An for both, (Ax)+ straight ahead, a load straight ahead, DIVU.L        //
+// (A1)+,D3:D4 and MULU.L (A2)+,D1:D2 straight ahead (the step EX writes   //
+// early): the destination address is latched at the first load's issue. //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
 
 module tb_ap040_pipe_memx;
 
-localparam PROG_WORDS      = 400;
+localparam PROG_WORDS      = 600;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -202,7 +207,70 @@ initial begin
 	dut.u_l1.mem[169] = 16'h4C5F;  dut.u_l1.mem[170] = 16'h6C05;                               // $552 DIVS.L (A7)+,D5:D6        USP, straight behind
 	dut.u_l1.mem[171] = 16'h4DD7;                                                              // $556 LEA (A7),A6
 	dut.u_l1.mem[172] = 16'h21CE;  dut.u_l1.mem[173] = 16'h0A6C;                               // $558 MOVE.L A6,$0A6C.W
-	dut.u_l1.mem[174] = 16'h60FE;                                                              // $55C BRA.B -2
+	// Every two-load form again, its destination An produced by the
+	// instruction straight ahead (EX's forward), two ahead, by a load, and by
+	// a three-register divide and multiply whose An step EX writes early.
+	// The destination address is latched when the FIRST load issues (it was
+	// the fit's worst path formed live for the second), so it has to be
+	// right that early.
+	dut.u_l1.mem[174] = 16'h207C;  dut.u_l1.mem[175] = 16'h0000;  dut.u_l1.mem[176] = 16'h0984;     // $55C MOVEA.L #$984,A0
+	dut.u_l1.mem[177] = 16'h247C;  dut.u_l1.mem[178] = 16'h0000;  dut.u_l1.mem[179] = 16'h0994;     // $562 MOVEA.L #$994,A2
+	dut.u_l1.mem[180] = 16'h44FC;  dut.u_l1.mem[181] = 16'h0004;                                    // $568 MOVE #$04,CCR
+	dut.u_l1.mem[182] = 16'h224A;                                                                   // $56C MOVEA.L A2,A1               A1 straight from EX
+	dut.u_l1.mem[183] = 16'hD388;                                                                   // $56E ADDX.L -(A0),-(A1)
+	dut.u_l1.mem[184] = 16'h42F8;  dut.u_l1.mem[185] = 16'h0A80;                                    // $570 MOVE CCR,$0A80.W
+	dut.u_l1.mem[186] = 16'h21C8;  dut.u_l1.mem[187] = 16'h0A90;                                    // $574 MOVE.L A0,$0A90.W
+	dut.u_l1.mem[188] = 16'h21C9;  dut.u_l1.mem[189] = 16'h0A94;                                    // $578 MOVE.L A1,$0A94.W
+	dut.u_l1.mem[190] = 16'h247C;  dut.u_l1.mem[191] = 16'h0000;  dut.u_l1.mem[192] = 16'h09A2;     // $57C MOVEA.L #$9A2,A2
+	dut.u_l1.mem[193] = 16'h267C;  dut.u_l1.mem[194] = 16'h0000;  dut.u_l1.mem[195] = 16'h09AE;     // $582 MOVEA.L #$9AE,A3
+	dut.u_l1.mem[196] = 16'h44FC;  dut.u_l1.mem[197] = 16'h0014;                                    // $588 MOVE #$14,CCR
+	dut.u_l1.mem[198] = 16'h588B;                                                                   // $58C ADDQ.L #4,A3                A3 two ahead
+	dut.u_l1.mem[199] = 16'h4E71;                                                                   // $58E NOP
+	dut.u_l1.mem[200] = 16'h974A;                                                                   // $590 SUBX.W -(A2),-(A3)
+	dut.u_l1.mem[201] = 16'h42F8;  dut.u_l1.mem[202] = 16'h0A82;                                    // $592 MOVE CCR,$0A82.W
+	dut.u_l1.mem[203] = 16'h21CA;  dut.u_l1.mem[204] = 16'h0A98;                                    // $596 MOVE.L A2,$0A98.W
+	dut.u_l1.mem[205] = 16'h21CB;  dut.u_l1.mem[206] = 16'h0A9C;                                    // $59A MOVE.L A3,$0A9C.W
+	dut.u_l1.mem[207] = 16'h2A7C;  dut.u_l1.mem[208] = 16'h0000;  dut.u_l1.mem[209] = 16'h09C2;     // $59E MOVEA.L #$9C2,A5
+	dut.u_l1.mem[210] = 16'h44FC;  dut.u_l1.mem[211] = 16'h0004;                                    // $5A4 MOVE #$04,CCR
+	dut.u_l1.mem[212] = 16'h284D;                                                                   // $5A8 MOVEA.L A5,A4               A4 straight from EX
+	dut.u_l1.mem[213] = 16'hC90C;                                                                   // $5AA ABCD -(A4),-(A4)
+	dut.u_l1.mem[214] = 16'h42F8;  dut.u_l1.mem[215] = 16'h0A84;                                    // $5AC MOVE CCR,$0A84.W
+	dut.u_l1.mem[216] = 16'h21CC;  dut.u_l1.mem[217] = 16'h0AA0;                                    // $5B0 MOVE.L A4,$0AA0.W
+	dut.u_l1.mem[218] = 16'h207C;  dut.u_l1.mem[219] = 16'h0000;  dut.u_l1.mem[220] = 16'h09D0;     // $5B4 MOVEA.L #$9D0,A0
+	dut.u_l1.mem[221] = 16'h227C;  dut.u_l1.mem[222] = 16'h0000;  dut.u_l1.mem[223] = 16'h09DE;     // $5BA MOVEA.L #$9DE,A1
+	dut.u_l1.mem[224] = 16'h44FC;  dut.u_l1.mem[225] = 16'h0010;                                    // $5C0 MOVE #$10,CCR
+	dut.u_l1.mem[226] = 16'h5489;                                                                   // $5C4 ADDQ.L #2,A1                A1 straight from EX
+	dut.u_l1.mem[227] = 16'hB348;                                                                   // $5C6 CMPM.W (A0)+,(A1)+
+	dut.u_l1.mem[228] = 16'h42F8;  dut.u_l1.mem[229] = 16'h0A86;                                    // $5C8 MOVE CCR,$0A86.W
+	dut.u_l1.mem[230] = 16'h21C8;  dut.u_l1.mem[231] = 16'h0AA4;                                    // $5CC MOVE.L A0,$0AA4.W
+	dut.u_l1.mem[232] = 16'h21C9;  dut.u_l1.mem[233] = 16'h0AA8;                                    // $5D0 MOVE.L A1,$0AA8.W
+	dut.u_l1.mem[234] = 16'h2C7C;  dut.u_l1.mem[235] = 16'h0000;  dut.u_l1.mem[236] = 16'h09F0;     // $5D4 MOVEA.L #$9F0,A6
+	dut.u_l1.mem[237] = 16'h207C;  dut.u_l1.mem[238] = 16'h0000;  dut.u_l1.mem[239] = 16'h0B08;     // $5DA MOVEA.L #$B08,A0
+	dut.u_l1.mem[240] = 16'h44FC;  dut.u_l1.mem[241] = 16'h0004;                                    // $5E0 MOVE #$04,CCR
+	dut.u_l1.mem[242] = 16'h2256;                                                                   // $5E4 MOVEA.L (A6),A1             A1 loaded straight ahead
+	dut.u_l1.mem[243] = 16'hD388;                                                                   // $5E6 ADDX.L -(A0),-(A1)
+	dut.u_l1.mem[244] = 16'h42F8;  dut.u_l1.mem[245] = 16'h0A88;                                    // $5E8 MOVE CCR,$0A88.W
+	dut.u_l1.mem[246] = 16'h21C8;  dut.u_l1.mem[247] = 16'h0AAC;                                    // $5EC MOVE.L A0,$0AAC.W
+	dut.u_l1.mem[248] = 16'h21C9;  dut.u_l1.mem[249] = 16'h0AB0;                                    // $5F0 MOVE.L A1,$0AB0.W
+	dut.u_l1.mem[250] = 16'h227C;  dut.u_l1.mem[251] = 16'h0000;  dut.u_l1.mem[252] = 16'h0B20;     // $5F4 MOVEA.L #$B20,A1
+	dut.u_l1.mem[253] = 16'h207C;  dut.u_l1.mem[254] = 16'h0000;  dut.u_l1.mem[255] = 16'h0B34;     // $5FA MOVEA.L #$B34,A0
+	dut.u_l1.mem[256] = 16'h44FC;  dut.u_l1.mem[257] = 16'h0000;                                    // $600 MOVE #$00,CCR
+	dut.u_l1.mem[258] = 16'h7864;                                                                   // $604 MOVEQ #100,D4
+	dut.u_l1.mem[259] = 16'h4C59;  dut.u_l1.mem[260] = 16'h4003;                                    // $606 DIVU.L (A1)+,D3:D4          A1 stepped early by EX
+	dut.u_l1.mem[261] = 16'hD388;                                                                   // $60A ADDX.L -(A0),-(A1)          -(A1) is the divisor's longword
+	dut.u_l1.mem[262] = 16'h42F8;  dut.u_l1.mem[263] = 16'h0A8A;                                    // $60C MOVE CCR,$0A8A.W
+	dut.u_l1.mem[264] = 16'h21C8;  dut.u_l1.mem[265] = 16'h0AB4;                                    // $610 MOVE.L A0,$0AB4.W
+	dut.u_l1.mem[266] = 16'h21C9;  dut.u_l1.mem[267] = 16'h0AB8;                                    // $614 MOVE.L A1,$0AB8.W
+	dut.u_l1.mem[268] = 16'h243C;  dut.u_l1.mem[269] = 16'h0003;  dut.u_l1.mem[270] = 16'h0000;     // $618 MOVE.L #$30000,D2
+	dut.u_l1.mem[271] = 16'h247C;  dut.u_l1.mem[272] = 16'h0000;  dut.u_l1.mem[273] = 16'h0B40;     // $61E MOVEA.L #$B40,A2
+	dut.u_l1.mem[274] = 16'h207C;  dut.u_l1.mem[275] = 16'h0000;  dut.u_l1.mem[276] = 16'h0B50;     // $624 MOVEA.L #$B50,A0
+	dut.u_l1.mem[277] = 16'h44FC;  dut.u_l1.mem[278] = 16'h0010;                                    // $62A MOVE #$10,CCR
+	dut.u_l1.mem[279] = 16'h4C1A;  dut.u_l1.mem[280] = 16'h2401;                                    // $62E MULU.L (A2)+,D1:D2          A2 stepped early by EX
+	dut.u_l1.mem[281] = 16'hB588;                                                                   // $632 CMPM.L (A0)+,(A2)+
+	dut.u_l1.mem[282] = 16'h42F8;  dut.u_l1.mem[283] = 16'h0A8C;                                    // $634 MOVE CCR,$0A8C.W
+	dut.u_l1.mem[284] = 16'h21C8;  dut.u_l1.mem[285] = 16'h0ABC;                                    // $638 MOVE.L A0,$0ABC.W
+	dut.u_l1.mem[286] = 16'h21CA;  dut.u_l1.mem[287] = 16'h0AC0;                                    // $63C MOVE.L A2,$0AC0.W
+	dut.u_l1.mem[288] = 16'h60FE;                                                                   // $640 BRA.B -2
 
 	dut.u_l1.mem[518] = 16'h7FFF;  dut.u_l1.mem[519] = 16'hFFFF;   // $80C ADDX source
 	dut.u_l1.mem[526] = 16'h0000;  dut.u_l1.mem[527] = 16'h0001;   // $81C ADDX destination
@@ -220,7 +288,33 @@ initial begin
 	dut.u_l1.mem[618] = 16'h1234;  dut.u_l1.mem[619] = 16'h5678;   // $8D4 CMPI.L
 	dut.u_l1.mem[624] = 16'h0001;  dut.u_l1.mem[625] = 16'h0000;   // $8E0 MULU.L source
 	dut.u_l1.mem[632] = 16'h0000;  dut.u_l1.mem[633] = 16'h0007;   // $8F0 DIVU.L source
-	for (i = 768; i < 832; i = i + 1) dut.u_l1.mem[i] = 16'h0000;  // $A00-$A7F
+	for (i = 768; i < 896; i = i + 1) dut.u_l1.mem[i] = 16'h0000;  // $A00-$AFF
+	dut.u_l1.mem[ 704] = 16'h0000;   // $980
+	dut.u_l1.mem[ 705] = 16'h0005;   // $982
+	dut.u_l1.mem[ 712] = 16'h0000;   // $990
+	dut.u_l1.mem[ 713] = 16'h0007;   // $992
+	dut.u_l1.mem[ 720] = 16'h0003;   // $9A0
+	dut.u_l1.mem[ 728] = 16'h0010;   // $9B0
+	dut.u_l1.mem[ 736] = 16'h1528;   // $9C0
+	dut.u_l1.mem[ 744] = 16'h1234;   // $9D0
+	dut.u_l1.mem[ 751] = 16'h5555;   // $9DE
+	dut.u_l1.mem[ 752] = 16'h1234;   // $9E0
+	dut.u_l1.mem[ 760] = 16'h0000;   // $9F0
+	dut.u_l1.mem[ 761] = 16'h0B14;   // $9F2
+	dut.u_l1.mem[ 898] = 16'h1111;   // $B04
+	dut.u_l1.mem[ 899] = 16'h1111;   // $B06
+	dut.u_l1.mem[ 904] = 16'h2222;   // $B10
+	dut.u_l1.mem[ 905] = 16'h2222;   // $B12
+	dut.u_l1.mem[ 912] = 16'h0000;   // $B20
+	dut.u_l1.mem[ 913] = 16'h0007;   // $B22
+	dut.u_l1.mem[ 920] = 16'h0000;   // $B30
+	dut.u_l1.mem[ 921] = 16'h0100;   // $B32
+	dut.u_l1.mem[ 928] = 16'h0001;   // $B40
+	dut.u_l1.mem[ 929] = 16'h0000;   // $B42
+	dut.u_l1.mem[ 930] = 16'h0000;   // $B44
+	dut.u_l1.mem[ 931] = 16'h0009;   // $B46
+	dut.u_l1.mem[ 936] = 16'h0000;   // $B50
+	dut.u_l1.mem[ 937] = 16'h000A;   // $B52
 end
 
 initial begin
@@ -270,6 +364,31 @@ initial begin
 	chk("DIVS.L D6 hi",         826, 16'hFFFF);  chk("DIVS.L D6 lo", 827, 16'hFFDF);
 	chk("user DIVS.L USP hi",   822, 16'h0000);  chk("user DIVS.L USP lo", 823, 16'h1800);
 	chka("D5 (user DIVS.L rem)",  dbg_d5, 32'h0000_0000);
+	chk("ADDX.L, Ax from EX $990", 712, 16'h0000);  chk("ADDX.L, Ax from EX $992", 713, 16'h000C);
+	chk("SUBX.W, Ax two ahead $9B0", 728, 16'h000C);
+	chk("ABCD, one An forwarded $9C0", 736, 16'h4328);
+	chk("ADDX.L, Ax loaded $B10", 904, 16'h3333);  chk("ADDX.L, Ax loaded $B12", 905, 16'h3333);
+	chk("ADDX.L, Ax stepped by DIVU.L $B20", 912, 16'h0000);  chk("ADDX.L, Ax stepped by DIVU.L $B22", 913, 16'h0107);
+	chk("fwd CCR 1", 832, 16'h0000);
+	chk("fwd CCR 2", 833, 16'h0000);
+	chkm("fwd CCR 3", 834, 16'h0015, 16'h0000);
+	chk("fwd CCR 4", 835, 16'h0014);
+	chk("fwd CCR 5", 836, 16'h0000);
+	chk("fwd CCR 6", 837, 16'h0000);
+	chk("fwd CCR 7", 838, 16'h0019);
+	chk("fwd $A90 hi", 840, 16'h0000);  chk("fwd $A92 lo", 841, 16'h0980);
+	chk("fwd $A94 hi", 842, 16'h0000);  chk("fwd $A96 lo", 843, 16'h0990);
+	chk("fwd $A98 hi", 844, 16'h0000);  chk("fwd $A9A lo", 845, 16'h09A0);
+	chk("fwd $A9C hi", 846, 16'h0000);  chk("fwd $A9E lo", 847, 16'h09B0);
+	chk("fwd $AA0 hi", 848, 16'h0000);  chk("fwd $AA2 lo", 849, 16'h09C0);
+	chk("fwd $AA4 hi", 850, 16'h0000);  chk("fwd $AA6 lo", 851, 16'h09D2);
+	chk("fwd $AA8 hi", 852, 16'h0000);  chk("fwd $AAA lo", 853, 16'h09E2);
+	chk("fwd $AAC hi", 854, 16'h0000);  chk("fwd $AAE lo", 855, 16'h0B04);
+	chk("fwd $AB0 hi", 856, 16'h0000);  chk("fwd $AB2 lo", 857, 16'h0B10);
+	chk("fwd $AB4 hi", 858, 16'h0000);  chk("fwd $AB6 lo", 859, 16'h0B30);
+	chk("fwd $AB8 hi", 860, 16'h0000);  chk("fwd $ABA lo", 861, 16'h0B20);
+	chk("fwd $ABC hi", 862, 16'h0000);  chk("fwd $ABE lo", 863, 16'h0B54);
+	chk("fwd $AC0 hi", 864, 16'h0000);  chk("fwd $AC2 lo", 865, 16'h0B48);
 	chka("D6 (user DIVS.L quot)", dbg_d6, 32'h0000_0032);
 
 	if (errors == 0)

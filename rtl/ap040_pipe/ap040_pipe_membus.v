@@ -109,6 +109,7 @@ reg  [2:0] pf_cnt;
 reg        pf_out;      // a prefetch read is on the bus
 reg        pf_kill;     // ...for a window since emptied: drop it when it returns
 reg        pf_sup;      // the privilege the stream was fetched under
+reg        pf_live;     // the fetch unit has asked for something since reset
 reg        b_pend;      // a data read is wanted and has not been returned
 reg [31:0] b_addr;
 reg  [1:0] b_size;
@@ -163,7 +164,16 @@ wire [29:0] w_lo       = address_b[31:2];
 wire [29:0] w_hi       = w_lo + {29'd0, (size_b == `AP040_SZ_L) && (address_b[1:0] != 2'd0)} +
                          {29'd0, (size_b == `AP040_SZ_W) && (address_b[1:0] == 2'd3)};
 wire        w_accept   = wren_b && !w_pend;
-wire        w_hits_pf  = w_accept && (w_hi >= pf_base) && (w_lo <= pf_base + {27'd0, PF_N});
+// Distances into the window, modular like req_k: a window can span the top
+// of the address space, and ordered compares against pf_base + 4 missed
+// every write into one that did (review 15: a stream from $FFFFFFF8 kept
+// stale words at $FFFFFFFC and at $00000000). Either longword a write
+// touches can be the one inside. The read in flight is always at
+// pf_base + pf_cnt with pf_cnt at most three -- one goes out only while
+// pf_cnt_aft < PF_N -- so the window's four longwords are the whole range.
+wire [29:0] w_klo      = w_lo - pf_base;
+wire [29:0] w_khi      = w_hi - pf_base;
+wire        w_hits_pf  = w_accept && ((w_klo < {27'd0, PF_N}) || (w_khi < {27'd0, PF_N}));
 // What the next prefetch would be once this cycle's request is applied. A
 // hit leaves base + count where it was; a miss starts the new stream, which
 // can go out in the same cycle. Keeping prefetch out of every request cycle
@@ -178,6 +188,7 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		busy <= 1'b0; who <= WHO_A;
 		pf_base <= 30'd0; pf_cnt <= 3'd0; pf_out <= 1'b0; pf_kill <= 1'b0; pf_sup <= 1'b1;
+		pf_live <= 1'b0;
 		pf_q[0] <= 32'd0; pf_q[1] <= 32'd0; pf_q[2] <= 32'd0; pf_q[3] <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
@@ -200,6 +211,7 @@ always @(posedge clk) begin
 			end
 		end
 		if (en_a) begin
+			pf_live <= 1'b1;
 			a_addr <= {address_a[31:1], 1'b0};
 			a_sup  <= sup;
 			if (req_hit) begin
@@ -271,9 +283,13 @@ always @(posedge clk) begin
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
 			mem_size  <= b_size; mem_addr <= b_addr;
 			mem_fc    <= fc_of(1'b0, b_sup);
-		end else if (!pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf) begin
+		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf) begin
 			// The next longword of the stream, as the window stands after
-			// this cycle's request.
+			// this cycle's request. Not before the first request (review 15):
+			// pf_base is zero out of reset, and a read of $0 the fetch unit
+			// never asked for went out while ce held the core -- one the
+			// reset PC's fetch then queued behind, for ever if $0 never
+			// acknowledges.
 			busy       <= 1'b1;  who <= WHO_A;
 			pf_out     <= 1'b1;
 			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;

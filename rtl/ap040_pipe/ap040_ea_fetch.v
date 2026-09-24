@@ -645,6 +645,15 @@ wire        xm      = eac_mm[6];
 wire        xm_nost = xm && (eac_alu_op == `AP040_ALU_CMP);
 reg         xm_have;
 reg  [31:0] xm_src;
+// The destination's address and An's new value, latched when the FIRST load
+// issues. mm_daddr is the forwarded Ax through two adders; driven straight
+// onto the L1 address for the second load it was all 40 of the worst paths
+// at the perf-1 fit (-2.540 ns at 25 ns: ex_fwd_data -> an_new -> mm_base
+// -> mm_daddr -> l1_addr_b), the M88 rule broken -- nothing from a forward
+// on the L1 address path. Operand B is as valid at that issue as operand A,
+// which the first load's own address already depends on.
+reg  [31:0] xm_daddr;
+reg  [31:0] xm_dan;
 
 // Second write port selection (milestone 49). LINK writes An with the new
 // top of stack, UNLK writes A7 with An+4 -- neither is an autoincrement,
@@ -1895,7 +1904,7 @@ wire [31:0] l1_addr_word = mvm_active   ? mvm_cur_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
                             ret_active  ? ret_addr :
-                            xm_have     ? mm_daddr :
+                            xm_have     ? xm_daddr :
                                                                   ea_target;
 assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // !stall_in (milestone 92): the request is combinational off eac_valid and
@@ -2004,6 +2013,8 @@ always @(posedge clk) begin
 		eaf_bnt        <= 1'b0;
 		xm_have        <= 1'b0;
 		xm_src         <= 32'h0;
+		xm_daddr       <= 32'h0;
+		xm_dan         <= 32'h0;
 		eaf_mvfsr      <= 2'd0;
 		eaf_ml         <= 7'd0;
 		eaf_is_div     <= 1'b0;
@@ -2271,6 +2282,10 @@ always @(posedge clk) begin
 				eaf_valid   <= 1'b0;
 				mem_pending <= 1'b1;
 				cas_ea      <= ea_target;
+				if (!xm_have) begin
+					xm_daddr <= mm_daddr;
+					xm_dan   <= mm_dan_new;
+				end
 			end else if (mem_complete && xm && !xm_have) begin
 				// The source is in; the destination's load goes out next.
 				eaf_valid   <= 1'b0;
@@ -2342,7 +2357,7 @@ always @(posedge clk) begin
 				eaf_rtr_ccr    <= 6'd0;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
-				eaf_ea_target  <= xm ? mm_dan_new : ml_an3 ? an_new : mm ? mm_daddr : cas ? cas_ea : ea_target;
+				eaf_ea_target  <= xm ? xm_dan : ml_an3 ? an_new : mm ? mm_daddr : cas ? cas_ea : ea_target;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
 				// already route through eaf_operand_a -- but this stage
