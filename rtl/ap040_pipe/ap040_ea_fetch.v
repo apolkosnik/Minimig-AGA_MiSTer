@@ -268,6 +268,7 @@ module ap040_ea_fetch
 	input       [3:0] eac_src_reg,
 	input      [31:0] eac_imm,
 	input      [31:0] eac_ea_ext,
+	input       [5:0] eac_mm,
 	input       [5:0] eac_alu_op,
 	input       [1:0] eac_size,
 	input       [5:0] eac_shcnt,
@@ -422,6 +423,7 @@ module ap040_ea_fetch
 	// EX-forward output -- see its header.
 	output reg [15:0] eaf_sr_snapshot,
 	output reg        eaf_is_rmw,
+	output reg        eaf_is_mm,
 	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
 	output            rf3_we,
 	output      [3:0] rf3_addr,
@@ -563,6 +565,38 @@ wire [31:0] ea_target = eac_is_abs     ? ea_ext             :
 // why one expression covers both.
 wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
                                       (an_base - an_step);
+
+// MOVE memory-to-memory (milestone 114) -- see ap040_decode.v. The load is
+// the ordinary one above; this is the destination, formed when it completes
+// and handed to EX as eaf_ea_target for the read-modify-write store.
+//
+// The source's (An)+/-(An) happens FIRST: MOVE (A0)+,(A0) writes at the
+// incremented A0, and an index register that is the source's An sees its
+// new value. The destination (An)+/-(An) then writes its An through the
+// main port; when that is the same register the source's second-port write
+// is dropped, since the destination's value already includes it.
+wire        mm          = eac_mm[5];
+wire        mm_simm     = eac_mm[4];
+wire        mm_dpi      = eac_mm[3];
+wire        mm_dpd      = eac_mm[2];
+wire        mm_dabs     = eac_mm[1];
+wire        mm_didx     = eac_mm[0];
+wire  [3:0] mm_didx_reg = {eac_ea_ext[15], eac_ea_ext[14:12]};
+wire        mm_dphase   = mm && (mem_pending || mm_simm);
+wire        mm_src_upd  = eac_is_postinc || eac_is_predec;
+wire        mm_same     = mm_src_upd && (eac_src_reg == eac_dest_reg);
+wire [31:0] mm_base     = mm_same ? an_new : operand_b;
+wire [31:0] mm_c        = (mm_src_upd && (mm_didx_reg == eac_src_reg)) ? an_new : operand_c;
+wire [31:0] mm_idx_val  = (eac_ea_ext[11] ? mm_c : {{16{mm_c[15]}}, mm_c[15:0]}) << eac_ea_ext[10:9];
+wire [31:0] mm_idx_disp = {{24{eac_ea_ext[7]}}, eac_ea_ext[7:0]};
+wire [31:0] mm_dstep    = (eac_size == `AP040_SZ_B) ? ((eac_dest_reg == 4'd15) ? 32'd2 : 32'd1) :
+                          (eac_size == `AP040_SZ_W) ? 32'd2 : 32'd4;
+wire [31:0] mm_daddr    = mm_dabs ? eac_ea_ext :
+                          mm_dpd  ? (mm_base - mm_dstep) :
+                          mm_didx ? (mm_base + mm_idx_val + mm_idx_disp) :
+                                    (mm_base + eac_ea_ext);   // (An), (An)+: zero; (d16,An)
+wire [31:0] mm_dan_new  = mm_dpi ? (mm_base + mm_dstep) : (mm_base - mm_dstep);
+wire        mm_drop_src = mm && mm_same && (mm_dpi || mm_dpd);
 
 // Second write port selection (milestone 49). LINK writes An with the new
 // top of stack, UNLK writes A7 with An+4 -- neither is an autoincrement,
@@ -1291,9 +1325,14 @@ assign raddr_a    = mvm_st_want ? mvm_reg : eac_src_reg;
 // port), so there is no live conflict left to resolve here at all.
 // Port C carries the index register, and forwards exactly as A and B do:
 // MOVE.L D1,D3 followed by MOVE.L (0,A0,D3.L),D2 must see the new D3.
-assign raddr_c    = idx_reg;
-wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == idx_reg);
-wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == idx_reg);
+// ...and for a memory-to-memory MOVE, once its load is out, the
+// DESTINATION's index register (milestone 114). The source's index is used
+// at mem_issue and the destination's at mem_complete, never both at once,
+// so one port serves an indexed-to-indexed MOVE. The select is mem_pending,
+// a register, which is what the milestone-88 rule asks of this path.
+assign raddr_c    = mm_dphase ? mm_didx_reg : idx_reg;
+wire fwd_c_from_ex  = ex_fwd_valid  && (ex_fwd_dest  == raddr_c);
+wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_c);
 wire [31:0] operand_c = fwd_c_from_ex  ? ex_fwd_data  :
                         fwd_c_from_ex2 ? ex_fwd2_data : rdata_c;
 
@@ -1601,6 +1640,7 @@ always @(posedge clk) begin
 		eaf_movec_sel  <= 4'h0;
 		eaf_sr_snapshot<= 16'h0;
 		eaf_is_rmw     <= 1'b0;
+		eaf_is_mm      <= 1'b0;
 		eaf_is_div     <= 1'b0;
 		eaf_div_signed <= 1'b0;
 		eaf_is_chk     <= 1'b0;
@@ -1849,10 +1889,11 @@ always @(posedge clk) begin
 				// eac_* will have moved on by then.
 				// BTST to memory is marked RMW for the operand crossover only
 				// and writes nothing back (milestone 113).
-				eaf_is_rmw     <= eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST);
+				eaf_is_rmw     <= (eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST)) || mm;
+				eaf_is_mm      <= mm;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
-				eaf_ea_target  <= ea_target;
+				eaf_ea_target  <= mm ? mm_daddr : ea_target;
 				// RTS: the popped value (l1_q_b, into eaf_operand_a above)
 				// is the redirect target, exactly like JMP/JSR/exceptions
 				// already route through eaf_operand_a -- but this stage
@@ -1862,12 +1903,13 @@ always @(posedge clk) begin
 				// header.
 				// RTD adds its displacement to the same sum (milestone 113); it
 				// rides eac_ea_ext, which is zero for a plain RTS.
-				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4 + eac_ea_ext) :
+				eaf_operand_b  <= mm         ? mm_dan_new :
+				                  eac_is_rts ? (operand_a + 32'd4 + eac_ea_ext) :
 				                  (eac_is_rmw || eac_immrmw) ? mem_lane : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
-				eaf_writes_an  <= an_wr_any;
+				eaf_writes_an  <= an_wr_any && !mm_drop_src;
 				eaf_an_sel     <= an_sp_sel;
 				eaf_an_reg     <= an_wr_reg;
 				eaf_an_data    <= an_wr_data;
@@ -2089,6 +2131,7 @@ always @(posedge clk) begin
 				eaf_is_dbcc    <= 1'b0;
 				eaf_is_jmp     <= 1'b0;
 				eaf_is_rmw     <= 1'b0;
+				eaf_is_mm      <= 1'b0;
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
@@ -2216,6 +2259,7 @@ always @(posedge clk) begin
 				eaf_is_dbcc     <= 1'b0;
 				eaf_is_jmp      <= 1'b0;
 				eaf_is_rmw      <= 1'b0;
+				eaf_is_mm       <= 1'b0;
 				eaf_is_link     <= 1'b0;
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
@@ -2286,7 +2330,8 @@ always @(posedge clk) begin
 				// header for why the decrement happens HERE, once, rather
 				// than being recomputed in ap040_execute.v.
 				eaf_operand_b  <= (eac_is_bsr || eac_is_jsr || eac_is_pea) ? push_addr :
-				                  eac_is_link                ? (push_addr + eac_imm) : operand_b;
+				                  eac_is_link                ? (push_addr + eac_imm) :
+				                  mm                         ? mm_dan_new : operand_b;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
@@ -2308,7 +2353,9 @@ always @(posedge clk) begin
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
 				eaf_is_jmp     <= eac_is_jmp;
-				eaf_is_rmw     <= 1'b0;
+				eaf_is_rmw     <= mm;
+				eaf_is_mm      <= mm;
+				if (mm) eaf_ea_target <= mm_daddr;
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
 				eaf_is_bsr     <= eac_is_bsr;

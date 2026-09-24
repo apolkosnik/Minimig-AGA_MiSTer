@@ -208,6 +208,7 @@ module ap040_execute
 	// downstream while its store was still pending -- and then store again
 	// on the retry.
 	input             eaf_is_rmw,
+	input             eaf_is_mm,
 	input      [31:0] eaf_ea_target,
 	input             l1_wr_busy,
 	output            ex_st_req,
@@ -592,8 +593,11 @@ wire [31:0] combined_result = eaf_is_scc  ? scc_merged :
                                // PEA joins for the same reason LINK did: its A7 value was
                                // computed in ap040_ea_fetch.v and has no business going
                                // through the ALU.
+                               // A memory-to-memory MOVE's register result is its
+                               // destination's updated An (milestone 114); the ALU's
+                               // is the data, which goes to memory.
                                (eaf_is_bsr || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
-                                eaf_is_link || eaf_is_pea || exc_reaching_ex)
+                                eaf_is_link || eaf_is_pea || eaf_is_mm || exc_reaching_ex)
                                  ? eaf_operand_b :
                                (eaf_is_movec && !eaf_movec_dir) ? creg_read_value :
                                eaf_is_div ? div_result :

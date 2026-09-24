@@ -206,6 +206,7 @@ wire        id_valid;  wire [31:0] id_pc;  wire [31:0] id_next_pc;
 wire  [3:0] id_dest_reg, id_src_reg;
 wire [31:0] id_imm;
 wire [31:0] id_ea_ext;
+wire  [5:0] id_mm;
 wire  [5:0] id_alu_op;
 wire  [1:0] id_size;
 wire  [5:0] id_shcnt;
@@ -269,6 +270,7 @@ wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
 wire  [3:0] eac_dest_reg, eac_src_reg;
 wire [31:0] eac_imm;
 wire [31:0] eac_ea_ext;
+wire  [5:0] eac_mm;
 wire  [5:0] eac_alu_op;
 wire  [1:0] eac_size;
 wire  [5:0] eac_shcnt;
@@ -287,7 +289,7 @@ wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
 wire        rf3_we;
 wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
-wire        eaf_is_rmw, eaf_is_link;
+wire        eaf_is_rmw, eaf_is_link, eaf_is_mm;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
@@ -739,6 +741,7 @@ ap040_decode u_id
 	.id_src_reg      (id_src_reg),
 	.id_imm          (id_imm),
 	.id_ea_ext          (id_ea_ext),
+	.id_mm              (id_mm),
 	.id_alu_op       (id_alu_op),
 	.id_size         (id_size),
 	.id_shcnt        (id_shcnt),
@@ -809,6 +812,7 @@ ap040_ea_calc u_eac
 	.id_src_reg       (id_src_reg),
 	.id_imm           (id_imm),
 	.id_ea_ext           (id_ea_ext),
+	.id_mm               (id_mm),
 	.id_alu_op        (id_alu_op),
 	.id_size          (id_size),
 	.id_shcnt         (id_shcnt),
@@ -872,6 +876,7 @@ ap040_ea_calc u_eac
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
 	.eac_ea_ext          (eac_ea_ext),
+	.eac_mm              (eac_mm),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -944,6 +949,7 @@ ap040_ea_fetch #(
 	.eac_src_reg      (eac_src_reg),
 	.eac_imm          (eac_imm),
 	.eac_ea_ext          (eac_ea_ext),
+	.eac_mm              (eac_mm),
 	.eac_alu_op       (eac_alu_op),
 	.eac_size         (eac_size),
 	.eac_shcnt        (eac_shcnt),
@@ -1006,6 +1012,7 @@ ap040_ea_fetch #(
 	.ex_br_resolve    (ex_br_resolve),
 	.ex_br_taken      (ex_br_taken),
 	.eaf_is_rmw       (eaf_is_rmw),
+	.eaf_is_mm        (eaf_is_mm),
 	.eaf_ea_target    (eaf_ea_target),
 	.eac_is_bsr       (eac_is_bsr),
 	.eac_is_jsr       (eac_is_jsr),
@@ -1150,6 +1157,7 @@ ap040_execute u_ex
 	.srp_in           (srp),
 
 	.eaf_is_rmw       (eaf_is_rmw),
+	.eaf_is_mm        (eaf_is_mm),
 	.eaf_is_link      (eaf_is_link),
 	.eaf_is_pea       (eaf_is_pea),
 	.eaf_is_chk       (eaf_is_chk),
