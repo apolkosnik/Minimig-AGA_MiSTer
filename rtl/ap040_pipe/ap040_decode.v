@@ -1667,7 +1667,10 @@ wire is_move_st_disp = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00
 // MOVEA with an ABSOLUTE source (milestone 111): 190,018 corpus rounds
 // between the Word and Long forms. Like MOVEA everywhere else it writes An,
 // sets no condition codes, and the Word form sign-extends to all 32 bits.
-wire is_movea_abs   = (if_opcode[15:14] == 2'b00) && (if_opcode[13:12] != 2'b00) &&
+// .W and .L only. There is no MOVEA.B: a byte move with an An destination
+// is illegal, and "!= 2'b00" swept 432 of them in as MOVEA.
+wire is_movea_abs   = (if_opcode[15:14] == 2'b00) &&
+                      ((if_opcode[13:12] == 2'b11) || (if_opcode[13:12] == 2'b10)) &&
                       (if_opcode[8:6] == 3'b001) && abs_mode;
 wire is_movea_abs_w = is_movea_abs && (if_opcode[13:12] == 2'b11);
 wire is_movea_absl  = is_movea_abs && abs_long;
