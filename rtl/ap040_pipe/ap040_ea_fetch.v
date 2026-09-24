@@ -527,6 +527,7 @@ module ap040_ea_fetch
 	output reg        eaf_chk_ok,
 	output reg        eaf_is_immsr,
 	output reg        eaf_is_stop,
+	output reg        eaf_halt,     // ...and it is a double fault: halted until reset
 	// Retire, then refetch what follows (CINV/CPUSH): EX redirects to
 	// eaf_next_pc, flushing everything fetched behind this instruction.
 	output reg        eaf_refetch,
@@ -2003,8 +2004,12 @@ reg [31:0] rdq_a;
 reg  [1:0] rdq_sz;
 reg  [2:0] rdq_fc;
 reg        rdq_moves;
-wire       aerr_rd  = rd_out && l1_rvalid_b && l1_rflt_b && !cmr_pend;
-wire       aerr_wr  = l1_wflt && !port_taken;
+// The exception sequence's own accesses are not the instruction's: a frame
+// write refused, or a vector read that faults, is a DOUBLE FAULT, and halts
+// (exc_dbl_*).
+wire       aerr_rd  = rd_out && l1_rvalid_b && l1_rflt_b && !cmr_pend && !exc_vec_pending;
+wire       wflt_here = l1_wflt && !port_taken;
+wire       aerr_wr  = wflt_here && !exc_writing;
 // ...or the instruction's own fetch: decode issued it as the ILLEGAL membus
 // put in the faulted word's place, marked. Taken where its ILLEGAL would
 // have been -- not while an older instruction's trace or entry holds it,
@@ -2140,7 +2145,12 @@ wire exc_vec_done  = exc_go && exc_vec_pending && l1_rvalid_b;
 // odd handler becomes an address error whose frame's PC field is 4 * vector
 // WITHOUT the vector base register -- "offset, not vbr + offset" -- and
 // whose address field is the handler with bit 0 cleared.
-wire exc_vec_odd_now = exc_vec_done && l1_q_b[0];
+wire exc_vec_odd_now = exc_vec_done && l1_q_b[0] && !l1_rflt_b;   // a faulted read is exc_dbl_vec
+// A frame beat the memory side refused (TC.E or a TTR write-protecting the
+// stack), or a vector read that faulted: the other double faults.
+wire exc_dbl_wr      = exc_go && exc_writing && wflt_here;
+wire exc_dbl_vec     = exc_vec_done && l1_rflt_b;
+reg  exc_dbl_r;
 wire exc_vec_dbl     = exc_vec_odd_now &&
                        ((exc_vec_r == 8'd2) || (exc_vec_r == 8'd3));
 wire exc_stall     = exc_active && !exc_vec_done;
@@ -2560,7 +2570,7 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // memory side holds the refusal until it sees no write presented, and the
 // access error's frame follows straight on -- a store, a MOVEM beat or a
 // MOVES held up into the frame's first beat left it held for ever.
-assign l1_wren_b = !stall_self && !aerr_wr &&
+assign l1_wren_b = !stall_self && !wflt_here &&
                    ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want || mvp_st_want ||
                     bf_st_want || m16_st_want || c2_st_want || fp_st_want);
 // The privilege this access carries (milestone 92). An exception's frame
@@ -2672,6 +2682,7 @@ always @(posedge clk) begin
 		eaf_is_trapcc     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
 		eaf_is_stop    <= 1'b0;
+		eaf_halt       <= 1'b0;
 		eaf_refetch    <= 1'b0;
 		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
@@ -2785,7 +2796,7 @@ always @(posedge clk) begin
 		exc_f7_addr     <= 32'd0;
 		exc_pend_aerr   <= 1'b0;
 		owe <= 1'b0; owe_pc <= 32'd0; owe_fa <= 32'd0; owe_wd <= 32'd0; owe_ssw <= 16'd0;
-		cmr_ph <= CMR_IDLE; cmr_pend <= 1'b0; cmr_base <= 32'd0;
+		cmr_ph <= CMR_IDLE; cmr_pend <= 1'b0; cmr_base <= 32'd0; exc_dbl_r <= 1'b0;
 		cm_resume <= 1'b0; cm_ea <= 32'd0; mvm_ea0 <= 32'd0; aer_eaf <= 32'd0;
 		aer_fa          <= 32'd0;
 		aer_wd          <= 32'd0;
@@ -2888,6 +2899,13 @@ always @(posedge clk) begin
 		// an exc_vec_done, so it outranks the clear; the window then lasts
 		// to the SECONDARY entry's own vector read. vecodd_pend is too short
 		// for this: it drops when that entry starts, before its frame is out.
+		// A refused frame beat: no more beats; the entry goes on to its vector
+		// read and departs as the halt (see eaf_halt).
+		if (flush || (exc_vec_done && !stall_in)) exc_dbl_r <= 1'b0;
+		else if (exc_dbl_wr) begin
+			exc_dbl_r <= 1'b1;
+			exc_ph    <= EXC_VECRD;
+		end
 		if (exc_vec_odd_now && !exc_vec_dbl && !stall_in) ae_susp <= 1'b1;
 		else if (exc_vec_done && !stall_in)               ae_susp <= 1'b0;
 		else if (rte_odd_now)                             ae_susp <= 1'b1;
@@ -3113,6 +3131,7 @@ always @(posedge clk) begin
 				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_immsr   <= eac_is_immsr;
 				eaf_is_stop    <= stop_takes_hold;
+				eaf_halt       <= 1'b0;
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_trapcc  <= 1'b0;
@@ -3600,8 +3619,13 @@ always @(posedge clk) begin
 				eaf_is_link    <= 1'b0;
 				eaf_is_pea     <= 1'b0;
 				eaf_is_immsr   <= 1'b0;
-				// ...except a double fault, which halts (milestone 110).
-				eaf_is_stop    <= exc_vec_dbl;
+				// ...except a double fault, which halts (milestone 110): an odd
+				// handler for vector 2 or 3, a frame write refused, or a vector
+				// read that faulted. Halted, not stopped: nothing but reset ends
+				// it (ap040_core.v's fatal_halt), where a STOP is woken by an
+				// interrupt -- which since bundle 9 woke this halt too.
+				eaf_is_stop    <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec;
+				eaf_halt       <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec;
 				eaf_is_chk     <= eac_is_chk_trap && own_exc;
 				eaf_chk_ok     <= 1'b0;
 				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
@@ -3781,6 +3805,7 @@ always @(posedge clk) begin
 				eaf_is_pea      <= 1'b0;
 				eaf_is_immsr    <= 1'b0;
 				eaf_is_stop     <= 1'b0;
+				eaf_halt        <= 1'b0;
 				eaf_is_chk      <= 1'b0;
 				eaf_chk_ok      <= 1'b0;
 				eaf_is_trapcc      <= 1'b0;
@@ -3873,6 +3898,7 @@ always @(posedge clk) begin
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_immsr   <= eac_is_immsr;
 				eaf_is_stop    <= stop_takes_hold;
+				eaf_halt       <= 1'b0;
 				eaf_is_chk     <= 1'b0;
 				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_trapcc     <= 1'b0;

@@ -354,7 +354,7 @@ wire        eaf_is_trapcc, eaf_is_fmterr, eaf_is_trace;
 wire        eaf_is_chk;
 wire        eaf_chk_ok;
 wire        eaf_is_immsr, eaf_immsr_to_sr;
-wire        id_is_stop, eac_is_stop, eaf_is_stop, ex_flush;
+wire        id_is_stop, eac_is_stop, eaf_is_stop, eaf_halt, ex_flush;
 wire        eaf_is_pea;
 wire        eac_is_movem, eac_movem_dir, eac_movem_word, eac_movem_down, eac_movem_wb, eac_movem_pcrel, eac_movem_abs, eac_is_div, eac_div_signed;
 wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
@@ -540,10 +540,16 @@ reg stopped;
 // instruction after the STOP then arrives in EA-fetch with the interrupt
 // armed, and its address is what the entry stacks, as on the 68040.
 wire irq_pend_c;
+// A double fault's halt is not woken by anything: only reset ends it.
+reg halted;
 always @(posedge clk) begin
 	if (!nreset)            stopped <= 1'b0;
 	else if (ce && stop_now) stopped <= 1'b1;
-	else if (ce && stopped && irq_pend_c) stopped <= 1'b0;
+	else if (ce && stopped && irq_pend_c && !halted) stopped <= 1'b0;
+end
+always @(posedge clk) begin
+	if (!nreset)                         halted <= 1'b0;
+	else if (ce && stop_now && eaf_halt) halted <= 1'b1;
 end
 
 // Debug-only: how many register commits have happened. Idempotence hides a
@@ -1307,6 +1313,7 @@ ap040_ea_fetch #(
 	.eaf_is_trace     (eaf_is_trace),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_is_stop      (eaf_is_stop),
+	.eaf_halt         (eaf_halt),
 	.eaf_refetch      (eaf_refetch),
 	.eaf_departs      (eaf_departs),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
