@@ -1688,6 +1688,37 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
+   ### Bundle 7 (2026-09-24): the Basic integer ISA complete, every round judged
+
+   Bundles replaced one-milestone-per-commit on 2026-09-23 at the user's
+   direction: several families per commit, one full corpus run per bundle,
+   `wrong` held at zero. Bundle 7 (WIP commits eaa3e14a, 79b5c69f, 905425f3,
+   9b70f21b) finished the integer instruction set the Basic group tests:
+   EXG, MOVEP, MOVEM with an index, MULL/DIVL (three-register forms
+   included), the bitfields, CHK2/CMP2, CAS/CAS2, MOVE16, TRAPV, MOVE USP,
+   RESET, RTR, the two-memory-operand arithmetic and PACK/UNPK forms, and
+   `#imm.L` to `(xxx).L`. Exception vectors now come from VBR.
+
+   The corpus driver had skipped every trace round -- 4,509,254 of Basic,
+   the blind spot where reviews 13 (MOVES not a T0 change of flow) and 14
+   (every exception entry armed a trace, the 68000/68020 rule) found their
+   defects. It now judges them: the stacked trace SR and PC, a round whose
+   result is the trace, a traced program run through each trace to its
+   terminal ILLEGAL, and any trace armed where the oracle has none.
+
+   State: Basic 658/658 over all 20,875,528 rounds -- the sequential core's
+   count -- with 0 wrong and 0 undecoded; only the 454,455 vector-only
+   rounds are unjudged, as in the sequential driver. 156 benches in both
+   builds.
+
+   Rules this bundle paid for: a sequencer that can raise an exception must
+   release the L1 port muxes once finished; an EA used after port C changes
+   meaning must be latched at issue; a hazard only adjacency can trigger is
+   untestable when decode's gather freezes with every stall, so it is left
+   out rather than kept as dead logic; and a driver snapshot taken at an
+   exception's verdict can predate an older instruction still in EX -- read
+   what the frame stacks.
+
    ### Milestone 107: the sequential core's EA classification, and Scc to memory
 
    The user's observation, and it was the right one: `ap040_core.v` is in this
