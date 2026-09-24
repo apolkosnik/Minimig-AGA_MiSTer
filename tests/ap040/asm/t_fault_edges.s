@@ -1,0 +1,262 @@
+; Access-fault edges the other programs leave unexercised. Every case runs
+; on both cores (tests/ap040/run_verilator.py and run_pipe_verilator.py).
+;
+;  1-5   An instruction whose EXTENSION word's fetch faults. The frame is the
+;        instruction's -- its PC -- and FA is the word that faulted, on the
+;        next page; the handler maps the page and RTE runs it again, whole.
+;        A pipelined core has already decoded the opcode by then, and must
+;        give up the instruction it was gathering rather than finish it with
+;        what the faulted fetch left behind.
+;  6-10  The same for the THIRD word of a three-word instruction.
+; 11-12  Code that ends exactly at a page end, with the next page invalid,
+;        runs and returns: fetching ahead into that page must not fault.
+; 13-17  A write refused with T1 set. The instruction does not complete, so it
+;        is not traced then; the handler's RTE runs it again, and it is traced
+;        once, after it has completed. Two traces in all: it, and the MOVE to
+;        SR that clears T. A pipelined core that abandons a store after the
+;        instruction has left for the stage that writes must also take back
+;        the trace it had armed as it left.
+; 18-23  A longword write crossing into a write-protected page. The 68040
+;        checks both pages before writing any byte, so the handler finds the
+;        first page untouched; the frame reports FA = the operand's first
+;        byte, MA (the second page refused it), a longword write.
+; 24-29  The same write with its data from a register instead of an
+;        immediate -- the other store route on a pipelined core.
+;
+; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
+; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
+
+FAILREG		equ	$F100
+DONEREG		equ	$F102
+cnt_aerr	equ	$3600
+cnt_trc		equ	$3602
+last_pc		equ	$3604
+last_fa		equ	$3608
+last_ssw	equ	$360C
+fix_addr	equ	$3610
+fix_val		equ	$3614
+pre_wr		equ	$3618		; ($CFFC).l as the access-error handler found it
+
+failt	macro
+	move.w	#\1,d7
+	bra	fail
+	endm
+
+chkl	macro
+	cmp.l	#\2,\1
+	beq.s	ok\@
+	failt	\3
+ok\@:
+	endm
+
+	org	0
+	dc.l	$3400,start
+	dc.l	h_aerr			; 2: access fault
+	rept	6
+	dc.l	unexpected		; 3-8
+	endr
+	dc.l	h_trace			; 9: trace
+	rept	246
+	dc.l	unexpected		; 10-255
+	endr
+
+	org	$400
+start:
+	move.w	#$2700,sr
+	clr.w	(cnt_aerr).l
+	clr.w	(cnt_trc).l
+
+;------------------------------------------------ 4K identity, $0-$3FFFF
+	lea	($4400).l,a0
+	moveq	#0,d0
+	moveq	#63,d1
+tloop:
+	move.l	d0,d2
+	lsl.l	#8,d2
+	lsl.l	#4,d2			; i << 12
+	addq.l	#3,d2			; resident
+	move.l	d2,(a0)+
+	addq.l	#1,d0
+	dbra	d1,tloop
+	move.l	#$00004203,($4000).l
+	move.l	#$00004403,($4200).l
+	move.l	#$4000,d0
+	movec	d0,urp
+	movec	d0,srp
+	move.l	#$8000,d0		; E=1, 4K pages
+	movec	d0,tc
+	pflusha
+
+;------------------------------------------ 1-5: the extension word faults
+	move.l	#$4420,(fix_addr).l	; page 8
+	move.l	#$8003,(fix_val).l
+	move.l	#0,($4420).l		; page 8 invalid
+	pflusha
+	moveq	#0,d0
+	jsr	($7FFE).l		; MOVE.L #$12345678,D0 with its immediate on page 8
+	chkl	d0,$12345678,1
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,1,2
+	move.l	(last_pc).l,d0
+	chkl	d0,$7FFE,3		; the instruction, not the word
+	move.l	(last_fa).l,d0
+	chkl	d0,$8000,4		; the word
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	and.l	#$FF9F,d0		; SIZE is how the core fetched: not judged
+	chkl	d0,$0506,5		; ATC + read + supervisor program
+
+;------------------------------------------ 6-10: the third word faults
+	move.l	#$442C,(fix_addr).l	; page B
+	move.l	#$B003,(fix_val).l
+	move.l	#0,($442C).l
+	pflusha
+	moveq	#0,d0
+	jsr	($AFFC).l		; MOVE.L #$9ABCDEF0,D0, its low word on page B
+	chkl	d0,$9ABCDEF0,6
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,2,7
+	move.l	(last_pc).l,d0
+	chkl	d0,$AFFC,8
+	move.l	(last_fa).l,d0
+	chkl	d0,$B000,9
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	and.l	#$FF9F,d0
+	chkl	d0,$0506,10
+
+;------------------------------------ 11-12: fetching ahead must not fault
+	move.l	#0,($4438).l		; page E invalid
+	pflusha
+	moveq	#0,d0
+	jsr	($DFF8).l		; MOVEQ #7,D0; NOP; NOP; RTS ending at $DFFF
+	chkl	d0,7,11
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,2,12			; no fault for the page never reached
+	move.l	#$E003,($4438).l
+	pflusha
+
+;--------------------------- 13-17: a refused write under T1 is traced once
+	move.l	#0,($9000).l
+	move.l	#$4424,(fix_addr).l	; page 9
+	move.l	#$9003,(fix_val).l
+	move.l	#$9007,($4424).l	; page 9 write-protected
+	pflusha
+	clr.w	(cnt_trc).l
+	move.w	#$A700,sr		; T1
+	move.l	#$DEADBEEF,($9000).l	; refused, restarted, then traced
+	move.w	#$2700,sr		; traced: T1 at its start
+	move.l	($9000).l,d0
+	chkl	d0,$DEADBEEF,13
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,3,14
+	moveq	#0,d0
+	move.w	(cnt_trc).l,d0
+	chkl	d0,2,15			; not a third, for the refused attempt
+	move.l	(last_fa).l,d0
+	chkl	d0,$9000,16
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0405,17		; ATC + long write + supervisor data
+
+;------------------------ 18-23: a crossing write refused by its second page
+	move.l	#0,($CFFC).l
+	move.l	#0,($D000).l
+	move.l	#$4434,(fix_addr).l	; page D
+	move.l	#$D003,(fix_val).l
+	move.l	#$D007,($4434).l	; page D write-protected
+	pflusha
+	move.l	#$11223344,($CFFE).l	; two bytes on page C, two on page D
+	move.l	(pre_wr).l,d0
+	chkl	d0,0,18			; nothing written before the fault
+	move.l	($CFFC).l,d0
+	chkl	d0,$00001122,19		; the restart wrote both pages
+	move.l	($D000).l,d0
+	chkl	d0,$33440000,20
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,4,21
+	move.l	(last_fa).l,d0
+	chkl	d0,$CFFE,22		; the operand's first byte
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0C05,23		; MA + ATC + long write + supervisor data
+
+;------------------------------- 24-29: the same, the data from a register
+	move.l	#0,($CFFC).l
+	move.l	#0,($D000).l
+	move.l	#$D007,($4434).l
+	pflusha
+	move.l	#$55667788,d1
+	move.l	d1,($CFFE).l
+	move.l	(pre_wr).l,d0
+	chkl	d0,0,24
+	move.l	($CFFC).l,d0
+	chkl	d0,$00005566,25
+	move.l	($D000).l,d0
+	chkl	d0,$77880000,26
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,5,27
+	move.l	(last_fa).l,d0
+	chkl	d0,$CFFE,28
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0C05,29
+
+	moveq	#0,d0
+	movec	d0,tc
+	pflusha
+	move.w	#$600D,(DONEREG).l
+	stop	#$2700
+
+fail:
+	move.w	d7,(FAILREG).l
+	move.w	#$BAD0,(DONEREG).l
+halt1:
+	bra.s	halt1
+
+unexpected:
+	move.w	#$00FF,(FAILREG).l
+	move.w	#$BAD0,(DONEREG).l
+halt2:
+	bra.s	halt2
+
+; The access error: record the frame, apply the test's fix, run it again.
+h_aerr:
+	movem.l	d0/a0,-(sp)
+	cmpi.w	#$7008,14(sp)		; format $7, vector 2
+	bne	unexpected
+	addq.w	#1,(cnt_aerr).l
+	move.l	10(sp),(last_pc).l
+	move.l	28(sp),(last_fa).l
+	move.w	20(sp),(last_ssw).l
+	move.l	($CFFC).l,(pre_wr).l
+	move.l	(fix_addr).l,a0
+	move.l	(fix_val).l,(a0)
+	pflusha
+	movem.l	(sp)+,d0/a0
+	rte
+
+h_trace:
+	addq.w	#1,(cnt_trc).l
+	rte
+
+; The code the tests call, placed against page boundaries.
+	org	$7FFE
+	move.l	#$12345678,d0		; opcode $7FFE, immediate $8000-$8003
+	rts				; $8004
+
+	org	$AFFC
+	move.l	#$9ABCDEF0,d0		; $AFFC, $AFFE, $B000
+	rts				; $B002
+
+	org	$DFF8
+	moveq	#7,d0			; $DFF8
+	nop				; $DFFA
+	nop				; $DFFC
+	rts				; $DFFE: the page ends here

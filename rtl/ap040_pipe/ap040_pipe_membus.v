@@ -177,6 +177,16 @@ reg        pf_stop;     // a speculative prefetch faulted: no more until a new r
 reg        pf_dem;
 reg        w_tent;      // the pending write has not passed translation yet
 reg        w_block;     // a tentative write faulted: take no write until the strobe drops
+// A tentative write passed while its requester was not presenting it (review
+// 16). The pass frees wr_busy for one clock, and the CPU, under ce, may not
+// be looking that clock: its instruction then went on waiting, the write
+// drained, and the strobe it still held was taken as a new write -- one
+// MOVE.L posted twice, which RAM forgives and a device register does not.
+// The receipt keeps the acceptance until the CPU next presents its write,
+// which is that same write: nothing can take the storing instruction away
+// while it waits for this (it is the oldest there is, EX and WB having
+// drained past it), so the strobe it shows next is the one that passed.
+reg        w_receipt;
 // A crossing transfer's bytes: which is next, and the last one's index.
 reg        b_x, w_x;
 reg  [1:0] b_bi, b_last, w_bi, w_last;
@@ -226,7 +236,7 @@ wire  [7:0] w_byte     = w_data[{w_bk, 3'b000} +: 8];
 // A crossing write is accepted when its second probe passes: from there on
 // it is posted like any other, and its bytes cannot be refused.
 wire   w_pass_now = w_pend && w_tent && ((busy && (who == WHO_BW) && mem_pass) || pb_pass2);
-assign wr_busy = w_block || (w_pend ? !w_pass_now : (wr_sync && wren_b));
+assign wr_busy = w_block || (!w_receipt && (w_pend ? !w_pass_now : (wr_sync && wren_b)));
 // The refusal is a level, not the one-clock pulse the MMU gives: the CPU
 // runs under ce and may not be looking that clock.
 assign wflt    = w_block;
@@ -283,7 +293,7 @@ wire        pend_fill  = a_pend && pf_app;
 wire [29:0] w_lo       = address_b[31:2];
 wire [29:0] w_hi       = w_lo + {29'd0, (size_b == `AP040_SZ_L) && (address_b[1:0] != 2'd0)} +
                          {29'd0, (size_b == `AP040_SZ_W) && (address_b[1:0] == 2'd3)};
-wire        w_accept   = wren_b && !w_pend && !w_block;
+wire        w_accept   = wren_b && !w_pend && !w_block && !w_receipt;
 // Distances into the window, modular like req_k: a window can span the top
 // of the address space, and ordered compares against pf_base + 4 missed
 // every write into one that did (review 15: a stream from $FFFFFFF8 kept
@@ -309,6 +319,7 @@ always @(posedge clk) begin
 		busy <= 1'b0; who <= WHO_A;
 		pf_base <= 30'd0; pf_cnt <= 3'd0; pf_out <= 1'b0; pf_kill <= 1'b0; pf_sup <= 1'b1;
 		pf_live <= 1'b0; pf_stop <= 1'b0; pf_dem <= 1'b0; w_tent <= 1'b0; w_block <= 1'b0;
+		w_receipt <= 1'b0;
 		rflt_a <= 1'b0; rflt_a_bus <= 1'b0; rflt_b <= 1'b0; flt_bus <= 1'b0; flt_ma <= 1'b0;
 		b_x <= 1'b0; w_x <= 1'b0; b_bi <= 2'd0; b_last <= 2'd0; w_bi <= 2'd0; w_last <= 2'd0;
 		b_acc <= 24'd0; w_pb <= 2'd0; pb_req <= 1'b0; pb_addr <= 32'd0;
@@ -324,7 +335,10 @@ always @(posedge clk) begin
 		mem_fc <= `AP040_FC_SUPER_PROG;
 	end else begin
 		if (wr_drop) w_block <= 1'b0;
-		if (w_pass_now) w_tent <= 1'b0;
+		if (w_pass_now) begin
+			w_tent    <= 1'b0;
+			w_receipt <= !wren_b;
+		end else if (wren_b) w_receipt <= 1'b0;   // consumed: wr_busy was low for it
 		// ---- the prefetch stream ----
 		// A prefetch arriving for the live window joins it.
 		if (pf_ack) begin

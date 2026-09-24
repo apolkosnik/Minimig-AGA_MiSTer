@@ -1170,7 +1170,11 @@ wire        fp_stall     = eac_valid && fp && !fp_fin && !trace_hold && !ae_busy
 wire        fp_start     = live && fp && !eaf_valid && !fp_active && !fp_fin && !fx_hold &&
                            !trace_hold && !ae_busy && !stall_in;
 wire        eac_is_fpexc = eac_valid && fp && fp_fin && fp_exc;
-wire        fp_clear     = flush || (fp_fin && !eaf_stall);
+// ...and an access fault on one of its transfers ends it (review 16): the
+// sequencer otherwise took the faulted return as data and ran on, and its
+// address outranks the frame's on port B, so the format $7 frame's first
+// beats went to the operand. The instruction is abandoned and restarts.
+wire        fp_clear     = flush || aerr_now || (fp_fin && !eaf_stall);
 
 // The interrupt arm (see irq_hold): sampled while nothing is held here and
 // as each instruction departs, so it is the verdict for the instruction
