@@ -134,11 +134,13 @@ task gen_fx;
 		bs = 0; is = 0; iis = 3'b000;
 		odsz = 1;
 		case (shape)
-		0, 1, 2: begin                 // A1 + Xn*s + bd
+		0, 1, 2: begin                 // A1 + Xn*s + bd, either sign
 			fx_reg = 1; bdsz = 1 + (rbits(32) % 3); r1 = rbits(9); bd = {r1[8:1], 1'b0};
+			if (rbits(1)) bd = -bd;
 		end
-		3: begin                       // A1 + bd, the index suppressed
+		3: begin                       // A1 + bd, the index suppressed, either sign
 			fx_reg = 1; is = 1; bdsz = 2 + rbits(1); r1 = rbits(10); bd = {r1[9:1], 1'b0};
+			if (rbits(1)) bd = -bd;
 		end
 		4, 5: begin                    // bd.L + Xn*s, the base suppressed
 			fx_reg = 1; bs = 1; bdsz = 3; r1 = rbits(10); bd = SCRATCH + {r1[9:1], 1'b0};
@@ -173,7 +175,11 @@ task gen_fx;
 			fx_reg = 0; sc = 2; bdsz = 1; bd = 0; odsz = 2 + rbits(1); iis = {1'b0, odsz[1:0]};
 		end
 		endcase
+		// Word displacements are sign-extended: both signs, and every address
+		// still inside the scratch region (A1 and the table's pointers sit
+		// well above its bottom).
 		r2 = rbits(8); od = {r2[7:1], 1'b0};
+		if (rbits(1)) od = -od;
 		fx_w[0] = {1'b0, xi[2:0], wl[0], sc[1:0], 1'b1, bs, is, bdsz[1:0], 1'b0, iis};
 		fx_n = 1;
 		put_disp(bdsz, bd);
