@@ -148,6 +148,8 @@ module ap040_ea_calc
 	input             id_is_rts,
 	input             id_is_nop,
 	input       [2:0] id_cinv,
+	input       [4:0] id_pmmu,
+	input       [5:0] id_fflt,
 	input             id_bnt,
 	input             id_is_rtr,
 	input             id_is_reset,
@@ -236,6 +238,8 @@ module ap040_ea_calc
 	output reg        eac_is_rts,
 	output reg        eac_is_nop,
 	output reg  [2:0] eac_cinv,
+	output reg  [4:0] eac_pmmu,
+	output reg  [5:0] eac_fflt,
 	output reg        eac_bnt,
 	output reg        eac_is_rtr,
 	output reg        eac_is_reset,
@@ -323,6 +327,8 @@ always @(posedge clk) begin
 		eac_is_rts       <= 1'b0;
 		eac_is_nop       <= 1'b0;
 		eac_cinv         <= 3'd0;
+		eac_pmmu         <= 5'd0;
+		eac_fflt         <= 6'd0;
 		eac_bnt          <= 1'b0;
 		eac_is_rtr       <= 1'b0;
 		eac_is_reset     <= 1'b0;
@@ -408,6 +414,8 @@ always @(posedge clk) begin
 			eac_is_rts       <= id_is_rts;
 			eac_is_nop       <= id_is_nop;
 			eac_cinv         <= id_cinv;
+			eac_pmmu         <= id_pmmu;
+			eac_fflt         <= id_fflt;
 			eac_bnt          <= id_bnt;
 			eac_is_rtr       <= id_is_rtr;
 			eac_is_reset     <= id_is_reset;

@@ -80,9 +80,16 @@ wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
-wire        l1_rflt_a, l1_rflt_b, l1_wflt, l1_flt_bus, l1_wr_sync;
+wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
+wire        pb_req;       // membus's write-permission probe, on the MMU's PTEST sideband
+wire [31:0] pb_addr;
+wire  [2:0] pb_fc;
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
 wire        mmu_flt;
+wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
+wire [31:0] pt_addr, pt_mmusr, pf_addr;
+wire  [2:0] pt_fc, pf_fc;
+wire  [1:0] pf_mode;
 wire        mm_req, mm_write, mm_instr, mm_ack;
 wire  [1:0] mm_size;
 wire [31:0] mm_addr, mm_wdata, mm_rdata;
@@ -111,8 +118,11 @@ ap040_pipe_cpu #(
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 	.l1_inval_a(l1_inval_a),
-	.l1_rflt_a(l1_rflt_a), .l1_rflt_b(l1_rflt_b), .l1_wflt(l1_wflt), .l1_flt_bus(l1_flt_bus),
-	.l1_wr_sync(l1_wr_sync),
+	.l1_rflt_a(l1_rflt_a), .l1_rflt_a_bus(l1_rflt_a_bus), .l1_rflt_b(l1_rflt_b), .l1_wflt(l1_wflt), .l1_flt_bus(l1_flt_bus),
+	.l1_flt_ma(l1_flt_ma), .l1_wr_sync(l1_wr_sync),
+	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
+	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr),
+	.pf_fc (pf_fc), .pf_done (pf_done),
 	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
 	.mmu_dtt0(mmu_dtt0), .mmu_dtt1(mmu_dtt1),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
@@ -153,7 +163,11 @@ ap040_pipe_membus u_bus
 	.mem_flt_bus(!mmu_flt && berr && clkena_in && mem_req),
 	.mem_pass (mm_req),
 	.wr_sync  (l1_wr_sync),
-	.rflt_a   (l1_rflt_a), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus)
+	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
+	.idle     (l1_idle), .quiesce (l1_quiet), .wr_drop (l1_wr_drop),
+	.xlat_e   (mmu_tc[15]), .xlat_p (mmu_tc[14]),
+	.pb_req   (pb_req), .pb_addr (pb_addr), .pb_fc (pb_fc), .pb_done (pt_done), .pb_mmusr (pt_mmusr),
+	.flt_ma   (l1_flt_ma)
 );
 
 // The MMU (2026-09-24): rtl/ap040/ap040_mmu.v, the sequential core's own,
@@ -168,9 +182,13 @@ ap040_mmu u_mmu
 	.c_req (mem_req), .c_write (mem_write), .c_instr (mem_instr), .c_size (mem_size),
 	.c_addr (mem_addr), .c_wdata (mem_wdata), .c_fc (mem_fc),
 	.c_ack (mem_ack), .c_rdata (mem_rdata), .c_flt (mmu_flt),
-	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
-	.pt_done (), .pt_mmusr (),
-	.pf_req (1'b0), .pf_mode (2'd0), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (),
+	// PTEST from the CPU, or membus's probe of a crossing write (never both:
+	// PTEST waits for the memory side to be idle, and a probe is a write
+	// still pending there). Each listens to pt_done only while it asks.
+	.pt_req (pt_req || pb_req), .pt_write (pb_req || pt_write), .pt_access (pb_req),
+	.pt_addr (pb_req ? pb_addr : pt_addr), .pt_fc (pb_req ? pb_fc : pt_fc),
+	.pt_done (pt_done), .pt_mmusr (pt_mmusr),
+	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.m_req (mm_req), .m_write (mm_write), .m_instr (mm_instr), .m_size (mm_size),
 	.m_addr (mm_addr), .m_wdata (mm_wdata), .m_fc (mm_fc),
 	.m_ack (mm_ack), .m_rdata (mm_rdata),

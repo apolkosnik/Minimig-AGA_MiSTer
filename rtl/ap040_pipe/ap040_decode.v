@@ -275,6 +275,12 @@ module ap040_decode
 	input             if_valid,
 	input      [31:0] if_pc,
 	input      [15:0] if_opcode,
+	// The fetch of this word faulted (2026-09-24). ap040_pipe_membus.v hands
+	// over ILLEGAL, $4AFC, in its place -- one word, no redirect, no gather
+	// -- so nothing here decodes the faulted fetch's stale data; if_flt_bus
+	// says it was a physical bus error rather than the MMU's refusal.
+	input             if_flt,
+	input             if_flt_bus,
 
 	output            id_stall,   // to IF: no local stall of its own yet
 
@@ -372,6 +378,11 @@ module ap040_decode
 	output reg        id_is_rts,
 	output reg        id_is_nop,       // T0 trace treats NOP as a change of flow (milestone 79)
 	output reg  [2:0] id_cinv,         // CINV/CPUSH: {valid, IC, DC}
+	output reg  [4:0] id_pmmu,         // PTEST/PFLUSH: {valid, PTEST, write, mode}
+	// An instruction whose fetch faulted: {valid, bus error, the faulted
+	// word's offset in words from id_pc}. It issues as the ILLEGAL it was
+	// handed, and EA-fetch takes the access error in its place.
+	output reg  [5:0] id_fflt,
 	output reg        id_bnt,          // a conditional branch predicted NOT taken (2026-09-24)
 	output reg        id_is_reset,     // RESET: privileged, nothing else (milestone 117)
 	output reg        id_is_rte,
@@ -2336,8 +2347,14 @@ wire is_aline = (if_opcode[15:12] == 4'hA);
 // has no caches of its own, so both are a refetch of what follows -- and an
 // emptied prefetch stream -- behind a privilege check.
 wire is_cinv  = (if_opcode[15:8] == 8'hF4) && (if_opcode[4:3] != 2'b00);
-wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16 && !is_fp && !is_cinv;
-wire is_illegal = !is_nop && !is_cinv && !is_xm && !is_trapv && !is_move_usp && !is_reset && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
+// PFLUSH (F500-F51F) and PTEST (F548-F54F write, F568-F56F read), for
+// rtl/ap040/ap040_mmu.v beside the bus (2026-09-24). The rest of PTEST's
+// quadrant stays F-line, classified ahead of privilege as ap040_core.v has it.
+wire is_pflush = (if_opcode[15:5] == 11'b1111_0101_000);
+wire is_ptest  = (if_opcode[15:8] == 8'hF5) && (if_opcode[7:6] == 2'b01) && (if_opcode[4:3] == 2'b01);
+wire is_pmmu   = is_pflush || is_ptest;
+wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16 && !is_fp && !is_cinv && !is_pmmu;
+wire is_illegal = !is_nop && !is_cinv && !is_pmmu && !is_xm && !is_trapv && !is_move_usp && !is_reset && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_muldiv_abs && !is_movea_abs && !is_mul_gather && !is_div_gather && !is_movea_gather && !is_adda_abs && !is_chk_gather && !is_quick_gx && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
@@ -2531,6 +2548,7 @@ wire       fp_extend = held_fp && held_fp_gen && held_fp_first && (fp_more != 3'
 // MOVE.
 reg         held_fx_seen, held_fx_dst, held_fx_bad, held_fx_tail;
 assign dec_holding = (ext_pending != 3'd0) || held_fx_tail;
+wire   gathering   = dec_holding;
 reg  [15:0] held_fx_ext;
 reg   [2:0] held_fx_left, held_fx_more;
 reg   [1:0] held_fx_bdw, held_fx_odw;
@@ -2599,7 +2617,7 @@ wire redirect_from_byte   = if_valid && ((is_branch_byte && !bnt_byte) || is_bsr
 // and the rest of the program never runs.
 // ... and only when the completing word is actually here (milestone 80): a
 // fetch bubble mid-gather must not redirect on a stale if_opcode.
-wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
+wire redirect_from_gather = if_valid && !if_flt && completing_gather && !held_is_move_disp && !held_is_alu_disp && !held_is_lea &&
                              !held_is_link && !held_is_movem && !held_is_jmp &&
                              !held_is_jsr && !held_is_movec && !held_is_imm &&
                              !held_is_abs && !held_is_stabs && !held_is_immsr && !held_st_disp &&
@@ -2788,6 +2806,8 @@ always @(posedge clk) begin
 		id_is_rts       <= 1'b0;
 		id_is_nop       <= 1'b0;
 		id_cinv         <= 3'd0;
+		id_pmmu         <= 5'd0;
+		id_fflt         <= 6'd0;
 		id_bnt          <= 1'b0;
 		id_is_reset     <= 1'b0;
 		id_is_rte       <= 1'b0;
@@ -2974,7 +2994,11 @@ always @(posedge clk) begin
 			ext_pending <= 3'd0;   // abandon any in-progress gather too
 			held_fx_tail <= 1'b0;
 		end else if (!stall_in && if_valid) begin
-			if (held_fx_tail) begin
+			id_fflt <= 6'd0;
+			// A faulted word is never an extension word: whatever the gather
+			// in progress was, the instruction is abandoned at it, and issues
+			// below as the fault -- see id_fflt.
+			if (held_fx_tail && !if_flt) begin
 				// A full-format EA's displacement words; the instruction was
 				// decoded at its extension word (see fx_* above).
 				fx_acc       <= {fx_acc[47:0], if_opcode};
@@ -2987,7 +3011,7 @@ always @(posedge clk) begin
 					id_fx_od     <= fx_od_now;
 					held_fx_tail <= 1'b0;
 				end
-			end else if (ext_pending != 3'd0) begin
+			end else if ((ext_pending != 3'd0) && !if_flt) begin
 				// Gathering: if_opcode is extension-word data, never a
 				// fresh opcode.
 				disp_acc <= {disp_acc[15:0], if_opcode};
@@ -3329,6 +3353,7 @@ always @(posedge clk) begin
 					id_is_rts       <= held_is_rtd;
 					id_is_nop       <= 1'b0;
 					id_cinv         <= 3'd0;
+					id_pmmu         <= 5'd0;
 					id_bnt          <= bnt_gather;
 					id_is_reset     <= 1'b0;
 					id_is_rte       <= 1'b0;
@@ -3399,6 +3424,7 @@ always @(posedge clk) begin
 						id_is_rts <= 1'd0;
 						id_is_nop <= 1'd0;
 						id_cinv         <= 3'd0;
+						id_pmmu         <= 5'd0;
 						id_is_reset <= 1'd0;
 						id_is_rte <= 1'd0;
 						id_is_rtr <= 1'd0;
@@ -3749,6 +3775,7 @@ always @(posedge clk) begin
 				// mem_complete path (id_is_mem_src below) instead of
 				// getting its own sequencer the way RTE needs.
 				id_src_reg      <= is_xm ? {1'b1, d_rn} :
+				                   is_pmmu ? {1'b1, d_rn} :
 				                   (is_move_usp && usp_to) ? {1'b1, d_rn} :
 				                   is_exg ? {!exg_dd, d_rn} :
 				                   is_tst_an ? {1'b1, d_rn} :
@@ -3919,6 +3946,7 @@ always @(posedge clk) begin
 				id_is_rts       <= if_valid && is_rts;
 				id_is_nop       <= if_valid && is_nop;
 				id_cinv         <= {if_valid && is_cinv, if_opcode[7:6]};
+				id_pmmu         <= {if_valid && is_pmmu, is_ptest, !if_opcode[5], if_opcode[4:3]};
 				id_bnt          <= if_valid && bnt_byte;
 				id_is_reset     <= if_valid && is_reset;
 				id_is_rte       <= if_valid && is_rte;
@@ -3930,6 +3958,15 @@ always @(posedge clk) begin
 				id_fp_cmd       <= 16'd0;
 				id_fp_imm       <= 96'd0;
 				id_fx           <= 6'd0;
+				// A fetch fault, as the ILLEGAL membus substituted: the
+				// instruction it belongs to starts where the gather did, if one
+				// was in progress, and the frame's fault address is this word.
+				id_fflt         <= {if_flt, if_flt_bus, gathering ? (if_pc[4:1] - held_pc[4:1]) : 4'd0};
+				if (if_flt && gathering) begin
+					id_pc        <= held_pc;
+					ext_pending  <= 3'd0;
+					held_fx_tail <= 1'b0;
+				end
 			end
 		end else if (!stall_in) begin
 			// A fetch bubble (milestone 80): the L1 has not returned the next

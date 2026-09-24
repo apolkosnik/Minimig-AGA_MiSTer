@@ -191,12 +191,28 @@ module ap040_pipe_cpu
 	// fetch or read faulted; the tentative write being presented faulted;
 	// and which kind it was (a physical bus error rather than the MMU).
 	input         l1_rflt_a,
+	input         l1_rflt_a_bus,  // ...the fetch's was a physical bus error
 	input         l1_rflt_b,
 	input         l1_wflt,
 	input         l1_flt_bus,
+	input         l1_flt_ma,    // ...past a page boundary a transfer crossed
 	output        l1_wr_sync,   // translation can refuse a data write now
 	// The MMU's registers, for rtl/ap040/ap040_mmu.v beside the bus.
 	output [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1,
+	// PTEST/PFLUSH, to the MMU's sidebands; the memory side's idle.
+	input         l1_idle,
+	output        l1_quiet,     // start no fetch: the MMU's registers or ATC are changing
+	output        l1_wr_drop,   // no write presented, in a ce cycle: a refusal has been seen
+	output        pt_req, pt_write,
+	output [31:0] pt_addr,
+	output  [2:0] pt_fc,
+	input         pt_done,
+	input  [31:0] pt_mmusr,
+	output        pf_req,
+	output  [1:0] pf_mode,
+	output [31:0] pf_addr,
+	output  [2:0] pf_fc,
+	input         pf_done,
 	input  [31:0] l1_q_b,
 	input         l1_rvalid_b,
 
@@ -277,6 +293,7 @@ wire  [3:0] ex_an_early_reg;
 wire [31:0] ex_an_early_data;
 wire  [1:0] ex_an_early_sel;
 wire        ex_st_sup;
+wire        ex_aerr;      // EX's store was refused: abandoned, and owed (ap040_ea_fetch.v)
 // A write to A7 that has not landed in the register file yet: one in EX
 // through either port, or one committing this cycle, whose value the file
 // only shows from the NEXT cycle. MOVEC counts twice over -- aux_we is its
@@ -356,6 +373,10 @@ wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
 wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr, eac_bnt;
 wire  [2:0] id_cinv, eac_cinv;
+wire  [4:0] id_pmmu, eac_pmmu;
+wire  [5:0] id_fflt, eac_fflt;
+wire        pm_mmusr_we;
+wire [31:0] pm_mmusr_val;
 wire        dec_holding, smc_hit;
 wire [31:0] dec_hold_pc;
 wire        eaf_refetch, ex_pf_inval;
@@ -534,6 +555,22 @@ always @(posedge clk) begin
 end
 assign dbg_commits = dbg_commit_count;
 wire commit_creg = exe_valid && exe_writes_creg;
+// A MOVEC to a translation register holds the memory side's fetches from
+// EA-fetch (eaf_mmu_quiet) until it has committed: in EX, and in the cycle
+// it writes. The first fetch after it -- its refetch -- is translated by
+// the new value.
+function mmu_creg;
+	input [3:0] sel;
+	begin
+		mmu_creg = (sel == `AP040_CREG_TC)   || (sel == `AP040_CREG_URP)  || (sel == `AP040_CREG_SRP) ||
+		           (sel == `AP040_CREG_ITT0) || (sel == `AP040_CREG_ITT1) ||
+		           (sel == `AP040_CREG_DTT0) || (sel == `AP040_CREG_DTT1);
+	end
+endfunction
+wire eaf_mmu_quiet;
+assign l1_quiet = eaf_mmu_quiet ||
+                  (eaf_valid && eaf_is_movec && eaf_movec_dir && mmu_creg(eaf_movec_sel)) ||
+                  (commit_creg && mmu_creg(exe_creg_sel));
 
 // Architectural SR (milestone 15: widened from a bare 5-bit CCR to the real
 // 16-bit register -- T1/T0/S/M/-/IPL/-/-/-/CCR, AP040_SR_RESET's own
@@ -668,6 +705,9 @@ always @(posedge clk) begin
 			default: ;   // USP/ISP/MSP route through the regfile's aux port instead
 		endcase
 	end
+	// PTEST's result (2026-09-24). It comes from EA-fetch, younger than any
+	// MOVEC committing in the same cycle, so it is applied after.
+	if (nreset && ce && pm_mmusr_we) mmusr <= pm_mmusr_val;
 end
 
 assign mmu_tc = tc;     assign mmu_urp = urp;   assign mmu_srp = srp;
@@ -848,6 +888,7 @@ assign l1_addr_b = rv_active ? {29'd0, (rv_ph == RV_PC), 2'b00} : ex_st_req ? ex
 // accepted one store 134 times that way. en_a needs no gate here --
 // ap040_inst_fetch.v already builds it from ce.
 assign l1_wren_b = ce && !rv_active && (ex_st_req ? 1'b1  : eaf_l1_wren_b);
+assign l1_wr_drop = ce && !(!rv_active && (ex_st_req || eaf_l1_wren_b));
 assign l1_size_b   = rv_active ? `AP040_SZ_L : ex_st_req ? ex_st_size : eaf_l1_size_b;
 assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 
@@ -901,6 +942,9 @@ ap040_decode u_id
 	.if_valid        (if_valid_id),
 	.if_pc           (if_pc),
 	.if_opcode       (if_opcode),
+	// The fetch fault travels with its word: l1_rdata_a is if_opcode itself.
+	.if_flt          (l1_rflt_a),
+	.if_flt_bus      (l1_rflt_a_bus),
 
 	.id_stall        (id_stall),
 
@@ -985,6 +1029,8 @@ ap040_decode u_id
 	.id_is_rts       (id_is_rts),
 	.id_is_nop       (id_is_nop),
 	.id_cinv         (id_cinv),
+	.id_pmmu         (id_pmmu),
+	.id_fflt         (id_fflt),
 	.id_bnt          (id_bnt),
 	.id_is_rtr       (id_is_rtr),
 	.id_is_reset     (id_is_reset),
@@ -1076,6 +1122,8 @@ ap040_ea_calc u_eac
 	.id_is_rts        (id_is_rts),
 	.id_is_nop        (id_is_nop),
 	.id_cinv          (id_cinv),
+	.id_pmmu          (id_pmmu),
+	.id_fflt          (id_fflt),
 	.id_bnt           (id_bnt),
 	.id_is_rtr        (id_is_rtr),
 	.id_is_reset      (id_is_reset),
@@ -1160,6 +1208,8 @@ ap040_ea_calc u_eac
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
 	.eac_cinv         (eac_cinv),
+	.eac_pmmu         (eac_pmmu),
+	.eac_fflt         (eac_fflt),
 	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
@@ -1285,7 +1335,23 @@ ap040_ea_fetch #(
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
 	.eac_cinv         (eac_cinv),
+	.eac_pmmu         (eac_pmmu),
+	.eac_fflt         (eac_fflt),
+	.mem_idle         (l1_idle),
+	.mmu_quiet        (eaf_mmu_quiet),
+	.pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
+	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .mmusr_we (pm_mmusr_we), .mmusr_val (pm_mmusr_val),
+	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.smc_hit          (smc_hit),
+	.l1_rflt_b        (l1_rflt_b),
+	.l1_wflt          (l1_wflt),
+	.l1_flt_bus       (l1_flt_bus),
+	.l1_flt_ma        (l1_flt_ma),
+	.ex_aerr          (ex_aerr),
+	.ex_st_addr       (ex_st_addr),
+	.ex_st_data       (ex_st_data),
+	.ex_st_size       (ex_st_size),
+	.ex_st_sup        (ex_st_sup),
 	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
@@ -1469,6 +1535,8 @@ ap040_execute u_ex
 	.eaf_div_signed   (eaf_div_signed),
 	.eaf_ea_target    (eaf_ea_target),
 	.l1_wr_busy       (l1_wr_busy),
+	.l1_wflt          (l1_wflt),
+	.ex_aerr          (ex_aerr),
 	.ex_ccr_fwd_valid (ex_ccr_fwd_valid),
 	.ex_br_resolve    (ex_br_resolve),
 	.ex_br_taken      (ex_br_taken),

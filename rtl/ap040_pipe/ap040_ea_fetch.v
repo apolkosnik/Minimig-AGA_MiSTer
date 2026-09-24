@@ -363,6 +363,39 @@ module ap040_ea_fetch
 	// test 192 rewrites the very next instruction while a divide keeps the
 	// fetch running ahead, and the 68040 program expects the new one to run.
 	input             smc_hit,
+	// Access faults (2026-09-24): the read this stage is waiting for came
+	// back faulted (with l1_rvalid_b); the write it is presenting was
+	// refused; and whether it was a physical bus error rather than the MMU.
+	input             l1_rflt_b,
+	// PTEST/PFLUSH (2026-09-24): decode's {valid, PTEST, write, mode}, and
+	// rtl/ap040/ap040_mmu.v's sidebands, driven once the memory side is idle.
+	input       [4:0] eac_pmmu,
+	input       [5:0] eac_fflt,   // its fetch faulted: {valid, bus error, word offset}
+	input             mem_idle,
+	// The MMU's view may change: no new fetch may start (see mc_stall).
+	output            mmu_quiet,
+	output            pt_req, pt_write,
+	output      [31:0] pt_addr,
+	output      [2:0] pt_fc,
+	input             pt_done,
+	input      [31:0] pt_mmusr,
+	output            mmusr_we,
+	output     [31:0] mmusr_val,
+	output            pf_req,
+	output      [1:0] pf_mode,
+	output     [31:0] pf_addr,
+	output      [2:0] pf_fc,
+	input             pf_done,
+	input             l1_wflt,
+	input             l1_flt_bus,
+	input             l1_flt_ma,   // the fault was past the boundary of a transfer crossing pages
+	// EX abandoned its instruction on a refused store (ap040_execute.v), with
+	// that store: the access error is owed to the instruction's next arrival.
+	input             ex_aerr,
+	input      [31:0] ex_st_addr,
+	input      [31:0] ex_st_data,
+	input       [1:0] ex_st_size,
+	input             ex_st_sup,
 	input             eac_bnt,
 	input             eac_is_rtr,
 	input             eac_is_reset,
@@ -662,7 +695,28 @@ wire        fx_src   = fx && !fx_dst;
 localparam [1:0] FXI_ADDR = 2'd0, FXI_RD = 2'd1, FXI_W = 2'd2, FXI_DONE = 2'd3;
 reg   [1:0] fxi_ph;
 reg  [31:0] fxi_addr, fxi_ea;
-wire        fx_hold   = eac_valid && fx && fx_ind && (fxi_ph != FXI_DONE);
+// MOVEM restarted from a format-$7 frame (2026-09-24). A fault on a MOVEM
+// transfer sets the SSW's CM and stacks the instruction's first address in
+// the frame's EA field; the RTE that returns to it, seeing CM, has the MOVEM
+// start from that address rather than work its EA out again -- which a
+// MOVEM that has overwritten its own pointer, or its index register, cannot
+// (MC68040UM 8.4.6.5; ap040_core.v's mm_resume). The RTE pops its frame as
+// ever; as it departs, cmr reads the popped frame's SSW and, with CM set,
+// its EA, from the stack it has just left, holding the instruction behind
+// it until it knows. That instruction's accesses and interrupts wait for
+// the answer, and a resumed MOVEM goes before a pending interrupt.
+localparam [1:0] CMR_IDLE = 2'd0, CMR_SSW = 2'd1, CMR_EA = 2'd2;
+reg   [1:0] cmr_ph;
+reg         cmr_pend;     // its read is in flight
+reg  [31:0] cmr_base;     // the popped frame
+reg         cm_resume;    // the next MOVEM starts at cm_ea
+reg  [31:0] cm_ea;
+reg  [31:0] mvm_ea0;      // this MOVEM's first address: the frame's EA with CM
+wire        cmr_busy  = (cmr_ph != CMR_IDLE);
+wire        cmr_ld_go = cmr_busy && !cmr_pend && !port_taken && !stall_in && !flush;
+wire [31:0] cmr_addr  = cmr_base + ((cmr_ph == CMR_SSW) ? 32'd12 : 32'd8);
+wire        cm_use    = cm_resume && eac_is_movem;
+wire        fx_hold   = eac_valid && fx && fx_ind && (fxi_ph != FXI_DONE) && !cm_use;
 wire        fx_hold_go = fx_hold && !trace_hold && !ae_busy;
 wire        fxi_rd    = (fxi_ph == FXI_RD);
 wire        fxi_ld_go = fx_hold_go && fxi_rd && live && !port_taken && !stall_in;
@@ -835,6 +889,18 @@ wire [31:0] mvm_st_addr  = mvm_addr - mvm_step;
 wire        mvm_base_self = mvm_down && (mvm_reg == eac_src_reg);
 wire [31:0] mvm_cur_addr = mvm_down ? mvm_st_addr : mvm_addr;
 wire [31:0] mvm_nxt_addr = mvm_down ? mvm_st_addr : (mvm_addr + mvm_step);
+// Three bases, or the resumed one (cm_use). $xxx.W is the sign-extended low
+// half alone. (d16,PC)'s base is the address of the DISPLACEMENT word,
+// which for MOVEM is PC+4 -- the mask word sits between the opcode and the
+// displacement, unlike every other PC-relative mode, where the base is
+// PC+2. eac_imm is already the EA: sign-extended for a displacement or
+// $xxx.W, all 32 bits for $xxx.L, zero for the modes with none; the indexed
+// modes (milestone 115) start from ea_target.
+wire [31:0] mvm_start    = cm_use          ? cm_ea :
+                           eac_ea_indexed  ? ea_target :
+                           eac_movem_abs   ? eac_imm :
+                           eac_movem_pcrel ? (eac_pc + 32'd4 + eac_imm) :
+                                             (operand_a + eac_imm);
 
 // Wanting the port and getting it are separate, the same split exc_writing
 // and exc_beat_ack already use: wren_b is asserted while the request
@@ -1124,6 +1190,13 @@ wire        fp_clear     = flush || (fp_fin && !eaf_stall);
 // on the exception decision, which the milestone-88 rule keeps registered.
 reg  irq_recheck;
 wire sr_wr_depart = eac_valid && !eaf_stall && (eac_is_movesr || (eac_is_immsr && eac_immsr_to_sr));
+// ...and every SR write refetches what follows it (2026-09-24): the words
+// behind it were fetched under its privilege, and clearing S makes the next
+// fetch the user's -- through URP, in user program space (t_mmu.s tests
+// 39-40: the supervisor view of the next word was ILLEGAL, and ran). The
+// refetch goes out while the write is in EX, where sr_resolved already
+// forwards it to the fetch's privilege. STOP redirects on its own.
+wire sr_wr_refetch = eac_is_movesr || (eac_is_immsr && eac_immsr_to_sr && !eac_is_stop);
 always @(posedge clk)
 	if (!nreset) begin irq_arm <= 1'b0; irq_recheck <= 1'b0; end
 	else if (ce) begin
@@ -1283,7 +1356,7 @@ wire [31:0] rte_pc_now = {ret_dword0[15:0], l1_q_b[31:16]};
 // The nibble is read here rather than through fmterr_now because that
 // wire is built further down and this file keeps declarations ahead of use.
 wire rte_fmt_now_ok  = (l1_q_b[15:12] == 4'h0) || (l1_q_b[15:12] == 4'h2) ||
-                       (l1_q_b[15:12] == 4'h3);
+                       (l1_q_b[15:12] == 4'h3) || (l1_q_b[15:12] == 4'h7);
 // An RTE with an odd restored PC faults AFTER it has finished, not instead
 // of finishing (milestone 100). It restores the status register and pops
 // its frame first, so the error frame carries the RESTORED status register
@@ -1478,7 +1551,11 @@ wire ae_hold         = eac_valid && ae_arm;
 // then removed: with the requests and the address update gated, no mutation
 // and none of the review's twenty-eight scenarios could tell whether it was
 // there, for a store, a MOVEM, an ILLEGAL or a plain MOVEQ target alike.
-wire ae_busy         = eac_valid && ae_susp;
+// ...and once an access error is latched, for the same reason: the
+// instruction is abandoned, and a store still wanted went out again in the
+// middle of its frame -- tentative under TC.E, so wr_stall held it at the
+// vector read and the entry never departed (t_moves_fc.s test 3).
+wire ae_busy         = eac_valid && (ae_susp || owe_hit || exc_pend_aerr || cmr_busy);
 wire ae_take         = ae_hold && !eaf_valid && !wb_busy && !stall_in;
 wire addrerr_now     = (live && (eac_is_jmp_odd || eac_is_jsr_odd || eac_is_br_odd ||
                                  eac_is_rts_odd)) || ae_take || vecodd_pend;
@@ -1523,13 +1600,13 @@ wire [31:0] addrerr_pc_live = vecodd_pend    ? vecodd_pc_r :
 // have raised: that instruction's CHK or zero-divide verdict is computed
 // while it waits (tb_ap040_pipe_irqdual.v's DIVU.W by zero behind the mask
 // drop pushed a twelve-byte frame for the interrupt).
-wire eac_is_fmt2     = !eac_is_irq &&
+wire eac_is_fmt2     = !eac_is_irq && !eac_is_aerr &&
                       (eac_is_addrerr || eac_is_divzero || eac_is_chk_trap ||
                        eac_is_trapcc_trap || eac_is_trace ||
                        (eac_is_fpexc && (fp_exc_fmt != 2'd0)));
 // Format $3, the FPU's post-instruction frame: format $2's shape, its own
 // nibble, and only when the FPU's is the exception being taken.
-wire eac_is_fmt3     = eac_is_fpexc && (fp_exc_fmt == 2'd3) && !eac_is_trace && !eac_is_irq && !eac_is_addrerr;
+wire eac_is_fmt3     = eac_is_fpexc && (fp_exc_fmt == 2'd3) && !eac_is_trace && !eac_is_irq && !eac_is_addrerr && !eac_is_aerr;
 
 // The L1 always returns a full longword on port B (address_b is the HIGH
 // word, the low word implicitly address_b+1), so a sized load is a lane
@@ -1604,6 +1681,63 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // did not need to, while one missing would compute its address from a
 // stale register (the Verilator check below reports any that touches
 // port B).
+// PTEST/PFLUSH (2026-09-24). Once EX, WB and the memory side are quiet --
+// ap040_core.v flushes its queue and waits for the port -- the request goes
+// to the MMU with An and DFC and is held until it is done; PTEST's MMUSR is
+// then written, and the instruction retires with a refetch, as ap040_core.v
+// flushes its prefetch: what was fetched behind it went through the old
+// translation. The MMU's done is one clock long and this stage runs under
+// ce, so it is caught outside ce.
+wire       pm       = eac_pmmu[4];
+wire       pm_ptest = eac_pmmu[3];
+localparam [1:0] PM_IDLE = 2'd0, PM_REQ = 2'd1, PM_DONE = 2'd2;
+reg  [1:0] pm_ph;
+reg [31:0] pm_addr;
+reg        pm_ack;
+reg [31:0] pm_mmusr;
+wire       pm_start = live && pm && (pm_ph == PM_IDLE) && !eaf_valid && !wb_busy && mem_idle &&
+                      !trace_hold && !exc_active && !hold_hazard;
+wire       pm_fin   = pm && (pm_ph == PM_DONE);
+wire       pm_stall = eac_valid && pm && !pm_fin && !trace_hold && !exc_active;
+// MOVEC to a translation register -- TC, URP, SRP, ITTx, DTTx -- waits the
+// same way, then retires with the same refetch (2026-09-24). The MMU
+// translates each transaction as its registers stand while that transaction
+// is on the bus, and a new TC arriving in the middle of one had it walk the
+// tables with the bus still running the access it had just passed
+// (t_atcprobe.s, t_bitfield_cache.s): the older instructions' writes go out
+// first, under the old translation, and nothing more starts until the
+// write has committed. mmu_quiet tells the memory side not to start a
+// fetch while either instruction is here; ap040_pipe_cpu.v carries it on
+// through the MOVEC's EX and commit cycles.
+wire       mc_sel   = (eac_imm[3:0] == `AP040_CREG_TC)   || (eac_imm[3:0] == `AP040_CREG_URP) ||
+                      (eac_imm[3:0] == `AP040_CREG_SRP)  || (eac_imm[3:0] == `AP040_CREG_ITT0) ||
+                      (eac_imm[3:0] == `AP040_CREG_ITT1) || (eac_imm[3:0] == `AP040_CREG_DTT0) ||
+                      (eac_imm[3:0] == `AP040_CREG_DTT1);
+wire       mc       = eac_is_movec && eac_imm[4] && mc_sel;
+wire       mc_stall = eac_valid && mc && (eaf_valid || wb_busy || !mem_idle) && !trace_hold && !exc_active;
+assign     mmu_quiet = eac_valid && (pm || mc);
+always @(posedge clk)
+	if (!nreset) begin pm_ack <= 1'b0; pm_mmusr <= 32'd0; end
+	else if (pm_ph != PM_REQ) pm_ack <= 1'b0;
+	else if (pm_ptest ? pt_done : pf_done) begin pm_ack <= 1'b1; pm_mmusr <= pt_mmusr; end
+always @(posedge clk)
+	if (!nreset) begin pm_ph <= PM_IDLE; pm_addr <= 32'd0; end
+	else if (ce) begin
+		if (flush || (eac_valid && !eaf_stall)) pm_ph <= PM_IDLE;
+		else if (pm_start) begin pm_ph <= PM_REQ; pm_addr <= operand_a; end
+		else if (pm_ph == PM_REQ && pm_ack) pm_ph <= PM_DONE;
+	end
+assign pt_req    = (pm_ph == PM_REQ) && pm_ptest && !pm_ack;
+assign pt_write  = eac_pmmu[2];
+assign pt_addr   = pm_addr;
+assign pt_fc     = dfc_in3;
+assign pf_req    = (pm_ph == PM_REQ) && !pm_ptest && !pm_ack;
+assign pf_mode   = eac_pmmu[1:0];
+assign pf_addr   = pm_addr;
+assign pf_fc     = dfc_in3;
+assign mmusr_we  = (pm_ph == PM_REQ) && pm_ptest && pm_ack;
+assign mmusr_val = pm_mmusr;
+
 // The store snoop, kept until the instruction departs: MOVEM's beats span
 // cycles, and the refetch belongs to the whole instruction.
 wire smc_now = smc_hit;
@@ -1660,6 +1794,7 @@ always @(posedge clk)
 wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
                       (live && fx_hold_go) ||                      // a full-format pointer read
                       (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
+                      (live && cmr_busy) ||                        // a format-$7 RTE's CM, being read
                       addr_hz ||                                   // an address from a long forward
                       trapcc_hz;                                   // TRAPcc behind a flag producer
 
@@ -1719,7 +1854,7 @@ reg       exc_vec_pending;
 // cycle -- see header for why the check couldn't happen any earlier.
 // The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
 // that is the whole difference between them at this level.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset || eac_cinv[2] ||
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset || eac_cinv[2] || eac_pmmu[4] ||
                             (eac_mvfsr[1] && !eac_mvfsr[0]) ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
@@ -1771,7 +1906,7 @@ reg        irq_arm;
 reg        exc_pend_irq;
 reg  [2:0] irq_lvl_r;
 reg        trace_carried;
-wire irq_hold     = eac_valid && irq_arm && !(trace_arm && trace_carried);
+wire irq_hold     = eac_valid && irq_arm && !(trace_arm && trace_carried) && !cmr_busy && !cm_resume;
 wire trace_hold   = trc_hold || irq_hold;   // an entry holds this instruction
 wire trace_take   = trc_hold && !irq_hold && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq;
 wire irq_take     = irq_hold && irq_pend && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq && !exc_pend_trace;
@@ -1780,7 +1915,7 @@ wire eac_is_irq   = irq_take || exc_pend_irq;
 wire [2:0] irq_lvl_now = exc_pend_irq ? irq_lvl_r : irq_take_lvl;
 assign irq_ack     = irq_take;
 assign irq_ack_nmi = irq_take && (irq_take_lvl == 3'd7);
-wire own_exc      = !trace_hold && !ae_hold;   // the held instruction's own faults are not taken
+wire own_exc      = !trace_hold && !ae_hold && !eac_is_aerr;   // the held instruction's own faults are not taken
 
 // T0, trace on change of flow (milestone 79). The arm is taken by the
 // instructions the 68040 defines as changes of flow: taken branches and
@@ -1851,7 +1986,74 @@ wire store_now    = eac_is_store && !trace_hold && !ae_busy && !moves_priv;
 // is held, and own_exc exists precisely to keep THAT instruction's faults
 // from being taken. The debt is the completed instruction's, not the held
 // one's (milestone 100).
-wire eac_is_exc    = eac_is_trace || eac_is_irq || ae_take ||
+// Access error (2026-09-24): a read or a write this instruction made was
+// refused by the MMU or ended in a physical bus error. The instruction is
+// abandoned -- none of its own effects commits -- and a format-$7 frame
+// stacks its own address, so the handler's RTE runs it again: the
+// sequential core's restart model (ap040_core.v's aerr_start). The fault
+// arrives for one cycle, so it is latched with everything the frame needs.
+// Only this stage's own accesses: a read is outstanding from l1_rd_b to the
+// first l1_rvalid_b, and a refused write is the one this stage presents.
+reg        rd_out;
+reg [31:0] rdq_a;
+reg  [1:0] rdq_sz;
+reg  [2:0] rdq_fc;
+reg        rdq_moves;
+wire       aerr_rd  = rd_out && l1_rvalid_b && l1_rflt_b && !cmr_pend;
+wire       aerr_wr  = l1_wflt && !port_taken;
+// ...or the instruction's own fetch: decode issued it as the ILLEGAL membus
+// put in the faulted word's place, marked. Taken where its ILLEGAL would
+// have been -- not while an older instruction's trace or entry holds it,
+// nor in a hold cycle -- and in that ILLEGAL's place: a faulted fetch is
+// only ever reported for an instruction the program has reached.
+wire       aerr_if  = eac_fflt[5] && !trace_hold && !ae_hold && !fx_hold && !hold_hazard;
+// ...or the store EX made for it, refused after it had left: EX abandoned
+// it and refetched it, and it is taken here, with that store's fault, when
+// the instruction arrives again (it is the first to: everything behind it
+// was flushed). Its own reads and writes are held off meanwhile -- ae_busy.
+reg        owe;
+reg [31:0] owe_pc, owe_fa, owe_wd;
+reg [15:0] owe_ssw;
+wire       owe_hit  = owe && (eac_pc == owe_pc);
+wire       aerr_ow  = owe_hit && !trace_hold && !ae_hold && !hold_hazard;
+wire       aerr_now = live && (aerr_rd || aerr_wr || aerr_if || aerr_ow);
+reg        exc_pend_aerr;
+always @(posedge clk)
+	if (!nreset) begin
+		rd_out <= 1'b0; rdq_a <= 32'd0; rdq_sz <= 2'd0; rdq_fc <= 3'd0; rdq_moves <= 1'b0;
+	end else if (ce) begin
+		if (flush) rd_out <= 1'b0;
+		else if (l1_rd_b) begin
+			rd_out    <= 1'b1;
+			rdq_a     <= l1_addr_b;
+			rdq_sz    <= l1_size_b;
+			rdq_fc    <= l1_fc_ovr ? l1_fc_val : {l1_sup_b, 2'b01};
+			rdq_moves <= eac_moves[2];
+		end else if (l1_rvalid_b) rd_out <= 1'b0;
+	end
+// The SSW (ap040_core.v's aerr_word, word $0C): CM/MA/LK are later; ATC is
+// clear only for a physical bus error; RW is 1 for a read; SIZE is B 01,
+// W 10, L 00; MOVES to a reserved space reports TT 10, and MOVES to program
+// space its function code with bit 0 set in place of bit 1.
+wire        aer_now_wr  = !aerr_rd;
+// A locked transfer -- TAS, CAS, CAS2 -- reports LK, with RW clear whichever
+// way it went (ap040_core.v's aer_lk, WinUAE's mmu_bus_error); MOVE16's
+// line reports SIZE 11 with TT 01, and its EA field the line.
+wire        aer_now_lk  = (eac_alu_op == `AP040_ALU_TAS) || cas || cas2;
+wire        aer_now_16  = m16_active;
+wire  [1:0] aer_now_sz  = aerr_rd ? rdq_sz : l1_size_b;
+wire  [2:0] aer_now_fc  = aerr_rd ? rdq_fc : (l1_fc_ovr ? l1_fc_val : {l1_sup_b, 2'b01});
+wire        aer_now_mv  = aerr_rd ? rdq_moves : eac_moves[2];
+wire  [1:0] aer_size_f  = (aer_now_sz == `AP040_SZ_B) ? 2'b01 : (aer_now_sz == `AP040_SZ_W) ? 2'b10 : 2'b00;
+wire  [1:0] aer_tt_f    = (aer_now_mv && (aer_now_fc == 3'd0 || aer_now_fc == 3'd3 ||
+                                          aer_now_fc == 3'd4 || aer_now_fc == 3'd7)) ? 2'b10 : 2'b00;
+wire  [2:0] aer_tm_f    = (aer_now_mv && (aer_now_fc == 3'd2 || aer_now_fc == 3'd6))
+                          ? {aer_now_fc[2], 2'b01} : aer_now_fc;
+wire       eac_is_aerr = aerr_now || exc_pend_aerr;
+reg [31:0] aer_fa, aer_wd;
+reg [31:0] aer_eaf;       // the EA field: the MOVEM's first address with CM, else FA
+reg [15:0] aer_ssw;
+wire eac_is_exc    = eac_is_aerr || eac_is_trace || eac_is_irq || ae_take ||
                      (own_exc && !fx_hold && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
                                   eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
                                   eac_is_fpexc));
@@ -1907,9 +2109,15 @@ reg [31:0] exc_sp_r;
 reg        exc_m2_r;
 reg        exc_pass2;
 reg [31:0] exc_isp8_r;
+// Format $7, the access error's thirty words: fifteen longword beats from
+// exc_f7_addr, which starts at the bank minus 60 and steps per beat.
+reg        exc_f7_r;
+reg  [3:0] exc_f7_beat;
+reg [31:0] exc_f7_addr;
 wire exc_writing   = exc_go && !exc_vec_pending &&
+                      (exc_f7_r ? (exc_ph != EXC_VECRD) :
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
-                       (exc_ph == EXC_BEAT2 && exc_fmt2_r));
+                       (exc_ph == EXC_BEAT2 && exc_fmt2_r)));
 // ...and not accepted at all if ap040_execute.v took the port this cycle:
 // the core's mux drops this stage's wren_b, so the beat never reached the
 // L1 and must be retried rather than counted.
@@ -1979,7 +2187,7 @@ wire ret_stall    = ret_active && (!ret_done || ret_f1_go);
 // MOVE.L (A0),D1 issued thirty-four reads and one TRAP pushed its frame
 // eighteen times. The earlier fix gated the ordinary store alone, which was
 // the reported symptom rather than the defect.
-assign l1_rd_b = fxi_ld_go || !stall_self &&
+assign l1_rd_b = fxi_ld_go || cmr_ld_go || !stall_self &&
                  (mem_issue || exc_vec_issue || ret_issue || mvm_ld_go || mvp_ld_go || bf_ld_go || ck_ld_go ||
                   m16_ld_go || c2_ld_go || fp_ld_go);
 
@@ -2005,7 +2213,11 @@ assign l1_rd_b = fxi_ld_go || !stall_self &&
 // being silently popped as $0.
 wire [3:0] ret_fmt      = l1_q_b[15:12];
 wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
-wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long || ((ret_fmt == 4'h1) && !ret_f1);
+// $7, the access error's frame (2026-09-24): sixty bytes, and the restart
+// is the stacked PC -- the faulted instruction runs again; nothing it
+// wrote back needs doing, the frame never marks a write-back valid.
+wire       ret_fmt7     = (ret_fmt == 4'h7);
+wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long || ret_fmt7 || ((ret_fmt == 4'h1) && !ret_f1);
 assign     ret_f1_go    = ret_done && !eac_is_rtr && !ret_f1 && (ret_fmt == 4'h1);
 wire [1:0] ret_bank2    = !ret_f1_sr[13] ? 2'd0 : ret_f1_sr[12] ? 2'd2 : 2'd1;
 assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second word is not a format
@@ -2018,7 +2230,7 @@ assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second wo
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
 assign eaf_stall = stall_in || hold_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall || ck_stall || m16_stall ||
-                   c2_stall || fp_stall ||
+                   c2_stall || fp_stall || pm_stall || mc_stall ||
                    (eac_valid && xm && !xm_have) ||
                    (trace_hold && !exc_active);   // waiting for EX/WB to drain before the trace entry
 assign raddr_a    = fp_active ? fp_rreg : mvm_st_want ? mvm_reg : eac_src_reg;
@@ -2140,7 +2352,9 @@ wire [31:0] exc_sp_bank    = exc_sp_r;
 // two subtracts of a constant sit off the path.
 wire [31:0] exc_sp_fmt0    = exc_sp_bank - 32'd8;
 wire [31:0] exc_sp_fmt2    = exc_sp_bank - 32'd12;
-wire [31:0] exc_new_sp     = exc_pass2  ? exc_isp8_r :
+wire [31:0] exc_sp_fmt7    = exc_sp_bank - 32'd60;
+wire [31:0] exc_new_sp     = exc_f7_r   ? exc_sp_fmt7 :
+                             exc_pass2  ? exc_isp8_r :
                              exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 // The status register as of the fault, with the flag effects the fault
 // ITSELF has, resolved once (milestone 95). It used to be built here for
@@ -2161,13 +2375,13 @@ wire [31:0] exc_new_sp     = exc_pass2  ? exc_isp8_r :
 // already had this exclusion. eac_is_addrerr stays true for the whole
 // entry (exc_pend_addrerr && exc_go), so the choice holds while the frame
 // is written.
-wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
+wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr && !eac_is_aerr)
                               ? {sr_in[15:3], ck_z, sr_in[1], ck_c} :
-                             (eac_is_chk_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
+                             (eac_is_chk_trap && !eac_is_trace && !eac_is_irq && !eac_is_addrerr && !eac_is_aerr)
                               ? {sr_in[15:4],
                                  (exc_pend_chk ? exc_pend_chk_n : chk_negative), sr_in[2:1],
                                  (exc_pend_chk ? exc_pend_chk_c : chk_c)}
-                              : (eac_is_divzero && !eac_is_trace && !eac_is_irq && !eac_is_addrerr)
+                              : (eac_is_divzero && !eac_is_trace && !eac_is_irq && !eac_is_addrerr && !eac_is_aerr)
                               ? {sr_in[15:1], 1'b0}
                               : sr_in;
 wire [15:0] exc_sr_word    = exc_pass2 ? (sr_faulted | 16'h2000) : sr_faulted;
@@ -2197,7 +2411,7 @@ wire [15:0] exc_sr_word    = exc_pass2 ? (sr_faulted | 16'h2000) : sr_faulted;
 // two words further on than any other mode, a JSR reads its own target,
 // an armed RTE reads the RTE's address -- so it is built once in
 // addrerr_pc_live above and latched with the verdict (milestone 100).
-wire [31:0] exc_pc_field   = (eac_is_trace || eac_is_irq) ? eac_pc :   // the instruction the handler returns to
+wire [31:0] exc_pc_field   = (eac_is_trace || eac_is_irq || eac_is_aerr) ? eac_pc :   // the instruction the handler returns to
                               eac_is_addrerr ? (exc_pend_addrerr ? exc_pend_ae_pc
                                                                  : addrerr_pc_live) :
                               eac_is_fpexc   ? fp_exc_pc :   // registers of ap040_pipe_fpu.v
@@ -2211,7 +2425,8 @@ wire [31:0] exc_pc_field   = (eac_is_trace || eac_is_irq) ? eac_pc :   // the in
 // stacked vector 8, both with the address error's own PC and address
 // fields. rte_odd_now already excludes eac_is_priv, so no instruction can
 // legitimately be both (milestone 109).
-wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
+wire  [7:0] exc_vec_num    = eac_is_aerr  ? 8'd2 :
+                              eac_is_trace ? 8'd9 :
                               eac_is_irq   ? {5'b00011, irq_lvl_now} :   // 24 + level: autovectored
                               eac_is_addrerr ? 8'd3 :
                               eac_is_fpexc   ? fp_exc_vec :
@@ -2230,7 +2445,7 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
-wire [15:0] exc_vecoff_word = {exc_pass2 ? 4'd1 : exc_fmt3_r ? 4'd3 : exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
+wire [15:0] exc_vecoff_word = {exc_f7_r ? 4'd7 : exc_pass2 ? 4'd1 : exc_fmt3_r ? 4'd3 : exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
 // Format $2's own extra "instruction address" longword. For an odd JMP/JSR
 // target it is the target itself, LSB cleared (ap040_core.v's own convention
 // for this field, identical for JMP and JSR despite their differing PC
@@ -2245,9 +2460,28 @@ wire [31:0] exc_addr_field = eac_is_trace   ? trace_pc :
 // low word, then the format/vector-offset word. Beat2 @ exc_new_sp+8
 // (format $2 only): the extra address field -- five/six 16-bit frame
 // words packed into two or three 32-bit L1 writes, see header.
-wire [31:0] exc_beat_addr = (exc_ph == EXC_BEAT2) ? (exc_new_sp + 32'd8) :
+wire [31:0] exc_beat_addr = exc_f7_r ? exc_f7_addr :
+                             (exc_ph == EXC_BEAT2) ? (exc_new_sp + 32'd8) :
                              (exc_ph == EXC_BEAT1) ? (exc_new_sp + 32'd4) : exc_new_sp;
-wire [31:0] exc_wdata     = (exc_ph == EXC_BEAT0) ? {exc_sr_word, exc_pc_field[31:16]} :
+// Format $7 (ap040_core.v's aerr_word): SR, PC, $7008, the effective
+// address (the fault address here), the SSW, three write-back statuses
+// all CLEAR -- the instruction is restarted, so an OS that completes
+// valid write-backs must find none -- the fault address, WB3A = the fault
+// address, WB3D = the data of a faulted write, and zeroes.
+reg  [31:0] f7_word;
+always @(*)
+	case (exc_f7_beat)
+	4'd0:    f7_word = {exc_sr_word, exc_pc_field[31:16]};
+	4'd1:    f7_word = {exc_pc_field[15:0], exc_vecoff_word};
+	4'd2:    f7_word = aer_eaf;
+	4'd3:    f7_word = {aer_ssw, 16'h0000};
+	4'd5:    f7_word = aer_fa;
+	4'd6:    f7_word = aer_fa;
+	4'd7:    f7_word = aer_wd;
+	default: f7_word = 32'h0;
+	endcase
+wire [31:0] exc_wdata     = exc_f7_r ? f7_word :
+                             (exc_ph == EXC_BEAT0) ? {exc_sr_word, exc_pc_field[31:16]} :
                              (exc_ph == EXC_BEAT1) ? {exc_pc_field[15:0], exc_vecoff_word} :
                                                        exc_addr_field;   // EXC_BEAT2
 
@@ -2275,7 +2509,8 @@ wire [31:0] ret_addr = ret_f1 ? ((ret_ph == RET_BEAT1) ? ret_base2_4 : ret_base2
 // the BSR/JSR PUSH address, an exception frame WRITE beat, the exception's
 // own vector-table READ, or RTE's own pop READ -- mutually exclusive by
 // construction (an instruction is never more than one of these at once).
-wire [31:0] l1_addr_word = fxi_rd       ? fxi_addr     :
+wire [31:0] l1_addr_word = cmr_busy     ? cmr_addr     :
+                            fxi_rd       ? fxi_addr     :
                             fp_active    ? fp_mem_addr  :
                             mvm_active   ? mvm_cur_addr :
                             mvp_active   ? mvp_addr     :
@@ -2317,7 +2552,11 @@ assign l1_addr_b = l1_addr_word;   // the byte address itself (milestone 81)
 // register does not work that way. The frame and MOVEM beats below carry
 // their own sequencer, which advances per accepted beat, so they post once
 // each without needing this.
-assign l1_wren_b = !stall_self &&
+// A refused write is withdrawn the cycle the refusal shows (aerr_wr): the
+// memory side holds the refusal until it sees no write presented, and the
+// access error's frame follows straight on -- a store, a MOVEM beat or a
+// MOVES held up into the frame's first beat left it held for ever.
+assign l1_wren_b = !stall_self && !aerr_wr &&
                    ((live && (eac_is_push || store_now)) || exc_writing || mvm_st_want || mvp_st_want ||
                     bf_st_want || m16_st_want || c2_st_want || fp_st_want);
 // The privilege this access carries (milestone 92). An exception's frame
@@ -2325,14 +2564,15 @@ assign l1_wren_b = !stall_self &&
 // instruction ran in, and the switch to supervisor has not committed while
 // they are happening -- so it cannot be read off the status register at the
 // far end of the bridge.
-assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
-assign l1_fc_ovr = eac_moves[2] && !exc_writing && !exc_vec_issue && !exc_vec_pending;
+assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending || cmr_busy;
+assign l1_fc_ovr = eac_moves[2] && !exc_writing && !exc_vec_issue && !exc_vec_pending && !cmr_busy;
 assign l1_fc_val = eac_is_store ? dfc_in3 : sfc_in3;
 // The size of whatever access l1_addr_word above selected, in the same
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops
 // -- is a Longword.
-assign l1_size_b = fxi_rd       ? `AP040_SZ_L :
+assign l1_size_b = cmr_busy     ? `AP040_SZ_L :
+                   fxi_rd       ? `AP040_SZ_L :
                    fp_active    ? fp_mem_size :
                    mvm_active   ? (mvm_word ? `AP040_SZ_W : `AP040_SZ_L) :
                    mvp_active   ? `AP040_SZ_B :
@@ -2536,6 +2776,16 @@ always @(posedge clk) begin
 		exc_m2_r        <= 1'b0;
 		exc_pass2       <= 1'b0;
 		exc_isp8_r      <= 32'd0;
+		exc_f7_r        <= 1'b0;
+		exc_f7_beat     <= 4'd0;
+		exc_f7_addr     <= 32'd0;
+		exc_pend_aerr   <= 1'b0;
+		owe <= 1'b0; owe_pc <= 32'd0; owe_fa <= 32'd0; owe_wd <= 32'd0; owe_ssw <= 16'd0;
+		cmr_ph <= CMR_IDLE; cmr_pend <= 1'b0; cmr_base <= 32'd0;
+		cm_resume <= 1'b0; cm_ea <= 32'd0; mvm_ea0 <= 32'd0; aer_eaf <= 32'd0;
+		aer_fa          <= 32'd0;
+		aer_wd          <= 32'd0;
+		aer_ssw         <= 16'h0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
 		ret_f1          <= 1'b0;
@@ -2567,6 +2817,9 @@ always @(posedge clk) begin
 				exc_m_r    <= sr_in[12];
 				exc_sp_r   <= exc_sp_live;
 				exc_m2_r   <= eac_is_irq && sr_in[12];
+				exc_f7_r    <= eac_is_aerr;
+				exc_f7_beat <= 4'd0;
+				exc_f7_addr <= exc_sp_live - 32'd60;
 				exc_isp8_r <= isp_in - 32'd8;
 			end
 		end
@@ -2658,6 +2911,70 @@ always @(posedge clk) begin
 		if (exc_vec_done && !stall_in)  exc_pend_fmterr <= 1'b0;
 		else if (fmterr_now && !exc_go) exc_pend_fmterr <= 1'b1;
 
+		// The access error: held with what the frame needs from the one
+		// cycle the fault is visible, and every sequencer the instruction
+		// had running stops -- their port-B muxing outranks the frame's.
+		// The format-$7 RTE's CM read (see cmr): armed as the RTE departs, in
+		// the output chain below, and not stopped by that departure's flush.
+		// The SSW is the high half of the longword at +12; CM is its bit 12.
+		if (cmr_ld_go) cmr_pend <= 1'b1;
+		else if (cmr_pend && l1_rvalid_b) begin
+			cmr_pend <= 1'b0;
+			if (cmr_ph == CMR_SSW) cmr_ph <= l1_q_b[28] ? CMR_EA : CMR_IDLE;
+			else begin
+				cm_ea     <= l1_q_b;
+				cm_resume <= 1'b1;
+				cmr_ph    <= CMR_IDLE;
+			end
+		end
+		// ...spent as the MOVEM it resumes departs -- until then an
+		// interrupt waits, or it was taken between the MOVEM's beats -- or by
+		// a fault it takes, whose frame carries it on. Anything else
+		// departing first was not the instruction that frame was for.
+		if ((aerr_now && !exc_pend_aerr) || (live && !eaf_stall)) cm_resume <= 1'b0;
+
+		// The access error EX owes this stage (see owe): set by the refusal,
+		// whose flush clears everything else here; spent when its entry
+		// ends, and dropped if anything else arrives first.
+		if (ex_aerr) begin
+			owe     <= 1'b1;
+			owe_pc  <= eaf_pc;
+			owe_fa  <= ex_st_addr;
+			owe_wd  <= ex_st_data;
+			owe_ssw <= {3'b000, 1'b0, l1_flt_ma, !l1_flt_bus,
+			            (eaf_alu_op == `AP040_ALU_TAS) || eaf_casf[4], 1'b0, 1'b0,
+			            (ex_st_size == `AP040_SZ_B) ? 2'b01 : (ex_st_size == `AP040_SZ_W) ? 2'b10 : 2'b00,
+			            2'b00, ex_st_sup, 2'b01};
+		end else if ((exc_vec_done && !stall_in) || (live && !owe_hit)) owe <= 1'b0;
+
+		if (exc_vec_done && !stall_in) exc_pend_aerr <= 1'b0;
+		else if (aerr_now && !exc_pend_aerr) begin
+			exc_pend_aerr <= 1'b1;
+			aer_fa  <= aerr_ow ? owe_fa : aerr_if ? (eac_pc + {27'd0, eac_fflt[3:0], 1'b0}) : aerr_rd ? rdq_a : l1_addr_b;
+			// CM: a MOVEM's own transfer faulted -- not its pointer read, which
+			// comes before mvm_active -- or a resumed one faulted before it
+			// could start (its fetch, say): that keeps the outer CM and EA.
+			aer_eaf <= mvm_active ? mvm_ea0 : cm_resume ? cm_ea :
+			           (aer_now_16 && !aerr_ow && !aerr_if) ? {(aerr_rd ? rdq_a[31:4] : l1_addr_b[31:4]), 4'd0} :
+			           aerr_ow ? owe_fa : aerr_if ? (eac_pc + {27'd0, eac_fflt[3:0], 1'b0}) : aerr_rd ? rdq_a : l1_addr_b;
+			aer_wd  <= aerr_ow ? owe_wd : (aerr_rd || aerr_if) ? 32'd0 : l1_data_b;
+			// A fetch: a longword read of program space under the privilege
+			// the instruction runs in, which is the one it was fetched under
+			// -- an SR write that changes it refetches what follows.
+			aer_ssw <= (aerr_ow ? owe_ssw :
+			            aerr_if ? {3'b000, 1'b0, 1'b0, !eac_fflt[4], 1'b0, 1'b1, 1'b0,
+			                       2'b00, 2'b00, sr_in[13], 2'b10}
+			                    : {3'b000, 1'b0, l1_flt_ma, !l1_flt_bus, aer_now_lk, !aer_now_wr && !aer_now_lk, 1'b0,
+			                       aer_now_16 ? 2'b11 : aer_size_f, aer_now_16 ? 2'b01 : aer_tt_f, aer_tm_f}) |
+			           {3'b000, mvm_active || cm_resume, 12'h000};
+			mvm_active <= 1'b0;
+			mvp_active <= 1'b0;
+			bf_active  <= 1'b0;
+			bf_ph      <= BF_EA;
+			ck_active  <= 1'b0;
+			m16_active <= 1'b0;
+			c2_active  <= 1'b0;
+		end
 		if (exc_vec_done)     exc_pend_trace <= 1'b0;
 		else if (trace_take)  exc_pend_trace <= 1'b1;
 		if (exc_vec_done)     exc_pend_irq <= 1'b0;
@@ -2671,6 +2988,12 @@ always @(posedge clk) begin
 		// write below can land in the same cycle as this one.
 		if (ex_br_resolve && trace_arm_cond) begin
 			trace_arm      <= ex_br_taken;
+			trace_arm_cond <= 1'b0;
+		end
+		// An instruction EX abandons did not complete, and owes no trace: it
+		// is run again, and traced then (see owe).
+		if (ex_aerr) begin
+			trace_arm      <= 1'b0;
 			trace_arm_cond <= 1'b0;
 		end
 
@@ -2694,6 +3017,7 @@ always @(posedge clk) begin
 			exc_pend_fmterr  <= 1'b0;
 			exc_pend_trace   <= 1'b0;
 			exc_pend_irq     <= 1'b0;
+			exc_pend_aerr    <= 1'b0;
 			// trace_arm is NOT cleared by a flush: the flush that follows a
 			// traced branch or a traced exception entry kills the wrong-path
 			// or unreached instruction here, and the trace is still owed to
@@ -2717,7 +3041,7 @@ always @(posedge clk) begin
 			// CINV/CPUSH, or a store that landed on an instruction already
 			// fetched behind this one (smc_seen). An exception entry
 			// redirects anyway.
-			eaf_refetch <= eac_valid && !eaf_stall && !exc_go && (eac_cinv[2] || smc_seen || smc_now);
+			eaf_refetch <= eac_valid && !eaf_stall && !exc_go && (eac_cinv[2] || pm || mc || sr_wr_refetch || smc_seen || smc_now);
 			if (hold_hazard) begin
 				// The bubble, and it has to come FIRST. Below mem_issue it
 				// set mem_pending for a read that stall_self had already
@@ -2924,10 +3248,8 @@ always @(posedge clk) begin
 					// none. The mask has its own field since milestone 73.
 					// ...and the indexed modes (milestone 115) start from
 					// ea_target; eac_pc_base carries the mask word's two bytes.
-					mvm_addr    <= eac_ea_indexed  ? ea_target :
-					               eac_movem_abs   ? eac_imm :
-					               eac_movem_pcrel ? (eac_pc + 32'd4 + eac_imm) :
-					                                 (operand_a + eac_imm);
+					mvm_addr    <= mvm_start;
+					mvm_ea0     <= mvm_start;
 					mvm_rd_pend <= 1'b0;
 					mvm_rd_reg  <= 4'h0;
 				end else if (mvm_ld_go) begin
@@ -2945,6 +3267,10 @@ always @(posedge clk) begin
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
 					mvm_addr    <= mvm_nxt_addr;
 				end
+			end else if (pm_stall || mc_stall) begin
+				// PTEST/PFLUSH at the MMU, or a MOVEC to it waiting for quiet
+				// (see their block); nothing goes to EX yet.
+				eaf_valid <= 1'b0;
 			end else if (fp_stall) begin
 				// The FPU sequencer has the instruction (see its block); eac_*
 				// frozen by fp_stall, nothing goes to EX until it finishes.
@@ -3140,7 +3466,11 @@ always @(posedge clk) begin
 				// $0 exception, so no separate check is needed once we're
 				// actually leaving beat 2.
 				eaf_valid <= 1'b0;
-				if (exc_beat_ack) begin
+				if (exc_beat_ack && exc_f7_r) begin
+					exc_f7_addr <= exc_f7_addr + 32'd4;
+					if (exc_f7_beat == 4'd14) exc_ph <= EXC_VECRD;
+					else exc_f7_beat <= exc_f7_beat + 4'd1;
+				end else if (exc_beat_ack) begin
 					case (exc_ph)
 						EXC_BEAT0: exc_ph <= EXC_BEAT1;
 						EXC_BEAT1: if (exc_m2_r && !exc_pass2) begin
@@ -3196,7 +3526,7 @@ always @(posedge clk) begin
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
 				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
-				                    eac_is_trace || eac_is_fpexc || eac_is_irq) ? 4'd15 : eac_dest_reg;
+				                    eac_is_trace || eac_is_fpexc || eac_is_irq || eac_is_aerr) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -3280,7 +3610,7 @@ always @(posedge clk) begin
 				// retiring (exc_reaching_ex), and this flag says nothing more. Without
 				// it the entry retired as an ordinary instruction and A7 took the
 				// handler's address, in the faulting instruction's own bank.
-				eaf_is_illegal <= ((eac_is_illegal || eac_is_fpexc) && own_exc) || eac_is_irq;
+				eaf_is_illegal <= ((eac_is_illegal || eac_is_fpexc) && own_exc) || eac_is_irq || eac_is_aerr;
 				eaf_is_priv    <= eac_is_priv && own_exc;
 				eaf_is_addrerr <= eac_is_addrerr && own_exc;
 				eaf_is_divzero <= eac_is_divzero && own_exc;
@@ -3382,6 +3712,12 @@ always @(posedge clk) begin
 				eaf_next_pc     <= eac_next_pc;
 				eaf_dest_reg    <= eac_dest_reg;   // already A7 -- unused for RTE's OWN write now, see below
 				eaf_operand_a   <= {ret_dword0[15:0], l1_q_b[31:16]};   // popped PC -> redirect target
+				// A format-$7 frame: its SSW, and with CM its EA (see cmr).
+				if (ret_fmt7 && !eac_is_rtr) begin
+					cmr_ph    <= CMR_SSW;
+					cmr_base  <= ret_f1 ? ret_base2 : operand_a;
+					cm_resume <= 1'b0;
+				end
 				// ...unless the PC it restores is odd (review 12, finding 2):
 				// the address error that return owes supersedes the trace, as
 				// ap040_core.v's S_RTE_FIN2 checks the PC before the traced
@@ -3400,7 +3736,7 @@ always @(posedge clk) begin
 				// does an RTE's, the frame carrying the popped CCR.
 				eaf_operand_b   <= eac_is_rtr ? (operand_a + (rte_pc_now[0] ? 32'd0 : 32'd6)) :
 				                   (ret_f1 ? ret_base2 : operand_a) +
-				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
+				                    (ret_fmt7 ? 32'd60 : ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 twelve bytes, $7 sixty
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;

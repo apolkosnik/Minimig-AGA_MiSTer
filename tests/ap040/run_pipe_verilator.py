@@ -30,19 +30,13 @@ CORE = [RTL / n for n in (
 # ones tests/ap040/run_verilator.py runs on the sequential core. REQUIRED
 # must each print ALL TESTS PASSED; OPEN run too and are reported with the
 # gap that holds them, so a known gap is visible on every run without
-# hiding a regression anywhere else. t_cache and bench_* are the
-# sequential core's no-cache exclusions as well (run_verilator.py): this
-# core has no internal caches.
-PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry"]
-PROGRAMS_OPEN = {
-    "t_exceptions":     "MOVES function codes, bus errors (format $7), PTEST",
-    "t_moves_fc":       "MOVES function codes on the bus",
-    "t_mmu":            "the MMU",
-    "t_bitfield_mmu":   "the MMU",
-    "t_bitfield_cache": "the MMU (PFLUSHA with TC.E set)",
-    "t_atcprobe":       "the MMU",
-    "t_movem_restart":  "the MMU and the format $7 MOVEM restart",
-}
+# hiding a regression anywhere else -- none is open since the MMU
+# (bundle 10). t_cache and bench_* are the sequential core's no-cache
+# exclusions as well (run_verilator.py): this core has no internal caches.
+PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
+                     "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
+                     "t_movem_restart"]
+PROGRAMS_OPEN = {}
 VASM = Path(os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"))
 
 

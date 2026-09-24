@@ -84,6 +84,14 @@ ap040_pipe_cpu #(
 	.l1_sup_b(l1_sup_b), .l1_sup_a(l1_sup_a),
 	.l1_size_b(l1_size_b), .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b(l1_q_b), .l1_rvalid_b(l1_rvalid_b),
+	.l1_inval_a(), .l1_fc_ovr(), .l1_fc_val(),
+	// no MMU and no bus errors behind this memory: nothing faults, the
+	// memory side is idle whenever PTEST would ask, and nothing answers one
+	.l1_rflt_a(1'b0), .l1_rflt_a_bus(1'b0), .l1_rflt_b(1'b0), .l1_wflt(1'b0), .l1_flt_bus(1'b0), .l1_flt_ma(1'b0),
+	.l1_wr_sync(), .l1_idle(1'b1), .l1_quiet(), .l1_wr_drop(),
+	.mmu_tc(), .mmu_urp(), .mmu_srp(), .mmu_itt0(), .mmu_itt1(), .mmu_dtt0(), .mmu_dtt1(),
+	.pt_req(), .pt_write(), .pt_addr(), .pt_fc(), .pt_done(1'b0), .pt_mmusr(32'd0),
+	.pf_req(), .pf_mode(), .pf_addr(), .pf_fc(), .pf_done(1'b0),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
 	.dbg_id_valid (dbg_id_valid),  .dbg_id_pc (dbg_id_pc),

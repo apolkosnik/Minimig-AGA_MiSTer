@@ -14,7 +14,12 @@
 //   $F120    writes must carry FC=1    $F130 w  DMA-style poke of $3500   //
 //   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N  //
 //   $F150 w  two devices: level, then a lower one after N cycles          //
-//   $F160 r  capability word (7: coarse and fine interrupts, bus errors)  //
+//   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has //
+//            been read, holding the handler's first fetch a few cycles (2) //
+//   $F160 r  capability word: 7, coarse and fine interrupts, bus errors;  //
+//            not bit 5 -- IPLDLY is calibrated to the sequential core's   //
+//            cycles for t_exceptions' test 136, which is bypassed here,  //
+//            and its rule (IPEND) is this bench's claim invariant below   //
 //   $F140/$F142/$F154/$F146: bus errors on a data cycle, re-armed, on a   //
 //            fetch at an address, and on the next table-walk descriptor   //
 //                                                                          //
@@ -23,11 +28,15 @@
 // Kept from the reference bench, on this core's own signals: the phantom- //
 // interrupt invariant (nothing accepted well after the level went idle)   //
 // and the mask invariant (a level 1-6 interrupt accepted at or below the  //
-// mask only on a claim it made while it qualified). Not kept, because     //
+// mask only on a claim it made while it qualified); and, added here, the   //
+// other half of that rule: a claim is not lost -- a request that         //
+// qualified and is still asserted is taken, whatever the mask does after. //
+// Not kept, because                                                       //
 // they name the sequential core's states: the exception-prefetch queue    //
 // invariant, the locked read-modify-write fetch window (this core has no  //
-// bus lock yet), the exception-cycle function-code checks (tb_ap040_pipe_ //
-// excfc.v covers those), and the stacking-time interrupt arming at $F144. //
+// bus lock yet), and the exception-cycle function-code checks (tb_ap040_  //
+// pipe_excfc.v covers those). $F144's two moments are this core's own:    //
+// a frame beat of vector 32, and vector 32's handler address arriving.    //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -66,6 +75,8 @@ wire        berr   = berr_d | fberr;
 wire        bus_clkena = (busstate == 2'b01) | mem_ready | berr;
 
 reg   [2:0] ipl_lvl;
+reg   [1:0] irq_exc_armed = 0;
+reg   [2:0] irq_fetch_stall = 0;
 reg  [15:0] ipl_delay = 0;
 reg   [7:0] ipl_pulse = 0;
 reg   [7:0] ipl_step  = 0;
@@ -155,6 +166,10 @@ always @(posedge clk) begin
 			else lat_cnt <= lat_cnt - 1'd1;
 		end
 	end
+	else if (irq_fetch_stall != 0 && busstate != 2'b01 && !mem_ready) begin
+		// keep the handler's first fetch outstanding while the level syncs
+		irq_fetch_stall <= irq_fetch_stall - 1'd1;
+	end
 	else if (busstate != 2'b01 && !mem_ready) begin
 		if (lat_cnt == 0) begin
 			mem_ready <= 1;
@@ -167,6 +182,17 @@ always @(posedge clk) begin
 	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF154) begin
 		fberr_armed <= |data_write;
 		fberr_addr  <= data_write;
+	end
+	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF144)
+		irq_exc_armed <= data_write[1:0];
+	else if (irq_exc_armed == 1 && dut.u_cpu.u_eaf.exc_writing && dut.u_cpu.u_eaf.exc_vec_r == 8'd32) begin
+		ipl_lvl <= 3'd2;
+		irq_exc_armed <= 0;
+	end
+	else if (irq_exc_armed == 2 && dut.u_cpu.u_eaf.exc_vec_done && dut.u_cpu.u_eaf.exc_vec_r == 8'd32) begin
+		ipl_lvl <= 3'd2;
+		irq_exc_armed <= 0;
+		irq_fetch_stall <= 3'd5;
 	end
 	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF148)
 		ipl_delay <= data_write;
@@ -254,6 +280,9 @@ end
 //---------------------------------------------------------------------------
 
 reg  [15:0] ipl_idle_for = 0;
+reg  [15:0] claim_age [1:6];
+integer    ca;
+initial for (ca = 1; ca <= 6; ca = ca + 1) claim_age[ca] = 0;
 reg   [6:1] tb_qual = 0;
 integer     ql;
 wire        acc     = dut.u_cpu.irq_ack;
@@ -264,7 +293,10 @@ always @(posedge clk) begin
 		for (ql = 1; ql <= 6; ql = ql + 1) begin
 			if (dut.u_cpu.u_irq.lvl < ql)
 				tb_qual[ql] <= 0;
-			else if (dut.u_cpu.u_irq.lvl == ql && ql > dut.u_cpu.sr[10:8])
+			// against the mask as it stands once an acceptance has raised it:
+			// the SR register only shows the entry's new mask when the entry
+			// retires, and a claim re-made in between is not one (u_irq's mask_c)
+			else if (dut.u_cpu.u_irq.lvl == ql && ql > dut.u_cpu.u_irq.mask_c)
 				tb_qual[ql] <= 1;
 		end
 		if (acc && acc_lvl != 3'd7 && acc_lvl != 3'd0) tb_qual[acc_lvl] <= 0;
@@ -273,6 +305,18 @@ always @(posedge clk) begin
 		if (ipl_idle_for != 16'hffff) ipl_idle_for <= ipl_idle_for + 1'd1;
 	end
 	else ipl_idle_for <= 0;
+	// A claim is honoured: level L qualified (tb_qual[L]) and is still what
+	// the core sees, so it is taken within a generous bound -- whatever the
+	// mask has done since. IPEND, t_exceptions' test 136, independent of
+	// where a request happens to land in an instruction.
+	for (ca = 1; ca <= 6; ca = ca + 1) begin
+		if (!nreset || !tb_qual[ca] || dut.u_cpu.u_irq.lvl != ca) claim_age[ca] <= 0;
+		else claim_age[ca] <= claim_age[ca] + 1'd1;
+		if (nreset && claim_age[ca] == 16'd400) begin
+			errors = errors + 1;
+			$display("FAIL: a qualified level %0d request is still not taken after 400 cycles (claim lost, pc=%h)", ca, dbg_pc);
+		end
+	end
 	if (nreset && acc && ipl_idle_for > 16'd12) begin
 		errors = errors + 1;
 		$display("FAIL: interrupt accepted %0d cycles after the level went idle (phantom)", ipl_idle_for);
@@ -354,12 +398,42 @@ always @(posedge clk)
 		         dut.u_cpu.dec_holding, dut.u_cpu.dec_hold_pc, dut.u_cpu.if_valid_id, dut.u_cpu.if_pc,
 		         dut.u_cpu.st_smc, dut.u_cpu.ex_stall);
 
+// +irqtrace: the interrupt input and its hold, every cycle a level is up or
+// the delayed request is counting.
+always @(posedge clk)
+	if ($test$plusargs("irqtrace") && nreset && (ipl_lvl != 0 || ipl_delay != 0))
+		$display("IRQ %0t pins=%0d dly=%0d lvl=%0d hold=%0d mask=%0d live=%0d pend=%b ack=%b eac=%h wb=%b/%h", $time,
+		         ipl_lvl, ipl_delay, dut.u_cpu.u_irq.lvl, dut.u_cpu.u_irq.hold, dut.u_cpu.sr[10:8],
+		         dut.u_cpu.sr_resolved_ea[10:8], dut.u_cpu.irq_pend, dut.u_cpu.irq_ack, dut.u_cpu.u_eaf.eac_pc,
+		         dut.u_cpu.dbg_wb_valid, dut.u_cpu.dbg_wb_pc);
+
 // +trace: every retirement, for a first look at where a program went.
 always @(posedge clk)
 	if ($test$plusargs("trace") && nreset && dut.u_cpu.dbg_wb_valid)
 		$display("TRACE %0t wb pc=%h sr=%h d0=%h d7=%h a7=%h", $time, dut.u_cpu.dbg_wb_pc,
 		         dut.u_cpu.sr, dut.u_cpu.u_regfile.dreg[0], dut.u_cpu.u_regfile.dreg[7],
 		         dut.u_cpu.u_regfile.isp);
+
+// +stagetrace=<first time in ps>: every stage, every cycle, for 400 cycles
+// from then -- where an instruction stopped, and what held it.
+reg [63:0] st_from = 0;
+integer    st_left = 400;
+initial if (!$value$plusargs("stagetrace=%d", st_from)) st_from = 0;
+always @(posedge clk)
+	if (st_from != 0 && nreset && $time >= st_from && st_left > 0) begin
+		st_left = st_left - 1;
+		$display("ST %0t id %b/%h eac %b/%h eaf %b/%h ex %b/%h wb %b/%h | stall ea %b ex %b hz %b busy %b wflt %b idle %b quiet %b pend a%b b%b w%b | bus %b%b %h ack %b flt %b rv_b %b/%b | exc go %b ph %0d vec %0d aerr %b/%b owe %b",
+		         $time, dut.u_cpu.id_valid, dut.u_cpu.u_id.id_pc, dut.u_cpu.eac_valid, dut.u_cpu.u_eaf.eac_pc,
+		         dut.u_cpu.u_eaf.eaf_valid, dut.u_cpu.u_eaf.eaf_pc, dut.u_cpu.exe_valid, dut.u_cpu.u_ex.exe_pc,
+		         dut.u_cpu.dbg_wb_valid, dut.u_cpu.dbg_wb_pc,
+		         dut.u_cpu.u_eaf.eaf_stall, dut.u_cpu.u_ex.ex_stall, dut.u_cpu.u_eaf.hold_hazard,
+		         dut.u_bus.busy, dut.l1_wflt, dut.l1_idle, dut.l1_quiet,
+		         dut.u_bus.a_pend, dut.u_bus.b_pend, dut.u_bus.w_pend,
+		         dut.u_bus.mem_req, dut.u_bus.mem_write, dut.u_bus.mem_addr, dut.u_bus.mem_ack, dut.u_bus.mem_flt,
+		         dut.u_bus.rvalid_b, dut.u_bus.rflt_b,
+		         dut.u_cpu.u_eaf.exc_go, dut.u_cpu.u_eaf.exc_ph, dut.u_cpu.u_eaf.exc_vec_r,
+		         dut.u_cpu.u_eaf.aerr_now, dut.u_cpu.u_eaf.exc_pend_aerr, dut.u_cpu.u_eaf.owe);
+	end
 
 //---------------------------------------------------------------------------
 // phase driver
@@ -370,7 +444,7 @@ integer timeout, i;
 task run_phase;
 	input integer ph;
 	begin
-		phase = ph; result = 0; ipl_lvl = 0; fberr_armed = 0;
+		phase = ph; result = 0; ipl_lvl = 0; fberr_armed = 0; irq_exc_armed = 0; irq_fetch_stall = 0;
 		for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 		prog_fd = $fopen(prog_file, "r");
 		if (prog_fd == 0) begin

@@ -105,9 +105,44 @@ module ap040_pipe_membus
 	// a write is then TENTATIVE until it passes, and wr_busy holds the
 	// storing instruction until it does, so a refusal is precise.
 	input             wr_sync,
-	output reg        rflt_a,       // with rvalid_a: the fetch faulted
+	// with rvalid_a: the fetch faulted. The word handed over is then $4AFC,
+	// ILLEGAL -- one word, no redirect, no gather -- so decode needs nothing
+	// of the faulted fetch's stale data; rflt_a_bus says the fault was a
+	// physical bus error rather than the MMU's.
+	output reg        rflt_a,
+	output reg        rflt_a_bus,
 	output reg        rflt_b,       // with rvalid_b: the read faulted
-	output reg        wflt,         // the tentative write being presented faulted
+	output            wflt,         // the tentative write being presented faulted (held until withdrawn)
+	output            idle,         // nothing on the bus, posted or waiting
+	// Start no fetch: the MMU's registers or ATC are about to change, and a
+	// fetch must be translated wholly before or wholly after. Writes and
+	// reads still go -- they are the older instructions', which must finish
+	// under the old translation.
+	input             quiesce,
+	// The requester has withdrawn its write, in a cycle it ran: the refusal
+	// has been seen. Not !wren_b, which the CPU gates with its ce -- a strobe
+	// left up through a disabled cycle is a write accepted twice (milestone
+	// 92) -- so a refusal cleared when wren_b dropped was gone after the
+	// first disabled cycle, before the CPU had looked, and the write went
+	// out again: re-refused by the MMU, and lost for good after a one-shot
+	// bus error.
+	input             wr_drop,
+	// Transfers that cross a page (2026-09-24). The MMU translates one
+	// address per transaction, so with translation on a transfer spanning
+	// two pages goes out a byte at a time, each through its own page, and a
+	// read's bytes are assembled; a fault past the boundary reports MA
+	// (flt_ma). A write is first probed on both pages -- the MMU's PTEST
+	// sideband as an access check (pb_*) -- and written only if both allow
+	// it: ap040_core.v's check_write, so a refused one has written nothing
+	// (an RMW restarted over a half-written operand would compute from it).
+	input             xlat_e,       // TC.E
+	input             xlat_p,       // TC.P: 8K pages
+	output reg        pb_req,
+	output reg [31:0] pb_addr,
+	output     [2:0]  pb_fc,
+	input             pb_done,
+	input      [31:0] pb_mmusr,
+	output reg        flt_ma,
 	output reg        flt_bus       // ...a physical bus error, not the MMU
 );
 
@@ -134,8 +169,19 @@ reg        pf_kill;     // ...for a window since emptied: drop it when it return
 reg        pf_sup;      // the privilege the stream was fetched under
 reg        pf_live;     // the fetch unit has asked for something since reset
 reg        pf_stop;     // a speculative prefetch faulted: no more until a new request
+// The read on the bus went out FOR a request -- the fetch unit's miss --
+// rather than ahead of one. Only such a read's fault is the fetch unit's:
+// a request that finds its longword already on the bus as a prefetch has
+// it re-issued if that prefetch faults, as the 68040 re-runs a faulted
+// prefetch at the point the word is needed (t_exceptions.s tests 138-141).
+reg        pf_dem;
 reg        w_tent;      // the pending write has not passed translation yet
 reg        w_block;     // a tentative write faulted: take no write until the strobe drops
+// A crossing transfer's bytes: which is next, and the last one's index.
+reg        b_x, w_x;
+reg  [1:0] b_bi, b_last, w_bi, w_last;
+reg [23:0] b_acc;       // the bytes read so far, right-aligned
+reg  [1:0] w_pb;        // the write's probe: page 1, page 2, or done (0)
 reg        b_pend;      // a data read is wanted and has not been returned
 reg [31:0] b_addr;
 reg  [1:0] b_size;
@@ -153,8 +199,38 @@ reg  [2:0] b_fc, w_fc;
 // A tentative write is not accepted when it is latched but when it passes:
 // busy in the cycle it first appears, busy until then, and free for the one
 // cycle the MMU forwards it -- the storing instruction's acceptance.
-wire   w_pass_now = w_pend && w_tent && busy && (who == WHO_BW) && mem_pass;
+// The page geometry, and whether a transfer of n bytes at an address
+// crosses out of its page.
+wire [12:0] pg_mask   = xlat_p ? 13'h1FFF : 13'h0FFF;
+wire [31:0] pg_mask32 = {19'd0, pg_mask};
+function crosses;
+	input [31:0] a;
+	input  [1:0] sz;
+	input [12:0] mask;
+	begin
+		crosses = ({1'b0, a[12:0] & mask} + ((sz == `AP040_SZ_L) ? 14'd4 : (sz == `AP040_SZ_W) ? 14'd2 : 14'd1)) >
+		          ({1'b0, mask} + 14'd1);
+	end
+endfunction
+function [1:0] last_of;   // the transfer's last byte index
+	input [1:0] sz;
+	begin
+		last_of = (sz == `AP040_SZ_L) ? 2'd3 : (sz == `AP040_SZ_W) ? 2'd1 : 2'd0;
+	end
+endfunction
+wire        pb_fail    = !pb_mmusr[0] || pb_mmusr[11] || pb_mmusr[2] || (!w_fc[2] && pb_mmusr[7]);
+wire        pb_pass2   = w_pend && w_x && (w_pb == 2'd2) && pb_req && pb_done && !pb_fail;
+assign      pb_fc      = w_fc;
+wire  [1:0] w_bk       = w_last - w_bi;              // byte k of the operand, from the top
+wire  [7:0] w_byte     = w_data[{w_bk, 3'b000} +: 8];
+// A crossing write is accepted when its second probe passes: from there on
+// it is posted like any other, and its bytes cannot be refused.
+wire   w_pass_now = w_pend && w_tent && ((busy && (who == WHO_BW) && mem_pass) || pb_pass2);
 assign wr_busy = w_block || (w_pend ? !w_pass_now : (wr_sync && wren_b));
+// The refusal is a level, not the one-clock pulse the MMU gives: the CPU
+// runs under ce and may not be looking that clock.
+assign wflt    = w_block;
+assign idle    = !busy && !w_pend && !b_pend;
 
 // Port B is sized (milestone 86), so address, size and data go out as they
 // arrive: ap040_bus16_adapter.v splits whatever alignment they have.
@@ -232,8 +308,10 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		busy <= 1'b0; who <= WHO_A;
 		pf_base <= 30'd0; pf_cnt <= 3'd0; pf_out <= 1'b0; pf_kill <= 1'b0; pf_sup <= 1'b1;
-		pf_live <= 1'b0; pf_stop <= 1'b0; w_tent <= 1'b0; w_block <= 1'b0;
-		rflt_a <= 1'b0; rflt_b <= 1'b0; wflt <= 1'b0; flt_bus <= 1'b0;
+		pf_live <= 1'b0; pf_stop <= 1'b0; pf_dem <= 1'b0; w_tent <= 1'b0; w_block <= 1'b0;
+		rflt_a <= 1'b0; rflt_a_bus <= 1'b0; rflt_b <= 1'b0; flt_bus <= 1'b0; flt_ma <= 1'b0;
+		b_x <= 1'b0; w_x <= 1'b0; b_bi <= 2'd0; b_last <= 2'd0; w_bi <= 2'd0; w_last <= 2'd0;
+		b_acc <= 24'd0; w_pb <= 2'd0; pb_req <= 1'b0; pb_addr <= 32'd0;
 		pf_q[0] <= 32'd0; pf_q[1] <= 32'd0; pf_q[2] <= 32'd0; pf_q[3] <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
@@ -245,8 +323,7 @@ always @(posedge clk) begin
 		mem_size <= `AP040_SZ_L; mem_addr <= 32'd0; mem_wdata <= 32'd0;
 		mem_fc <= `AP040_FC_SUPER_PROG;
 	end else begin
-		wflt <= 1'b0;
-		if (!wren_b) w_block <= 1'b0;
+		if (wr_drop) w_block <= 1'b0;
 		if (w_pass_now) w_tent <= 1'b0;
 		// ---- the prefetch stream ----
 		// A prefetch arriving for the live window joins it.
@@ -297,6 +374,10 @@ always @(posedge clk) begin
 		if (rd_b) begin
 			b_addr   <= address_b;
 			b_size   <= size_b;
+			b_x      <= xlat_e && crosses(address_b, size_b, pg_mask);
+			b_bi     <= 2'd0;
+			b_last   <= last_of(size_b);
+			b_acc    <= 24'd0;
 			b_fc     <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
@@ -305,6 +386,10 @@ always @(posedge clk) begin
 			w_addr <= address_b;
 			w_data <= data_b;
 			w_size <= size_b;
+			w_x    <= xlat_e && crosses(address_b, size_b, pg_mask);
+			w_pb   <= (xlat_e && crosses(address_b, size_b, pg_mask)) ? 2'd1 : 2'd0;
+			w_bi   <= 2'd0;
+			w_last <= last_of(size_b);
 			w_fc   <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
 			w_pend <= 1'b1;
 			w_tent <= wr_sync;
@@ -316,12 +401,15 @@ always @(posedge clk) begin
 			// whoever it was for is told. A demand fetch gets the fault with its
 			// valid; a speculative prefetch stops the stream -- the fetch unit
 			// asking for that longword later restarts it, and faults then, so a
-			// fault is only ever raised on a word the program needs. A write
+			// fault is only ever raised on a word the program needs. A request
+			// that joined a prefetch already on the bus is not a demand yet:
+			// it stays pending, and the read goes out again for it. A write
 			// already accepted (posted) has no instruction left to take it: that
 			// is only a physical bus error, and it is dropped (see the plan).
 			busy    <= 1'b0;
 			mem_req <= 1'b0;
 			flt_bus <= mem_flt_bus;
+			flt_ma  <= 1'b0;
 			case (who)
 			WHO_A: begin
 				// Nothing is left in flight to kill, whoever wanted it. A request
@@ -329,25 +417,27 @@ always @(posedge clk) begin
 				pf_out  <= 1'b0;
 				pf_kill <= 1'b0;
 				if (!pf_kill && !en_a) begin
-					if (a_pend) begin
-						rvalid_a <= 1'b1;
-						rflt_a   <= 1'b1;
-						a_pend   <= 1'b0;
-					end else pf_stop <= 1'b1;
+					if (a_pend && pf_dem) begin
+						q_a        <= 16'h4AFC;
+						rvalid_a   <= 1'b1;
+						rflt_a     <= 1'b1;
+						rflt_a_bus <= mem_flt_bus;
+						a_pend     <= 1'b0;
+						pf_stop    <= 1'b1;
+					end else if (!a_pend) pf_stop <= 1'b1;
 				end
 			end
 			WHO_BR: begin
 				rvalid_b <= 1'b1;
 				rflt_b   <= 1'b1;
 				b_pend   <= 1'b0;
+				// a crossing read's byte past the boundary: MA
+				flt_ma   <= b_x && ((mem_addr & ~pg_mask32) != (b_addr & ~pg_mask32));
 			end
 			default: begin   // WHO_BW
 				w_pend <= 1'b0;
 				w_tent <= 1'b0;
-				if (w_tent) begin
-					wflt    <= 1'b1;
-					w_block <= 1'b1;
-				end
+				if (w_tent) w_block <= 1'b1;
 			end
 			endcase
 		end else if (busy) begin
@@ -356,26 +446,53 @@ always @(posedge clk) begin
 				mem_req <= 1'b0;   // dropped in the ack cycle, per the contract
 				case (who)
 				WHO_A: ;   // the prefetch stream, above
-				WHO_BR: begin
-					q_b      <= mem_rdata;
+				WHO_BR: if (b_x && (b_bi != b_last)) begin
+					// a crossing read's byte, and more to come
+					b_acc    <= {b_acc[15:0], mem_rdata[7:0]};
+					b_bi     <= b_bi + 2'd1;
+				end else begin
+					q_b      <= b_x ? {b_acc, mem_rdata[7:0]} : mem_rdata;
 					rvalid_b <= 1'b1;
 					rflt_b   <= 1'b0;
 					b_pend   <= 1'b0;
 				end
-				default: w_pend <= 1'b0;   // WHO_BW
+				default: if (w_x && (w_bi != w_last)) w_bi <= w_bi + 2'd1;   // WHO_BW
+				         else w_pend <= 1'b0;
 				endcase
+			end
+		end else if (w_pend && w_x && (w_pb != 2'd0)) begin
+			// A crossing write's probes, page 1 then page 2, before any byte.
+			// The bus stays free; the MMU holds every transaction off while
+			// the probe is up. Refused: the write is withdrawn, as one the MMU
+			// refused on the bus, with MA if it was the second page.
+			if (!pb_req) begin
+				pb_req  <= 1'b1;
+				pb_addr <= (w_pb == 2'd1) ? w_addr : ((w_addr | pg_mask32) + 32'd1);
+			end else if (pb_done) begin
+				pb_req <= 1'b0;
+				if (pb_fail) begin
+					w_pend  <= 1'b0;
+					w_tent  <= 1'b0;
+					w_block <= 1'b1;
+					w_pb    <= 2'd0;
+					flt_bus <= 1'b0;
+					flt_ma  <= (w_pb == 2'd2);
+				end else w_pb <= (w_pb == 2'd1) ? 2'd2 : 2'd0;
 			end
 		end else if (w_pend && !(wren_b && !w_pend)) begin
 			busy      <= 1'b1;  who <= WHO_BW;
 			mem_req   <= 1'b1;  mem_write <= 1'b1;  mem_instr <= 1'b0;
-			mem_size  <= w_size; mem_addr <= w_addr; mem_wdata <= w_data;
+			mem_size  <= w_x ? `AP040_SZ_B : w_size;
+			mem_addr  <= w_x ? (w_addr + {30'd0, w_bi}) : w_addr;
+			mem_wdata <= w_x ? {24'd0, w_byte} : w_data;
 			mem_fc    <= w_fc;
 		end else if (b_pend) begin
 			busy      <= 1'b1;  who <= WHO_BR;
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
-			mem_size  <= b_size; mem_addr <= b_addr;
+			mem_size  <= b_x ? `AP040_SZ_B : b_size;
+			mem_addr  <= b_x ? (b_addr + {30'd0, b_bi}) : b_addr;
 			mem_fc    <= b_fc;
-		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf && !pf_inval && (!pf_stop || en_a)) begin
+		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
 			// The next longword of the stream, as the window stands after
 			// this cycle's request. Not before the first request (review 15):
 			// pf_base is zero out of reset, and a read of $0 the fetch unit
@@ -384,6 +501,7 @@ always @(posedge clk) begin
 			// acknowledges.
 			busy       <= 1'b1;  who <= WHO_A;
 			pf_out     <= 1'b1;
+			pf_dem     <= en_a ? !req_hit : a_pend;
 			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;
 			mem_size   <= `AP040_SZ_L; mem_addr <= {pf_issue_lw, 2'b00};
 			mem_fc     <= fc_of(1'b1, pf_issue_sp);

@@ -226,6 +226,13 @@ module ap040_execute
 	input       [5:0] eaf_rtr_ccr,
 	input      [31:0] eaf_ea_target,
 	input             l1_wr_busy,
+	// The store was refused (2026-09-24): translation faulted it, or the bus
+	// answered it with a bus error. The instruction is abandoned here -- none
+	// of it commits -- and fetched again, and ap040_ea_fetch.v takes the
+	// access error when it arrives there: the restart model's frame, whose
+	// PC is this instruction.
+	input             l1_wflt,
+	output            ex_aerr,
 	output            ex_st_req,
 	output     [31:0] ex_st_addr,   // BYTE address; the core converts
 	output     [31:0] ex_st_data,
@@ -323,7 +330,8 @@ module ap040_execute
 );
 
 assign ex_st_req = eaf_valid && eaf_is_rmw;
-wire   rmw_wait  = ex_st_req && l1_wr_busy;
+assign ex_aerr   = ex_st_req && l1_wflt;
+wire   rmw_wait  = ex_st_req && l1_wr_busy && !l1_wflt;
 assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait;
 // ...and the refetch it then owes, raised only in a cycle this stage moves
 // on in: the flush that goes with a redirect clears EA-fetch's output
@@ -678,15 +686,16 @@ wire br_wrong = eaf_is_branch && (eaf_bnt ? cond_result : !cond_result);
 // L1 answers the next cycle, which kept the fetch PC on that word.
 assign ex_mispredict   = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
-                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc);
+                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc || ex_aerr);
 assign ex_flush        = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
-                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc);
+                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc || ex_aerr);
 // A refetch's recovery is eaf_next_pc, the default below. The stream it
 // would otherwise be served from goes in the same cycle, so the refetch
 // reads memory.
 assign ex_pf_inval     = eaf_valid && eaf_refetch && !ex_stall;
-assign ex_recovery_pc  = (redirect_always || (eaf_is_branch && eaf_bnt)) ? eaf_operand_a : eaf_next_pc;
+assign ex_recovery_pc  = ex_aerr ? eaf_pc :
+                         (redirect_always || (eaf_is_branch && eaf_bnt)) ? eaf_operand_a : eaf_next_pc;
 
 wire [31:0] scc_fill   = {24'd0, {8{cond_result}}};
 wire [31:0] scc_merged = {eaf_operand_b[31:8], scc_fill[7:0]};
@@ -938,7 +947,7 @@ always @(posedge clk) begin
 		exe_creg_sel     <= 4'h0;
 		exe_creg_data    <= 32'h0;
 	end else if (ce && !ex_stall) begin
-		exe_valid        <= eaf_valid;
+		exe_valid        <= eaf_valid && !ex_aerr;
 		exe_pc           <= eaf_pc;
 		exe_dest_reg     <= eaf_dest_reg;
 		exe_result_data  <= combined_result;

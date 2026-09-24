@@ -93,7 +93,12 @@ ap040_pipe_membus dut (
 	.mem_req(mem_req), .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size(mem_size), .mem_addr(mem_addr), .mem_wdata(mem_wdata),
 	.mem_fc(mem_fc),
-	.mem_ack(mem_ack), .mem_rdata(mem_rdata)
+	.mem_ack(mem_ack), .mem_rdata(mem_rdata),
+	// the fetch side alone: no invalidation, no FC override, no faults
+	.pf_inval(1'b0), .fc_ovr(1'b0), .fc_ovr_val(3'd0),
+	.mem_flt(1'b0), .mem_flt_bus(1'b0), .mem_pass(mem_req), .wr_sync(1'b0), .quiesce(1'b0), .wr_drop(!wren_b),
+	.rflt_a(), .rflt_a_bus(), .rflt_b(), .wflt(), .idle(), .flt_bus(),
+	.xlat_e(1'b0), .xlat_p(1'b0), .pb_req(), .pb_addr(), .pb_fc(), .pb_done(1'b0), .pb_mmusr(32'd0), .flt_ma()
 );
 
 integer errors = 0;

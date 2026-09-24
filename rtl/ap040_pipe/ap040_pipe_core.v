@@ -45,6 +45,7 @@ wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
+wire        pt_req, pf_req;
 
 ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
@@ -60,6 +61,12 @@ ap040_pipe_cpu #(
 	.l1_sup_b  (), .l1_sup_a (),   // the array has no function codes
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
+	// the L1 array never faults an access
+	.l1_rflt_a (1'b0), .l1_rflt_a_bus (1'b0), .l1_rflt_b (1'b0), .l1_wflt (1'b0), .l1_flt_bus (1'b0), .l1_flt_ma (1'b0),
+	// ...and has no MMU: PTEST answers MMUSR 0, PFLUSH at once
+	.l1_idle (1'b1), .l1_quiet (), .l1_wr_drop (), .pt_req (pt_req), .pt_write (), .pt_addr (), .pt_fc (),
+	.pt_done (pt_req), .pt_mmusr (32'd0), .pf_req (pf_req), .pf_mode (), .pf_addr (), .pf_fc (),
+	.pf_done (pf_req),
 	.dbg_if_valid  (dbg_if_valid),
 	.dbg_if_pc     (dbg_if_pc),
 	.dbg_id_valid  (dbg_id_valid),

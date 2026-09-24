@@ -63,6 +63,8 @@ wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
+wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
+wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pf_req;
 wire        l1_fc_ovr;
 wire  [2:0] l1_fc_val;
 
@@ -82,6 +84,12 @@ ap040_pipe_cpu #(
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 	.l1_inval_a(l1_inval_a),
+	.l1_rflt_a(l1_rflt_a), .l1_rflt_a_bus(l1_rflt_a_bus), .l1_rflt_b(l1_rflt_b), .l1_wflt(l1_wflt), .l1_flt_bus(l1_flt_bus), .l1_flt_ma(l1_flt_ma),
+	.l1_wr_sync(l1_wr_sync),
+	// no MMU on this top: PTEST answers MMUSR 0, PFLUSH at once
+	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (), .pt_addr (), .pt_fc (),
+	.pt_done (pt_req), .pt_mmusr (32'd0), .pf_req (pf_req), .pf_mode (), .pf_addr (), .pf_fc (),
+	.pf_done (pf_req),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
@@ -113,7 +121,15 @@ ap040_pipe_membus u_bus
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),
-	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata)
+	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
+	// No MMU on this top: nothing is refused, and a request has passed as
+	// soon as it is on the port.
+	.mem_flt  (1'b0), .mem_flt_bus (1'b0), .mem_pass (mem_req), .wr_sync (l1_wr_sync),
+	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
+	.idle     (l1_idle), .quiesce (l1_quiet), .wr_drop (l1_wr_drop),
+	// no MMU behind this memory: nothing is translated, nothing crosses
+	.xlat_e   (1'b0), .xlat_p (1'b0),
+	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0), .flt_ma (l1_flt_ma)
 );
 
 endmodule

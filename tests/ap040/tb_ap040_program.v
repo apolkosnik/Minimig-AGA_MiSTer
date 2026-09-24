@@ -872,7 +872,7 @@ task run_phase;
 		$readmemh(prog_file, mem);
 		// interrupt-injection capability word: t_fpu's IRQ soak runs
 		// only where the bench can deliver IPL
-		mem[16'hF160 >> 1] = 16'h0007;	// coarse + fine IPL + berr injection
+		mem[16'hF160 >> 1] = 16'h0027;	// coarse + fine IPL + berr injection; bit 5: IPLDLY calibrated to this core (test 136)
 
 		nreset = 0;
 		repeat (10) @(posedge clk);
