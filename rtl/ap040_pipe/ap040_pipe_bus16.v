@@ -35,6 +35,7 @@ module ap040_pipe_bus16
 	input  clk,
 	input  nreset,
 	input  ce,           // advances the CPU
+	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none
 	input  clkena_in,    // advances the bus: one pulse per 16-bit sub-cycle
 
 	input  [15:0] data_in,
@@ -77,7 +78,7 @@ ap040_pipe_cpu #(
 	.PROG_WORDS(PROG_WORDS)
 ) u_cpu
 (
-	.clk (clk), .nreset (nreset), .ce (ce),
+	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
 
 	.l1_addr_a (l1_addr_a), .l1_req_a (l1_req_a),
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),

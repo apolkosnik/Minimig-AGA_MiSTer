@@ -657,9 +657,15 @@ wire redirect_always = eaf_is_jmp || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
 // it is taken, and recovers to its target, which EA-fetch sent in
 // eaf_operand_a; one predicted taken mispredicts when it is not, as before.
 wire br_wrong = eaf_is_branch && (eaf_bnt ? cond_result : !cond_result);
+// STOP redirects to the instruction after it as well as flushing (found by
+// tb_ap040_pipe_irqdual.v). A flush alone restarts the fetch at its own
+// sequential PC, and on a bus the word after the STOP was already in
+// flight by then: the flush abandoned it and the fetch resumed one word
+// further on, so the instruction a wake-up returns to was never run. The
+// L1 answers the next cycle, which kept the fetch PC on that word.
 assign ex_mispredict   = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
-                                        redirect_always);
+                                        redirect_always || eaf_is_stop);
 assign ex_flush        = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
                                         redirect_always || eaf_is_stop);
@@ -846,7 +852,10 @@ assign ex_creg_sp = exe_writes_creg_c &&
                     (exe_creg_sel_c == `AP040_CREG_USP ||
                      exe_creg_sel_c == `AP040_CREG_ISP ||
                      exe_creg_sel_c == `AP040_CREG_MSP);
-wire  [3:0] exe_creg_sel_c  = eaf_is_rte ? (eaf_sr_snapshot[12] ? `AP040_CREG_MSP : `AP040_CREG_ISP)
+// A pop behind a throwaway frame runs under that frame's SR, which a
+// hand-built frame can leave in user mode (ap040_ea_fetch.v's ret_f1).
+wire  [3:0] exe_creg_sel_c  = eaf_is_rte ? (!eaf_sr_snapshot[13] ? `AP040_CREG_USP :
+                                            eaf_sr_snapshot[12]  ? `AP040_CREG_MSP : `AP040_CREG_ISP)
                                           : eaf_movec_sel;
 wire [31:0] exe_creg_data_c = eaf_is_rte ? eaf_operand_b : eaf_operand_a;
 

@@ -25,7 +25,7 @@ CORE = [RTL / n for n in (
     "ap040_pipe_membus.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
-    "ap040_pipe_l1.v", "ap040_pipe_fpu.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
+    "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
 # ap040_pipe_fpu.v runs the shared FPU engine, which includes rtl/ap040's
 # ap040_defs.svh, so every build takes that directory too.
 

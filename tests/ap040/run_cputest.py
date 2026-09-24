@@ -65,6 +65,7 @@ PIPE_SOURCES = [
     PIPE / "ap040_pipe_alu.v",
     PIPE / "ap040_pipe_regfile.v",
     PIPE / "ap040_pipe_fpu.v",
+    PIPE / "ap040_pipe_irq.v",
     RTL / "ap040_fpu.v",
 ]
 RTL_SOURCES = [

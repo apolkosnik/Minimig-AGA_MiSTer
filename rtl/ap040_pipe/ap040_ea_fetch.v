@@ -288,6 +288,10 @@ module ap040_ea_fetch
 	input      [15:0] eac_fp_cmd,
 	input      [95:0] eac_fp_imm,
 	input       [5:0] eac_fx,       // a full-format extension (2026-09-24), see below
+	input             irq_pend,     // an interrupt is pending (ap040_pipe_irq.v), against sr_in's mask
+	input       [2:0] irq_take_lvl,
+	output            irq_ack,      // one pulse: an interrupt entry was taken
+	output            irq_ack_nmi,
 	input      [31:0] eac_fx_bd,
 	input      [31:0] eac_fx_od,
 	input       [5:0] eac_alu_op,
@@ -368,6 +372,7 @@ module ap040_ea_fetch
 	// whatever bank port B/A7 is currently reading -- see exc_sp_bank above.
 	input      [31:0] isp_in,
 	input      [31:0] msp_in,
+	input      [31:0] usp_in,   // a throwaway frame's continuation may name it
 
 	// regfile operand read ports (driven combinationally by this stage;
 	// ap040_pipe_core.v wires raddr_a/b <-> rdata_a/b straight to the
@@ -1059,6 +1064,34 @@ wire        fp_start     = live && fp && !eaf_valid && !fp_active && !fp_fin && 
 wire        eac_is_fpexc = eac_valid && fp && fp_fin && fp_exc;
 wire        fp_clear     = flush || (fp_fin && !eaf_stall);
 
+// The interrupt arm (see irq_hold): sampled while nothing is held here and
+// as each instruction departs, so it is the verdict for the instruction
+// arriving next; cleared as an interrupt entry departs, so the handler's
+// first instruction is judged afresh -- against the new mask, which has
+// committed by the time the redirect brings it here -- and dropped if the
+// request was withdrawn before the entry could be taken.
+//
+// ...except behind an instruction that writes the SR (found by
+// tb_ap040_pipe_irqdual.v). Its new mask reaches sr_in only once it is in
+// EX, a cycle after the arm was sampled for the instruction arriving
+// behind it: MOVE #$0500,SR under a pending level 6 let one more
+// instruction run before the entry, where the 68040 takes it at the very
+// next boundary. That instruction waits one cycle instead (irq_recheck, a
+// bubble through hold_hazard) and the arm is sampled again, now against
+// the forwarded SR. Taking the forward straight into the hold would put it
+// on the exception decision, which the milestone-88 rule keeps registered.
+reg  irq_recheck;
+wire sr_wr_depart = eac_valid && !eaf_stall && (eac_is_movesr || (eac_is_immsr && eac_immsr_to_sr));
+always @(posedge clk)
+	if (!nreset) begin irq_arm <= 1'b0; irq_recheck <= 1'b0; end
+	else if (ce) begin
+		if (eac_is_irq && exc_vec_done)                 irq_arm <= 1'b0;
+		else if (irq_hold && !irq_pend && !exc_pend_irq) irq_arm <= 1'b0;
+		else if (!eac_valid || !eaf_stall)              irq_arm <= irq_pend;
+		else if (irq_recheck)                           irq_arm <= irq_pend;
+		irq_recheck <= !flush && sr_wr_depart;
+	end
+
 always @(posedge clk)
 	if (!nreset)             fp_ea_r <= 32'd0;
 	else if (ce && fp_start) fp_ea_r <= ea_target;
@@ -1179,6 +1212,18 @@ wire eac_is_jsr_odd  = eac_is_jsr && ea_target[0];
 reg        ret_ph;
 reg        ret_pending;   // this beat's read is in flight; l1_q_b valid NEXT cycle -- same shape as mem_pending
 reg [31:0] ret_dword0;    // captured {SR, PC_hi} after beat 0 completes
+// A format-$1 throwaway frame (2026-09-24): the pop continues on the stack
+// its SR names, as ap040_core.v's S_RTE_FIN loops back to S_RTE_SR. The
+// first frame's SR and its bank's new pointer are held; the second pop
+// starts once no older A7 write is in flight (ret_f1_wait), from a base
+// latched then; and the RTE retires once, committing both pointers.
+reg        ret_f1;        // popping the frame behind a throwaway
+reg        ret_f1_wait;
+reg [15:0] ret_f1_sr;     // the throwaway's SR, masked
+reg [31:0] ret_f1_a7;     // the first bank's pointer past it
+reg  [1:0] ret_f1_sel;    // ...and that bank
+reg [31:0] ret_base2;     // the second frame's base
+reg [31:0] ret_base2_4;
 localparam RET_BEAT0_E = 1'd0, RET_BEAT1_E = 1'd1;
 
 wire [31:0] br_target    = eac_pc + 32'd2 + eac_imm;
@@ -1499,7 +1544,8 @@ wire movec_rd       = eac_is_movec && !eac_imm[4];
 wire creg_rd_hazard = movec_rd && ex_creg_any;
 wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
-                      (live && fx_hold_go);                        // a full-format pointer read
+                      (live && fx_hold_go) ||                      // a full-format pointer read
+                      (live && irq_recheck);                       // the interrupt arm, behind an SR write
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1588,9 +1634,28 @@ wire eac_is_fmterr = fmterr_now || exc_pend_fmterr;
 reg         trace_arm;
 reg  [31:0] trace_pc;
 reg         exc_pend_trace;
-wire trace_hold   = eac_valid && trace_arm;
-wire trace_take   = trace_hold && !eaf_valid && !wb_busy && !stall_in;
+wire trc_hold     = eac_valid && trace_arm;
+// Interrupts (2026-09-24). A request pending as an instruction arrives
+// here makes it the interrupt point, exactly as an owed trace does: it is
+// held (every trace_hold gate below applies, so it starts nothing), and
+// once EX and WB have drained -- the stacked SR and SP are then the real
+// ones -- it becomes a format-$0 entry at vector 24 + level that stacks
+// its own address, the one the handler's RTE comes back to. The request
+// is judged again then: one withdrawn meanwhile lets the instruction run.
+// A trace owed goes first (the 68040 does it the other way round and
+// carries the trace into the handler; not modelled yet).
+reg        irq_arm;
+reg        exc_pend_irq;
+reg  [2:0] irq_lvl_r;
+wire irq_hold     = eac_valid && irq_arm && !trc_hold;
+wire trace_hold   = trc_hold || irq_hold;   // an entry holds this instruction
+wire trace_take   = trc_hold && !eaf_valid && !wb_busy && !stall_in;
+wire irq_take     = irq_hold && irq_pend && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq;
 wire eac_is_trace = trace_take || exc_pend_trace;
+wire eac_is_irq   = irq_take || exc_pend_irq;
+wire [2:0] irq_lvl_now = exc_pend_irq ? irq_lvl_r : irq_take_lvl;
+assign irq_ack     = irq_take;
+assign irq_ack_nmi = irq_take && (irq_take_lvl == 3'd7);
 wire own_exc      = !trace_hold && !ae_hold;   // the held instruction's own faults are not taken
 
 // T0, trace on change of flow (milestone 79). The arm is taken by the
@@ -1662,7 +1727,7 @@ wire store_now    = eac_is_store && !trace_hold && !ae_busy && !moves_priv;
 // is held, and own_exc exists precisely to keep THAT instruction's faults
 // from being taken. The debt is the completed instruction's, not the held
 // one's (milestone 100).
-wire eac_is_exc    = eac_is_trace || ae_take ||
+wire eac_is_exc    = eac_is_trace || eac_is_irq || ae_take ||
                      (own_exc && !fx_hold && (eac_is_trap || eac_is_illegal || eac_is_priv || eac_is_addrerr ||
                                   eac_is_divzero || eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
                                   eac_is_fpexc));
@@ -1707,6 +1772,17 @@ reg  [7:0] exc_vec_r;
 reg [31:0] exc_vbase_r;   // VBR, latched with the vector (milestone 117)
 reg        exc_m_r;
 reg [31:0] exc_sp_r;
+// An interrupt taken with M set (2026-09-24) pushes TWO frames: the real,
+// format-$0 one on the master stack, then -- M cleared -- a format-$1
+// throwaway on the interrupt stack, whose SR image is the original with S
+// forced and M still set, so RTE's format-$1 continuation returns to the
+// master stack where the real frame lives (ap040_core.v's S_EXC6). The
+// second frame is a second pass through BEAT0/BEAT1 (exc_pass2); both
+// stack pointers commit at the entry's retirement, ISP through port 1
+// (the new SR has M clear) and MSP through port 2 on an explicit bank.
+reg        exc_m2_r;
+reg        exc_pass2;
+reg [31:0] exc_isp8_r;
 wire exc_writing   = exc_go && !exc_vec_pending &&
                       (exc_ph == EXC_BEAT0 || exc_ph == EXC_BEAT1 ||
                        (exc_ph == EXC_BEAT2 && exc_fmt2_r));
@@ -1761,10 +1837,11 @@ wire ret_active   = live && eac_is_rte_active;
 // own branch is guarded on exc_active -- because the sequencer that found
 // the fault must stop, or it keeps re-reading underneath the frame push
 // and the instruction never departs.
-wire ret_issue    = ret_active && !ret_pending && !exc_active && !port_taken;   // see exc_vec_issue
+wire ret_issue    = ret_active && !ret_pending && !exc_active && !port_taken && !ret_f1_wait;   // see exc_vec_issue
 wire ret_complete = ret_active && ret_pending && l1_rvalid_b;
 wire ret_done     = ret_complete && (ret_ph == RET_BEAT1);
-wire ret_stall    = ret_active && !ret_done;
+wire ret_f1_go;          // a throwaway frame popped: continue, do not depart
+wire ret_stall    = ret_active && (!ret_done || ret_f1_go);
 
 // Every port-B read this stage makes, as the L1's request strobe. The four
 // requesters are exclusive by construction (one instruction is never more
@@ -1792,13 +1869,21 @@ assign l1_rd_b = fxi_ld_go || !stall_self &&
 // exc_writing sits above ret_done in the output block's chain and wins the
 // L1 address mux, so beat 0 of the frame goes out in that same cycle.
 //
-// Deliberate deviations, deferred with the mechanisms they need: $1
-// (throwaway) needs the SR loaded and the pop restarted on the next frame;
-// $7 (access error) needs the BCU/MMU that would push it. Both land here
-// rather than being silently popped as $0.
+// $1, the throwaway frame an interrupt taken with M set leaves on the
+// interrupt stack, continues the pop on the stack its SR names (ret_f1,
+// 2026-09-24). A second $1 behind the first is a format error here, as is
+// a bad frame behind a throwaway -- raised with the RTE's own starting
+// state, where ap040_core.v commits the throwaway's SR and pop first. No
+// 68040 builds either: a throwaway's SR always has M set, and the frame on
+// the master stack is the real one.
+// Deliberate deviation, deferred with the mechanism it needs: $7 (access
+// error) needs the BCU/MMU that would push it. It lands here rather than
+// being silently popped as $0.
 wire [3:0] ret_fmt      = l1_q_b[15:12];
 wire       ret_fmt_long = (ret_fmt[3:1] == 3'b001);   // $2 or $3: twelve bytes
-wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long;
+wire       ret_fmt_ok   = (ret_fmt == 4'h0) || ret_fmt_long || ((ret_fmt == 4'h1) && !ret_f1);
+assign     ret_f1_go    = ret_done && !eac_is_rtr && !ret_f1 && (ret_fmt == 4'h1);
+wire [1:0] ret_bank2    = !ret_f1_sr[13] ? 2'd0 : ret_f1_sr[12] ? 2'd2 : 2'd1;
 assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second word is not a format
 
 // One cycle, and only for an instruction that actually reads A7. A MOVEC
@@ -1927,7 +2012,8 @@ wire [31:0] exc_sp_bank    = exc_sp_r;
 // two subtracts of a constant sit off the path.
 wire [31:0] exc_sp_fmt0    = exc_sp_bank - 32'd8;
 wire [31:0] exc_sp_fmt2    = exc_sp_bank - 32'd12;
-wire [31:0] exc_new_sp     = exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
+wire [31:0] exc_new_sp     = exc_pass2  ? exc_isp8_r :
+                             exc_fmt2_r ? exc_sp_fmt2 : exc_sp_fmt0;
 // The status register as of the fault, with the flag effects the fault
 // ITSELF has, resolved once (milestone 95). It used to be built here for
 // the stacked word alone, so the frame said one thing and the handler's
@@ -1956,7 +2042,7 @@ wire [15:0] sr_faulted     = (ck2_trap && !eac_is_trace && !eac_is_addrerr)
                               : (eac_is_divzero && !eac_is_trace && !eac_is_addrerr)
                               ? {sr_in[15:1], 1'b0}
                               : sr_in;
-wire [15:0] exc_sr_word    = sr_faulted;
+wire [15:0] exc_sr_word    = exc_pass2 ? (sr_faulted | 16'h2000) : sr_faulted;
 // Illegal and privilege violation both stack the FAULTING instruction's OWN
 // address (go_illegal's/go_priv's shared pc_i convention -- you can't
 // "return past" either kind of fault); TRAP stacks the FOLLOWING
@@ -1983,7 +2069,7 @@ wire [15:0] exc_sr_word    = sr_faulted;
 // two words further on than any other mode, a JSR reads its own target,
 // an armed RTE reads the RTE's address -- so it is built once in
 // addrerr_pc_live above and latched with the verdict (milestone 100).
-wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the trace handler returns to
+wire [31:0] exc_pc_field   = (eac_is_trace || eac_is_irq) ? eac_pc :   // the instruction the handler returns to
                               eac_is_addrerr ? (exc_pend_addrerr ? exc_pend_ae_pc
                                                                  : addrerr_pc_live) :
                               eac_is_fpexc   ? fp_exc_pc :   // registers of ap040_pipe_fpu.v
@@ -1998,6 +2084,7 @@ wire [31:0] exc_pc_field   = eac_is_trace   ? eac_pc :   // the instruction the 
 // fields. rte_odd_now already excludes eac_is_priv, so no instruction can
 // legitimately be both (milestone 109).
 wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
+                              eac_is_irq   ? {5'b00011, irq_lvl_now} :   // 24 + level: autovectored
                               eac_is_addrerr ? 8'd3 :
                               eac_is_fpexc   ? fp_exc_vec :
                               // 10 A-line, 11 F-line, 4 illegal -- literals
@@ -2015,7 +2102,7 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
                               eac_is_fmterr ? 8'd14 : eac_imm[7:0];
-wire [15:0] exc_vecoff_word = {exc_fmt3_r ? 4'd3 : exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
+wire [15:0] exc_vecoff_word = {exc_pass2 ? 4'd1 : exc_fmt3_r ? 4'd3 : exc_fmt2_r ? 4'd2 : 4'd0, 2'b00, exc_vec_r, 2'b00};
 // Format $2's own extra "instruction address" longword. For an odd JMP/JSR
 // target it is the target itself, LSB cleared (ap040_core.v's own convention
 // for this field, identical for JMP and JSR despite their differing PC
@@ -2048,7 +2135,8 @@ wire [31:0] exc_vec_addr = exc_vbase_r + {22'd0, exc_vec_r, 2'b00};
 // RTE's own two read-beat addresses: A7 (dword0), A7+4 (dword1) -- via
 // operand_a/port A, same as RTS's mem_issue/mem_complete reuse (decode set
 // eac_src_reg=A7 for RTE too, see ap040_decode.v's header).
-wire [31:0] ret_addr = (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
+wire [31:0] ret_addr = ret_f1 ? ((ret_ph == RET_BEAT1) ? ret_base2_4 : ret_base2) :
+                      (ret_ph == RET_BEAT1) ? (operand_a + 32'd4) : operand_a;
 
 // Driven unconditionally, same "compute always, gate consumption" precedent
 // as raddr_b -- harmless when none of eac_is_mem_src/eac_is_jmp/eac_is_push/
@@ -2299,6 +2387,8 @@ always @(posedge clk) begin
 		exc_pend_trapcc  <= 1'b0;
 		exc_pend_fmterr  <= 1'b0;
 		exc_pend_trace   <= 1'b0;
+		exc_pend_irq     <= 1'b0;
+		irq_lvl_r        <= 3'd0;
 		trace_arm        <= 1'b0;
 		trace_arm_cond   <= 1'b0;
 		trace_pc         <= 32'h0;
@@ -2311,8 +2401,18 @@ always @(posedge clk) begin
 		exc_vbase_r     <= 32'd0;
 		exc_m_r         <= 1'b0;
 		exc_sp_r        <= 32'd0;
+		exc_m2_r        <= 1'b0;
+		exc_pass2       <= 1'b0;
+		exc_isp8_r      <= 32'd0;
 		ret_ph          <= RET_BEAT0;
 		ret_pending     <= 1'b0;
+		ret_f1          <= 1'b0;
+		ret_f1_wait     <= 1'b0;
+		ret_f1_sr       <= 16'h0;
+		ret_f1_a7       <= 32'h0;
+		ret_f1_sel      <= 2'd0;
+		ret_base2       <= 32'h0;
+		ret_base2_4     <= 32'h0;
 	end else if (ce) begin
 		// The registered fault verdict (milestone 88). It clears with the
 		// departure it belongs to -- exc_vec_done under the same !stall_in
@@ -2329,7 +2429,20 @@ always @(posedge clk) begin
 				exc_vbase_r <= vbr_in;   // creg_busy: no MOVEC to VBR still in flight
 				exc_m_r    <= sr_in[12];
 				exc_sp_r   <= exc_sp_live;
+				exc_m2_r   <= eac_is_irq && sr_in[12];
+				exc_isp8_r <= isp_in - 32'd8;
 			end
+		end
+		// The second frame's base, once nothing older can still move it: the
+		// bank the first frame was on continues from past it, any other is
+		// read out of the register file.
+		if (flush) ret_f1_wait <= 1'b0;
+		else if (ret_f1_wait && !a7_busy && !creg_busy) begin
+			ret_f1_wait <= 1'b0;
+			ret_base2   <= (ret_bank2 == ret_f1_sel) ? ret_f1_a7 :
+			               (ret_bank2 == 2'd0) ? usp_in : (ret_bank2 == 2'd1) ? isp_in : msp_in;
+			ret_base2_4 <= ((ret_bank2 == ret_f1_sel) ? ret_f1_a7 :
+			               (ret_bank2 == 2'd0) ? usp_in : (ret_bank2 == 2'd1) ? isp_in : msp_in) + 32'd4;
 		end
 
 		// Each of these holds a fault's verdict from the cycle it was seen
@@ -2410,6 +2523,11 @@ always @(posedge clk) begin
 
 		if (exc_vec_done)     exc_pend_trace <= 1'b0;
 		else if (trace_take)  exc_pend_trace <= 1'b1;
+		if (exc_vec_done)     exc_pend_irq <= 1'b0;
+		else if (irq_take) begin
+			exc_pend_irq <= 1'b1;
+			irq_lvl_r    <= irq_take_lvl;
+		end
 
 		// A provisionally armed conditional branch: EX's verdict decides.
 		// Nothing departs this stage while the arm is up, so no departure
@@ -2438,6 +2556,7 @@ always @(posedge clk) begin
 			exc_pend_trapcc  <= 1'b0;
 			exc_pend_fmterr  <= 1'b0;
 			exc_pend_trace   <= 1'b0;
+			exc_pend_irq     <= 1'b0;
 			// trace_arm is NOT cleared by a flush: the flush that follows a
 			// traced branch or a traced exception entry kills the wrong-path
 			// or unreached instruction here, and the trace is still owed to
@@ -2451,9 +2570,11 @@ always @(posedge clk) begin
 			// beat0. ret_ph/ret_pending need the same treatment for a
 			// mid-flight RTE.
 			exc_ph          <= EXC_BEAT0;
+			exc_pass2       <= 1'b0;
 			exc_vec_pending <= 1'b0;
 			ret_ph          <= RET_BEAT0;
 			ret_pending     <= 1'b0;
+			ret_f1          <= 1'b0;
 		end else if (!stall_in) begin
 			if (hold_hazard) begin
 				// The bubble, and it has to come FIRST. Below mem_issue it
@@ -2880,7 +3001,11 @@ always @(posedge clk) begin
 				if (exc_beat_ack) begin
 					case (exc_ph)
 						EXC_BEAT0: exc_ph <= EXC_BEAT1;
-						EXC_BEAT1: exc_ph <= exc_fmt2_r ? EXC_BEAT2 : EXC_VECRD;
+						EXC_BEAT1: if (exc_m2_r && !exc_pass2) begin
+							// the throwaway frame, on the interrupt stack
+							exc_ph    <= EXC_BEAT0;
+							exc_pass2 <= 1'b1;
+						 end else exc_ph <= exc_fmt2_r ? EXC_BEAT2 : EXC_VECRD;
 						default:   exc_ph <= EXC_VECRD;   // EXC_BEAT2 done
 					endcase
 				end
@@ -2929,7 +3054,7 @@ always @(posedge clk) begin
 				// SP -- would commit THERE instead of to A7.
 				eaf_dest_reg   <= (eac_is_priv || eac_is_addrerr || eac_is_divzero ||
 				                    eac_is_chk_trap || eac_is_trapcc_trap || eac_is_fmterr ||
-				                    eac_is_trace || eac_is_fpexc) ? 4'd15 : eac_dest_reg;
+				                    eac_is_trace || eac_is_fpexc || eac_is_irq) ? 4'd15 : eac_dest_reg;
 				// The vector is a LONGWORD, always. It must not go through
 				// mem_lane, which selects a lane from eff_size and would
 				// hand back a sign-extended half-word for any faulting
@@ -2962,10 +3087,13 @@ always @(posedge clk) begin
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
-				eaf_writes_an  <= an_wr_any && own_exc;
-				eaf_an_sel     <= an_sp_sel;   // a trace entry runs none of the held instruction
-				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
+				// An interrupt's own held instruction runs nothing, so port 2 is
+				// free to carry the master stack pointer below the real frame.
+				eaf_writes_an  <= (an_wr_any && own_exc) || exc_m2_r;
+				eaf_an_sel     <= exc_m2_r ? 2'd2 : an_sp_sel;   // a trace entry runs none of the held instruction
+				eaf_an_reg     <= exc_m2_r ? 4'd15 : an_wr_reg;
+				eaf_an_data    <= exc_m2_r ? exc_sp_fmt0 :
+				                  ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				// UNCONDITIONALLY 1, not forwarded from eac_writes_reg:
 				// every exception entry writes A7 the new SP, full stop --
 				// illegal/TRAP already had eac_writes_reg=1 for this exact
@@ -3007,7 +3135,7 @@ always @(posedge clk) begin
 				// retiring (exc_reaching_ex), and this flag says nothing more. Without
 				// it the entry retired as an ordinary instruction and A7 took the
 				// handler's address, in the faulting instruction's own bank.
-				eaf_is_illegal <= (eac_is_illegal || eac_is_fpexc) && own_exc;
+				eaf_is_illegal <= ((eac_is_illegal || eac_is_fpexc) && own_exc) || eac_is_irq;
 				eaf_is_priv    <= eac_is_priv && own_exc;
 				eaf_is_addrerr <= eac_is_addrerr && own_exc;
 				eaf_is_divzero <= eac_is_divzero && own_exc;
@@ -3036,9 +3164,13 @@ always @(posedge clk) begin
 				// read), not re-read live one cycle later there, to avoid a
 				// combinational loop through EX's own SR forward -- see its
 				// header.
-				eaf_sr_snapshot <= sr_faulted;
+				// An interrupt entry's new SR takes the level as its mask, and
+				// leaves M clear: with M set it has just moved to the interrupt
+				// stack (exc_m2_r), and with M clear there was nothing to clear.
+				eaf_sr_snapshot <= eac_is_irq ? {sr_faulted[15:13], 1'b0, sr_faulted[11], irq_lvl_now, sr_faulted[7:0]} : sr_faulted;
 				eaf_cond       <= eac_cond;
 				exc_ph          <= EXC_BEAT0;
+				exc_pass2       <= 1'b0;
 				exc_vec_pending <= 1'b0;
 				// A format error left the pop parked at beat 1 with its read
 				// still marked pending (ret_done's branch never ran); the next
@@ -3049,6 +3181,7 @@ always @(posedge clk) begin
 				// so the sequencer's own exit leaves it clean.
 				ret_ph          <= RET_BEAT0;
 				ret_pending     <= 1'b0;
+				ret_f1          <= 1'b0;
 			end else if (ret_issue) begin
 				// Posting this beat's read address (ret_addr, driven
 				// combinationally above) -- l1_q_b registers its data by
@@ -3066,6 +3199,17 @@ always @(posedge clk) begin
 				// intermediate one), advance to beat 1.
 				ret_dword0  <= l1_q_b;
 				ret_ph      <= RET_BEAT1;
+				ret_pending <= 1'b0;
+				eaf_valid   <= 1'b0;
+			end else if (ret_f1_go) begin
+				// A throwaway frame: hold its SR and the first bank's pointer
+				// past it, and pop again from the stack that SR names.
+				ret_f1      <= 1'b1;
+				ret_f1_wait <= 1'b1;
+				ret_f1_sr   <= ret_dword0[31:16] & `AP040_SR_MASK;
+				ret_f1_a7   <= operand_a + 32'd8;
+				ret_f1_sel  <= an_sp_sel;
+				ret_ph      <= RET_BEAT0;
 				ret_pending <= 1'b0;
 				eaf_valid   <= 1'b0;
 			end else if (ret_done) begin
@@ -3110,15 +3254,19 @@ always @(posedge clk) begin
 				// the address error, which rte_odd_now then owes exactly as it
 				// does an RTE's, the frame carrying the popped CCR.
 				eaf_operand_b   <= eac_is_rtr ? (operand_a + (rte_pc_now[0] ? 32'd0 : 32'd6)) :
-				                   operand_a +
+				                   (ret_f1 ? ret_base2 : operand_a) +
 				                    (ret_fmt_long ? 32'd12 : 32'd8);   // new A7: $2/$3 are twelve bytes
 				eaf_alu_op      <= eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
-				eaf_writes_an  <= an_wr_any;
-				eaf_an_sel     <= an_sp_sel;
-				eaf_an_reg     <= an_wr_reg;
-				eaf_an_data    <= ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
+				// Behind a throwaway, port 2 carries the first bank's pointer --
+				// unless the second frame was on that same bank, whose pointer
+				// the main restore below then already carries.
+				eaf_writes_an  <= ret_f1 ? (ret_bank2 != ret_f1_sel) : an_wr_any;
+				eaf_an_sel     <= ret_f1 ? ret_f1_sel : an_sp_sel;
+				eaf_an_reg     <= ret_f1 ? 4'd15 : an_wr_reg;
+				eaf_an_data    <= ret_f1 ? ret_f1_a7 :
+				                  ml_rd_dr ? operand_c : an_wr_data;   // Dr for a 64-bit divide
 				// NOT 1: RTE's A7 restore does NOT go through the normal
 				// commit_reg/A7-bank path at all -- see ap040_execute.v's
 				// header for the real race that forces this (RTE's own SR
@@ -3172,10 +3320,13 @@ always @(posedge clk) begin
 				// reusing eaf_sr_snapshot (that one's a forwarded READ of
 				// the CURRENT live SR, not the value being ADOPTED).
 				eaf_rte_sr_data <= ret_dword0[31:16] & `AP040_SR_MASK;
-				eaf_sr_snapshot <= sr_faulted;
+				// The SR the pop ran under picks the bank EX restores: behind a
+				// throwaway, the throwaway's own.
+				eaf_sr_snapshot <= ret_f1 ? ret_f1_sr : sr_faulted;
 				eaf_cond        <= eac_cond;
 				ret_ph          <= RET_BEAT0;
 				ret_pending     <= 1'b0;
+				ret_f1          <= 1'b0;
 			end else begin
 				// A finishing MOVEM completes through this branch, which is
 				// also where An gets written via an_wr_* -- so the sequencer

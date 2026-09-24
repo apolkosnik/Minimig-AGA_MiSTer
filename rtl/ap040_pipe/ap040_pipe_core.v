@@ -25,6 +25,7 @@ module ap040_pipe_core
 	input  clk,
 	input  nreset,
 	input  ce,
+	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none
 
 	output        dbg_if_valid,  output [31:0] dbg_if_pc,
 	output        dbg_id_valid,  output [31:0] dbg_id_pc,
@@ -50,7 +51,7 @@ ap040_pipe_cpu #(
 	.PROG_WORDS(PROG_WORDS)
 ) u_cpu
 (
-	.clk (clk), .nreset (nreset), .ce (ce),
+	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
 
 	.l1_addr_a (l1_addr_a), .l1_req_a (l1_req_a),
 	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),

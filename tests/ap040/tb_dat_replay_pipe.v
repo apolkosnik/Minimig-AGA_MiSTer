@@ -56,6 +56,12 @@ localparam integer EXEC_TIMEOUT = 20000;
 reg clk = 0;
 reg nreset = 0;
 reg ce = 0;
+// The interrupt level (2026-09-24): asserted from a round's start, as
+// tb_dat_replay.v asserts ipl, and released once the core has taken the
+// interrupt, so neither an intermediate entry nor the handler's RTE sees
+// it again.
+reg [2:0] irq_drv = 3'd0;
+always @(posedge clk) if (ce && dut.u_cpu.u_eaf.irq_ack) irq_drv <= 3'd0;
 always #5 clk = ~clk;
 
 wire [15:0] data_in;
@@ -83,7 +89,7 @@ wire [31:0] dbg_if_pc, dbg_id_pc, dbg_eac_pc, dbg_eaf_pc, dbg_ex_pc, dbg_wb_pc;
 // every round writes its own start address into the fetch stage.
 ap040_pipe_bus16 #(.PC_RESET(32'h0000_1000), .PROG_WORDS(32'h4000_0000)) dut
 (
-	.clk(clk), .nreset(nreset), .ce(ce), .clkena_in(clkena_in),
+	.clk(clk), .nreset(nreset), .ce(ce), .clkena_in(clkena_in), .irq_lvl(irq_drv),
 	.data_in(data_in),
 	.addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),
@@ -716,6 +722,7 @@ task run_round;
 		cap_latest = 0; t_done = 0; t_vec = 8'hff; t_sr = 16'h0; t_pc = 32'h0;
 		saw_illegal = 0;
 		boot_pc = i_pc; boot_msp = i_msp; cur_pc = i_pc;
+		irq_drv = i_level[2:0];
 		hold_fetch = 0; round_active = 1;
 		ce = 0;
 		nreset = 0;
@@ -797,6 +804,22 @@ task run_round;
 				       !(dbg_wb_valid && dbg_wb_pc == e_pc && ce)) begin
 					@(posedge clk); timeout = timeout + 1;
 				end
+			end
+		end
+		// An interrupt round whose result is the interrupt (2026-09-24): the
+		// entry can come AFTER the tested instruction -- behind an SR change
+		// that lowers the mask, on a STOP's wake-up, or over the handler of
+		// the tested instruction's own exception -- so run on until that
+		// entry has retired, judged on the SR it stacked. An odd-vector
+		// round's result is the nested address error its odd handler address
+		// raises, after the primary entry: the same run-on.
+		if (timeout < EXEC_TIMEOUT &&
+		    ((i_level != 0 && e_exc >= 24 && e_exc <= 31) || (odd_vector != 0 && e_exc == 3))) begin
+			cap_latest = 1;
+			while (timeout < EXEC_TIMEOUT &&
+			       !(cap_done && !cap_pend && cap_vec == e_exc && ce &&
+			         dbg_wb_valid && dbg_wb_pc == cap_pc)) begin
+				@(posedge clk); timeout = timeout + 1;
 			end
 		end
 		// A standalone-trace round (e_trace == 2; every trace round in Basic,
@@ -992,17 +1015,22 @@ initial begin
 
 		// Judged only if the oracle is an instruction that completes. The
 		// rest are counted here rather than guessed at.
+		// An odd-vector round with a stored trace the generator never vectored
+		// (trace_mode 2, group2 not 9) has no hardware-consistent expectation:
+		// with every vector from 4 up odd, the pending trace faults at vector 9
+		// before the terminal ILLEGAL can be reached, yet the record expects
+		// the ILLEGAL's fault. tb_dat_replay.v counts these as generator
+		// artifacts; so does this driver, by the same rule.
 		if ((flags & F_IGNORE_EXC) ||
-		    e_trace == 1 || i_level != 0 ||
-		    odd_vector != 0 || jr < start_record) begin
+		    e_trace == 1 || jr < start_record ||
+		    (odd_vector != 0 && e_trace == 2 && e_group2 != 9)) begin
 			skipped = skipped + 1;
 			if (flags & F_IGNORE_EXC)       sk_ign   = sk_ign + 1;
+			else if (odd_vector != 0 && e_trace == 2 && e_group2 != 9) sk_odd = sk_odd + 1;
 			else if (e_trace == 1) begin
 				sk_trace = sk_trace + 1;
 				sk_tr[{e_trace[1], e_exc}] = sk_tr[{e_trace[1], e_exc}] + 1;
 			end
-			else if (i_level != 0)          sk_irq   = sk_irq + 1;
-			else if (odd_vector != 0)       sk_odd   = sk_odd + 1;
 			apply_deferred;
 		end else begin
 			run_round;
@@ -1012,7 +1040,7 @@ initial begin
 
 	$display("pipe replay: %0d judged, %0d mismatches, %0d unreached, %0d skipped (exception/trace/irq/fpu)",
 	         ran, mism, unreached, skipped);
-	$display("pipe skipped: fpu %0d ignore-exc %0d trace %0d irq %0d odd-vector %0d",
+	$display("pipe skipped: fpu %0d ignore-exc %0d trace %0d irq %0d odd-vector artifact %0d",
 	         sk_fpu, sk_ign, sk_trace, sk_irq, sk_odd);
 	for (sk_i = 0; sk_i < 512; sk_i = sk_i + 1)
 		if (sk_tr[sk_i] != 0)

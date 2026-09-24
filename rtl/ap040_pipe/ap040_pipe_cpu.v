@@ -161,6 +161,7 @@ module ap040_pipe_cpu
 	input  clk,
 	input  nreset,
 	input  ce,
+	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none (2026-09-24)
 
 	// instruction port: 16-bit reads
 	output [31:0] l1_addr_a,
@@ -468,9 +469,14 @@ wire commit_sr   = exe_valid && exe_fresh && exe_writes_sr;
 // younger work is discarded.
 wire stop_now = eaf_valid && eaf_is_stop;
 reg stopped;
+// An interrupt above the mask STOP loaded wakes it (2026-09-24): the
+// instruction after the STOP then arrives in EA-fetch with the interrupt
+// armed, and its address is what the entry stacks, as on the 68040.
+wire irq_pend_c;
 always @(posedge clk) begin
 	if (!nreset)            stopped <= 1'b0;
 	else if (ce && stop_now) stopped <= 1'b1;
+	else if (ce && stopped && irq_pend_c) stopped <= 1'b0;
 end
 
 // Debug-only: how many register commits have happened. Idempotence hides a
@@ -538,6 +544,25 @@ wire [15:0] sr_base     = commit_sr  ? exe_sr_data :
 wire [15:0] sr_resolved    = ex_sr_fwd_valid  ? ex_sr_fwd_data : sr_base;
 wire [15:0] sr_resolved_ea = ex_sr_fwd_valid  ? ex_sr_fwd_data :
                              ex_ccr_fwd_valid ? {sr_base[15:5], ex_ccr_fwd_data} : sr_base;
+
+// The interrupt request (ap040_pipe_irq.v): judged against the SR the
+// instruction in EA-fetch sees, held against the committed one.
+wire       irq_pend, irq_ack, irq_ack_nmi;
+wire [2:0] irq_take_lvl;
+ap040_pipe_irq u_irq
+(
+	.clk        (clk),
+	.nreset     (nreset),
+	.irq_lvl_in (irq_lvl),
+	.mask       (sr[10:8]),
+	.mask_live  (sr_resolved_ea[10:8]),
+	.ack        (irq_ack && ce),
+	.ack_nmi    (irq_ack_nmi && ce),
+	.sr_commit  (commit_sr && ce),
+	.pend       (irq_pend),
+	.take_lvl   (irq_take_lvl),
+	.pend_c     (irq_pend_c)
+);
 
 //---------------------------------------------------------------------------
 // Supervisor control registers (milestone 15, new): VBR/SFC/DFC/CACR, the
@@ -1155,8 +1180,13 @@ ap040_ea_fetch #(
 	.eac_cond         (eac_cond),
 
 	.sr_in            (sr_resolved_ea),
+	.irq_pend         (irq_pend),
+	.irq_take_lvl     (irq_take_lvl),
+	.irq_ack          (irq_ack),
+	.irq_ack_nmi      (irq_ack_nmi),
 	.isp_in           (isp_q),
 	.msp_in           (msp_q),
+	.usp_in           (usp_q),
 
 	.raddr_a          (raddr_a),
 	.rdata_a          (rdata_a),
