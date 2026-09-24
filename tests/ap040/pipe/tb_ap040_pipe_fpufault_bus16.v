@@ -22,8 +22,15 @@
 //   kind 5  FMOVEM.X FP0-FP1,(A0)       data, and the store runs in user   //
 //                                       mode (the frame, supervisor, is    //
 //                                       not refused)                       //
+//   kind 6  MOVE.L D0,(A0)              refused the same way: EA-fetch's   //
+//   kind 7  MOVE.L #imm,(A0)            store and EX's, the integer        //
+//                                       controls for the refusal           //
 // Read faults are a one-shot physical bus error on the named sub-cycle.    //
-// Every case runs with ce always on and with a pseudo-random ce.           //
+// Every case runs with ce always on, with a pseudo-random ce, and with ce  //
+// held low for three cycles from each refusal: the memory side keeps a     //
+// refusal until the CPU withdraws its write in a cycle it runs, and one    //
+// cleared by a disabled cycle had the write presented again, refused      //
+// again -- a schedule that pauses at every refusal never got past it.      //
 //                                                                          //
 // Checked: the handler runs (it sets D7 = 7); exactly thirty write         //
 // sub-cycles, all of them inside $FC4-$FFF, the frame; ISP is $FC4; the    //
@@ -45,11 +52,19 @@ integer cemode = 0;
 integer errors = 0;
 
 reg [15:0] lfsr = 16'hACE1;
-always @(negedge clk)
-	if (nreset && cemode) begin
+reg        wflt_q = 0;
+integer    hold = 0;
+always @(negedge clk) begin
+	wflt_q <= dut.l1_wflt;
+	if (nreset && cemode == 1) begin
 		lfsr <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
 		ce   <= lfsr[0];
+	end else if (nreset && cemode == 2) begin
+		if (dut.l1_wflt && !wflt_q) hold = 3;
+		ce <= (hold == 0);
+		if (hold > 0) hold = hold - 1;
 	end else ce <= 1'b1;
+end
 
 wire [31:0] addr_out;
 wire [15:0] data_write;
@@ -141,9 +156,15 @@ task run_case;
 			mem[16'h203] = 16'h203C; mem[16'h204] = 16'h0000; mem[16'h205] = 16'h8004;
 			mem[16'h206] = 16'h4E7B; mem[16'h207] = 16'h0006;
 			mem[16'h208] = 16'h027C; mem[16'h209] = 16'hDFFF;
-			mem[16'h20A] = 16'hF210; mem[16'h20B] = (kind == 4) ? 16'h6800 : 16'hF0C0;
-			mem[16'h20C] = 16'h60FE;
 			fpc = 32'h414;
+			case (kind)
+			4: begin mem[16'h20A] = 16'hF210; mem[16'h20B] = 16'h6800; mem[16'h20C] = 16'h60FE; end   // FMOVE.X FP0,(A0)
+			5: begin mem[16'h20A] = 16'hF210; mem[16'h20B] = 16'hF0C0; mem[16'h20C] = 16'h60FE; end   // FMOVEM.X FP0-FP1,(A0)
+			6: begin mem[16'h20A] = 16'h2080; mem[16'h20B] = 16'h60FE; end                           // MOVE.L D0,(A0)
+			default: begin   // MOVE.L #$12345678,(A0)
+				mem[16'h20A] = 16'h20BC; mem[16'h20B] = 16'h1234; mem[16'h20C] = 16'h5678; mem[16'h20D] = 16'h60FE;
+			end
+			endcase
 		end
 		endcase
 		// the operand: 1.0 and 2.0 in extended precision, 24 bytes
@@ -172,19 +193,19 @@ task run_case;
 		// or a user data write the TTR refused
 		if ((mem[12'h7E8] & 16'h0507) !== ((kind < 4) ? 16'h0105 : 16'h0401))
 			fail("frame SSW & $0507", mem[12'h7E8] & 16'h0507, (kind < 4) ? 16'h0105 : 16'h0401);
-		$display("ce %0s kind %0d fault %h: %0s (%0d write sub-cycles)", cemode ? "random" : "on", kind, fa,
+		$display("ce %0s kind %0d fault %h: %0s (%0d write sub-cycles)",
+		         (cemode == 0) ? "on" : (cemode == 1) ? "random" : "paused at each refusal", kind, fa,
 		         (errors == n) ? "ok" : "FAILED", writes);
 	end
 endtask
 
 initial begin
-	for (cemode = 0; cemode < 2; cemode = cemode + 1) begin
+	for (cemode = 0; cemode < 3; cemode = cemode + 1) begin
 		run_case(0, 32'h800);
 		run_case(1, 32'h800);
 		for (k = 0; k < 3; k = k + 1) run_case(2, 32'h800 + 4*k);
 		for (k = 0; k < 4; k = k + 1) run_case(3, 32'h800 + 4*k);
-		run_case(4, 32'h800);
-		run_case(5, 32'h800);
+		for (k = 4; k < 8; k = k + 1) run_case(k, 32'h800);
 	end
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);

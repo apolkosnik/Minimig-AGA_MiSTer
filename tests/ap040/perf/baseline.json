@@ -1,0 +1,3857 @@
+{
+ "wait": 0,
+ "rtl": "476cc5d39125178e4d83f1ea4e1cb06e8e7468ec",
+ "dirty": false,
+ "cases": [
+  {
+   "name": "nop",
+   "block": "nop",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "add_reg",
+   "block": "add.l d2,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "move_imm",
+   "block": "move.l #$12345678,d1",
+   "instructions": 1,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 4.5,
+    "cpi": 4.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 144,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "lea_disp",
+   "block": "lea 4(a0),a1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "lea_index",
+   "block": "lea 0(a0,d4.l),a1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "load",
+   "block": "move.l (a0),d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 480,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "load_postinc",
+   "block": "move.l (a0)+,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 480,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "store",
+   "block": "move.l d1,(a0)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "alu_load",
+   "block": "add.l (a0),d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 480,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "rmw_add",
+   "block": "add.l d2,(a0)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 8.5,
+    "cpi": 8.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 624,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "rmw_add_alu",
+   "block": "add.l d2,(a0)\n add.l d2,d1",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 4.5,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 576,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "move_mem_mem",
+   "block": "move.l (a0),(a1)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 8.5,
+    "cpi": 8.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 624,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "cmpm",
+   "block": "cmpm.l (a0)+,(a1)+",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 288,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 192,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 864,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "addx_mem",
+   "block": "addx.l -(a4),-(a5)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 288,
+     "addr": 96,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 13.5,
+    "cpi": 13.5,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 192,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 1008,
+     "addr": 96,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "exg",
+   "block": "exg d0,d4",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "shift_imm",
+   "block": "lsl.l #3,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "shift_reg",
+   "block": "lsl.l d2,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "mul_word",
+   "block": "mulu.w d2,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "mul_long",
+   "block": "mulu.l d2,d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "div_word",
+   "block": "divu.w d2,d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 228,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   },
+   "bus": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 228,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   }
+  },
+  {
+   "name": "div_long",
+   "block": "divu.l d2,d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   },
+   "bus": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   }
+  },
+  {
+   "name": "mul_independent",
+   "block": "mulu.l d2,d1\n add.l d3,d4",
+   "instructions": 2,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 4.5,
+    "cpi": 2.25,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 144,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "div_independent",
+   "block": "divu.l d2,d1\n add.l d3,d4",
+   "instructions": 2,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 12.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   },
+   "bus": {
+    "cycles_per_block": 12.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 144,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   }
+  },
+  {
+   "name": "movem_load2",
+   "block": "movem.l (a0),d0-d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 480,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 192,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 1056,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "movem_load8",
+   "block": "movem.l (a0),d0-d7",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 19.0,
+    "cpi": 19.0,
+    "counts": {
+     "retired": 96,
+     "rd": 768,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 1632,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 43.0,
+    "cpi": 43.0,
+    "counts": {
+     "retired": 96,
+     "rd": 768,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 768,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 3936,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "movem_store2",
+   "block": "movem.l d0-d1,(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 192,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 384,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 192,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 192
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 768,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "movem_store8",
+   "block": "movem.l d0-d7,(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 18.0,
+    "cpi": 18.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 768,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 1536,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 34.0,
+    "cpi": 34.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 768,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 768
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 3072,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "movep_load",
+   "block": "movep.l 0(a0),d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 384,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 23.0,
+    "cpi": 23.0,
+    "counts": {
+     "retired": 96,
+     "rd": 384,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 384,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "movep_store",
+   "block": "movep.l d1,0(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 384,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 18.0,
+    "cpi": 18.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 384,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 384
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "move16",
+   "block": "move16 (a0)+,(a1)+",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 18.0,
+    "cpi": 18.0,
+    "counts": {
+     "retired": 96,
+     "rd": 384,
+     "wr": 384,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 35.0,
+    "cpi": 35.0,
+    "counts": {
+     "retired": 96,
+     "rd": 384,
+     "wr": 384,
+     "bus_fetch": 96,
+     "bus_read": 384,
+     "bus_write": 384
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "cmp2",
+   "block": "cmp2.l (a0),d0",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 192,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "chk2",
+   "block": "chk2.l (a0),d0",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 192,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "chk_pass",
+   "block": "chk.w d2,d4",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "trapcc_false",
+   "block": "trapmi",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "cas",
+   "block": "cas.l d0,d4,(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 576,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "cas2",
+   "block": "cas2.l d0:d4,d5:d6,(a0):(a1)",
+   "instructions": 1,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 18.0,
+    "cpi": 18.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 192,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 27.0,
+    "cpi": 27.0,
+    "counts": {
+     "retired": 96,
+     "rd": 192,
+     "wr": 192,
+     "bus_fetch": 144,
+     "bus_read": 192,
+     "bus_write": 192
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmove_reg",
+   "block": "fmove.x fp0,fp1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 672,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 672,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fadd_reg",
+   "block": "fadd.x fp0,fp1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 864,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 864,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmove_load",
+   "block": "fmove.l (a0),fp1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 1344,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 19.0,
+    "cpi": 19.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 1632,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmove_store",
+   "block": "fmove.l fp0,(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 1152,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 1152,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmove_alu",
+   "block": "fmove.x fp0,fp1\n add.l d2,d1",
+   "instructions": 2,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 5.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 672,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 5.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 144,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 672,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmovem_load",
+   "block": "fmovem.x (a0),fp0-fp1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 36.0,
+    "cpi": 36.0,
+    "counts": {
+     "retired": 96,
+     "rd": 576,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 3264,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 54.0,
+    "cpi": 54.0,
+    "counts": {
+     "retired": 96,
+     "rd": 576,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 576,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 4992,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "fmovem_store",
+   "block": "fmovem.x fp0-fp1,(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 30.0,
+    "cpi": 30.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 576,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 2688,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 34.0,
+    "cpi": 34.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 576,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 576
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 3072,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bftst_reg",
+   "block": "bftst d2{0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bftst_mem",
+   "block": "bftst (a0){0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 864,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1152,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfextu_reg",
+   "block": "bfextu d2{0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfextu_mem",
+   "block": "bfextu (a0){0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 864,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1152,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfexts_reg",
+   "block": "bfexts d2{0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfexts_mem",
+   "block": "bfexts (a0){0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 864,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1152,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfffo_reg",
+   "block": "bfffo d2{0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfffo_mem",
+   "block": "bfffo (a0){0:8},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 864,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1152,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfchg_reg",
+   "block": "bfchg d2{0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfchg_mem",
+   "block": "bfchg (a0){0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1056,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1344,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfclr_reg",
+   "block": "bfclr d2{0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfclr_mem",
+   "block": "bfclr (a0){0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1056,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1344,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfset_reg",
+   "block": "bfset d2{0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfset_mem",
+   "block": "bfset (a0){0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1056,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1344,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfins_reg",
+   "block": "bfins d1,d2{0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 768,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfins_mem",
+   "block": "bfins d1,(a0){0:8}",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1056,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 1344,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "bfextu_dynamic",
+   "block": "bfextu d2{d4:d3},d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 672,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "load_alternate",
+   "block": "move.l (a0),d1\n move.l (a0),d3",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 192,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 11.0,
+    "cpi": 5.5,
+    "counts": {
+     "retired": 192,
+     "rd": 192,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 192,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 864,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "load_alu_independent",
+   "block": "move.l (a0),d1\n add.l d3,d4",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 384,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "data_to_store",
+   "block": "add.l d2,d1\n move.l d1,(a0)",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "address_to_store",
+   "block": "addq.l #4,a0\n move.l d1,(a0)",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 3.0,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "address_to_load",
+   "block": "adda.l d4,a0\n move.l (a0),d1",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 7.0,
+    "cpi": 3.5,
+    "counts": {
+     "retired": 192,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 480,
+     "addr": 96,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "mul_four_alu",
+   "block": "mulu.l d2,d1\n add.l d3,d4\n add.l d3,d5\n add.l d3,d6\n add.l d3,d7",
+   "instructions": 5,
+   "words": 6,
+   "local": {
+    "cycles_per_block": 7.0,
+    "cpi": 1.4,
+    "counts": {
+     "retired": 480,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 1.8,
+    "counts": {
+     "retired": 480,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 288,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 96,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "div_four_alu",
+   "block": "divu.l d2,d1\n add.l d3,d4\n add.l d3,d5\n add.l d3,d6\n add.l d3,d7",
+   "instructions": 5,
+   "words": 6,
+   "local": {
+    "cycles_per_block": 15.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 480,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   },
+   "bus": {
+    "cycles_per_block": 15.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 480,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 288,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 864
+    }
+   }
+  },
+  {
+   "name": "movec_vbr",
+   "block": "movec vbr,d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 3.0,
+    "cpi": 3.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "chk_alternate",
+   "block": "chk.w d2,d4\n chk.w d2,d5",
+   "instructions": 2,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 3.0,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 192,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "clr_mem",
+   "block": "clr.l (a0)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 8.5,
+    "cpi": 8.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 624,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "st_mem",
+   "block": "st (a0)",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 8.5,
+    "cpi": 8.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 624,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "clr_reg",
+   "block": "clr.l d1",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 1.5,
+    "cpi": 1.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 0,
+     "bus_fetch": 48,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "clr_disp",
+   "block": "clr.l 4(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 576,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "clr_postinc",
+   "block": "clr.w (a0)+",
+   "instructions": 1,
+   "words": 1,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 192,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 8.5,
+    "cpi": 8.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 48,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 624,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "clr_abs",
+   "block": "clr.l ($1000).l",
+   "instructions": 1,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 10.5,
+    "cpi": 10.5,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 144,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 480,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "scc_disp",
+   "block": "seq 4(a0)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 576,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "move_imm_mem",
+   "block": "move.l #$12345678,(a0)",
+   "instructions": 1,
+   "words": 3,
+   "local": {
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 7.5,
+    "cpi": 7.5,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 144,
+     "bus_read": 0,
+     "bus_write": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 120,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  }
+ ]
+}

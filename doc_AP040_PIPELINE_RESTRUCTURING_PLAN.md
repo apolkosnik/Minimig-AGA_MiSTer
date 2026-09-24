@@ -1,0 +1,352 @@
+# AP040 pipeline restructuring plan
+
+Status: planned; implementation has not started. Created 2026-09-24 from the
+instruction restructuring review of `dbccaa6f` plus its working-tree changes.
+
+Improve instruction throughput by removing unnecessary dependencies and memory
+accesses, distributing work across pipeline stages, and allowing independent
+operations to overlap. Preserve architectural results, exception/restart
+behavior, clock-enable handling, and the 40 MHz implementation target.
+
+This is the current performance work plan; the original
+[implementation plan](doc_AP040_PIPELINE_PLAN.md) remains the feature history.
+Use `rtl/ap040_pipe/` and `tests/ap040/` as the active paths. The sequential
+reference lives in `rtl/ap040/`; retain its identity when making comparisons.
+
+## Baseline and measurement rules
+
+The review ran 60 primary sequences and 12 dependency/follow-up sequences in
+two memory configurations: 144 focused simulations. Each sampled 96 steady
+instruction/block intervals. These establish throughput, not complete ISA
+correctness. Local memory means the behavioral array; bus means the shared
+32-bit interface with zero added waits. Neither is a production cache-hit or
+16-bit board measurement.
+
+| Workload | Local CPI | Bus CPI |
+|---|---:|---:|
+| Register ADD, EXG, LSL, MULU.W | 1 | 1.5 |
+| Repeated MOVE.L (A0),D1 | 3 | 6 |
+| Loads alternating D1/D3 destinations | 2 | 5.5 |
+| Passing CHK.W checking the same register | 2 | 2 |
+| Passing CHK.W alternating checked registers | 1 | 1.5 |
+| MOVE.L D1,(A0) | 2 | 5 |
+| CLR.L (A0), ST (A0) | 4 | 8.5 |
+| Register read-only / modifying bitfields | 9 / 10 | 9 / 10 |
+| Eight-register MOVEM.L load / store | 19 / 18 | 43 / 34 |
+| MOVE16 (A0)+,(A1)+ | 18 | 35 |
+| Register FMOVE.X | 9 | 9 |
+| Two-register FMOVEM.X load / store | 36 / 30 | 54 / 34 |
+| MULU.L / DIVU.L | 3 / 11 | 3 / 11 |
+| MOVE.L immediate / LEA displacement | 3 / 2 | 4.5 / 3 |
+
+Starting evidence is in `/tmp/ap040-pipeline-structure/` (review, harness,
+assembly, JSON results, logs and source hashes). Preserve the useful evidence
+in the repository during phase 0 so this plan does not depend on temporary
+files surviving. The current microbenchmarks use simple operand values;
+extend dependency and operand coverage before setting workload expectations.
+
+The September 24 archived standalone fit reports 16,271 CPU-hierarchy ALMs,
+7,440 registers and 17 DSPs; its complete test top uses 17,475 ALMs and reaches
+40.43 MHz. It predates the current working changes. Establish a fresh baseline
+before attributing area or timing changes to this work. Compare like-for-like
+tops, parameters, constraints, tool versions and fitter seeds.
+
+## Delivery order
+
+| Phase | Deliverable | Depends on |
+|---|---|---|
+| 0 | Reproducible baseline and fault/handshake coverage | Current tree |
+| 1 | Operand-specific hazards and actual write dependencies | 0 baseline |
+| 2 | Write-only memory CLR and Scc | 1; relevant write-handshake fixes |
+| 3 | Shorter bitfield sequencing | 1 |
+| 4 | Explicit instruction metadata and a real operand/address stage | 1–3 |
+| 5 | Ordered memory request/response engine and streamed transfers | 4; relevant fault fixes |
+| 6 | Staged bitfields, thinner FPU dispatch, staged long multiply | 4; 5 for memory forms |
+| 7 | Optional divide overlap with ordered completion | 6; measured workload benefit |
+| 8 | Wider instruction assembly and integration qualification | Explicit hazards from 4; final unit interfaces |
+
+Land each independently testable change separately. Phase 6's execution units
+can be delivered individually. Investigate instruction-word delivery earlier,
+but do not remove gather spacing until its hidden hazard assumptions are gone.
+
+## Phase 0 — Make the baseline reproducible
+
+- [ ] Record HEAD, working diff and RTL hashes; preserve existing user changes.
+- [ ] Turn the temporary performance probes into a maintained runner, assembly
+  cases and machine-readable results under `tests/ap040/`. Include dependencies,
+  bus transaction counts and architectural checks alongside timing. Reject
+  missing images, missing measurements and unexpected exceptions.
+- [ ] Measure instruction latency, initiation interval, instruction words,
+  accepted reads/writes and stall reasons separately. Treat paired sequences as
+  blocks and normalize their CPI explicitly.
+- [ ] Reproduce the review-16 write acceptance loss during `ce=0` and FPU operand
+  fault/exception-port ownership defects. Add focused regressions and fix them
+  before changing the affected handshake or adding concurrency. Temporary
+  experiments in `/tmp/ap040-review16/` are evidence, not qualified fixes.
+- [ ] Record current `t_mmu` and `t_bitfield_mmu` failures by case/phase. The
+  program runner's overall PASS currently excludes failures in its OPEN list.
+  Keep these visible and require resolution before final integration sign-off;
+  unrelated gaps need not block phase 1's local improvements.
+- [ ] Capture a fresh standalone fit with the existing 25 ns constraints.
+
+Exit: repeatable results for the actual working sources, explicit known gaps,
+and durable regressions for acceptance/fault ownership. No performance claim
+may rely on reducing the amount of architectural work completed.
+
+## Phase 1 — Describe the operands each instruction actually consumes
+
+Primary files: `ap040_decode.v`, `ap040_ea_calc.v`, `ap040_ea_fetch.v`,
+`ap040_execute.v`, `ap040_pipe_cpu.v` in `rtl/ap040_pipe/`.
+
+- [ ] Classify operand roles: EA base/index, ALU source, old destination,
+  store data, CCR, early trap operand and auxiliary result destinations.
+  Implement the minimum explicit metadata needed; do not introduce another
+  broad instruction-family approximation.
+- [ ] Qualify forwarding/hazard producer matches with actual write enables,
+  including conditional, second-port and banked-stack writes.
+- [ ] Restrict `addr_hz` to inputs consumed by address/early-verdict logic.
+  An overwritten load destination is not an address input. Handle store-data
+  forwarding independently from base/index readiness.
+- [ ] Correct CHK's destination match so a preceding CHK that writes no GPR
+  cannot create a false GPR dependency.
+- [ ] Preserve real change/use stalls where a long EX result would otherwise
+  enter the AGU or exception decision in the same cycle.
+
+Validation: repeated and alternating load destinations; ALU-to-store-data
+versus ALU-to-address; passing and trapping CHK; EX/WB forwarding; dual writes;
+A7 banking; a producer stalled by memory/divide; random CE and flush.
+
+Exit targets: repeated ordinary loads reach **2 local CPI**; repeated passing
+CHK reaches **1 local CPI**; no extra bubble for a store-data-only dependency
+when that value can be forwarded safely. Register ADD/EXG/shift/MUL.W remain
+at 1 local CPI. These are implementation targets, not completed improvements.
+
+## Phase 2 — Give memory CLR and Scc write-only paths
+
+Primary files: decode, EA-fetch, execute and CPU memory-port arbitration.
+
+- [ ] Decode CLR memory as a sized zero store with CLR's CCR result.
+- [ ] Decode Scc memory as a sized predicate store using the correct CCR
+  producer; preserve CCR itself.
+- [ ] Remove destination reads in direct and extension-word addressing forms.
+  Preserve the genuine read-modify-write paths used by other instructions.
+- [ ] Carry the store address, privilege/function code, An update and fault
+  context explicitly. Do not commit flags/address changes too early on faults.
+
+The Motorola programmer's reference manual identifies preliminary reads for
+CLR and Scc as MC68000/MC68008 behavior (CLR p. 4-74; Scc p. 4-173). The
+sequential implementation is useful for architectural comparison but must not
+force an unnecessary read into this 68040 path.
+
+Validation: byte/word/long CLR; all Scc conditions; immediate flag producers;
+all supported EAs; A7 byte steps; adjacent-byte preservation; read-sensitive
+device model; write faults, MMU rejection, CE pauses and wrong-path squash.
+Count operand reads separately from instruction fetch and page-table walks:
+there must be **zero destination reads and one accepted logical store**.
+Physical beat counts must match access size/alignment on the 16-bit adapter.
+
+Exit target: simple stable-condition cases reach ordinary-store throughput,
+initially **at most 2 local CPI**, versus the measured 4. Confirm the reduction
+in real bus transactions as well as CPI.
+
+## Phase 3 — Remove redundant bitfield preparation cycles
+
+Primary files: decode and EA-fetch; use existing `bitfield` and `bitmem` benches.
+
+- [ ] Supply immediate offset/width together, retaining width-zero-as-32 rules.
+- [ ] Gather dynamic operands according to actual register-port availability;
+  preserve overlaps among field operand, offset, width and BFINS source.
+- [ ] Rotate register operands directly into the aligned window, bypassing the
+  register form's zero-shift `BF_S1` copy.
+- [ ] Separate read-only result generation from modifying merge/writeback work.
+  Retain timing stages around variable rotate/shift/mask/leading-zero logic.
+- [ ] Reuse preparation for memory forms without widening their access spans.
+
+Validation: all eight opcodes; immediate/dynamic offset and width; widths 1/32;
+register wrap; negative memory offsets; one-to-five-byte spans; source/destination
+aliasing; flags; byte preservation; fault on each transfer; CE pauses/flush.
+
+Exit targets for immediate register forms: read-only **at most 7 local CPI**
+(baseline 9), modifying **at most 8** (baseline 10). Dynamic and memory forms
+must not regress. This phase shortens the existing sequencer; it does not yet
+claim an overlapping bitfield execution unit.
+
+## Phase 4 — Establish stage and completion ownership
+
+Primary files: CPU, decode, EA-calculate, EA-fetch, execute and register file.
+
+- [ ] Define a documented instruction metadata bundle compatible with the
+  existing Verilog/Quartus flow: PC/next PC, operation, operand roles, size,
+  destinations, CCR effects, privilege/function code, An updates, memory
+  attributes and exception/restart context.
+- [ ] Specify valid/ready, acceptance, response, completion, squash and CE
+  behavior. Retain acknowledgements until consumed; accepted transactions
+  must complete or fault exactly once.
+- [ ] Move operand read and address arithmetic into EA-calculate incrementally:
+  simple EAs and LEA, then indexed/full-format forms and secondary addresses.
+  Register addresses before the memory stage. Adjust forwarding/read ports as
+  needed rather than merely moving the adder into an earlier file.
+- [ ] Preserve MOVE source-update-before-destination-EA semantics and genuine
+  memory-indirect pointer dependencies.
+- [ ] Give faults and completions a single instruction owner. Track partial
+  progress for operations such as MOVEM; do not assume every instruction can
+  delay all architectural effects until its final beat.
+- [ ] Replace hazards that currently rely on gather bubbles, including port C
+  and control-register dependencies, with explicit checks.
+
+Exit: architectural and bus-event equivalence for the migrated paths, except
+the intentional removed CLR/Scc reads; no new combinational
+EX-result-to-AGU-to-memory path; no simple-ALU throughput regression. Keep
+single-issue, ordered architectural completion as the initial design.
+
+## Phase 5 — Stream ordered memory work
+
+Primary files: EA-fetch, `ap040_pipe_membus.v`, `ap040_pipe_l1.v`, bus16 and CPU;
+include the FPU wrapper when moving its memory operations.
+
+- [ ] Introduce bounded request/response storage with explicit per-beat owner,
+  address, size, register destination, final-beat and restart information.
+  Support response consumption and next-request acceptance without an empty
+  bookkeeping cycle when the downstream memory can sustain it.
+- [ ] Allow store-buffer consumption and replacement in the same clock when
+  legal. Preserve byte overlap, ordering, function codes and fault attribution.
+- [ ] Feed MOVEM, paired memory operations, CHK2/CMP2 and FMOVEM through this
+  engine. Do not expand all their transfer helpers into separate global stalls.
+- [ ] Give MOVE16 a small line buffer and consecutive-transfer path. Only use
+  bursts where the downstream interface and memory attributes permit them.
+- [ ] Keep device/strongly ordered accesses conservative. Preserve MOVEP's
+  spaced byte transactions, bitfield boundaries, and CAS/CAS2 atomic ownership.
+
+Validation: faults on every beat, aliased base/destination registers, identical
+MOVE16 lines, cache-inhibited/device accesses, page crossings, pending writes,
+snoops/self-modifying code, interrupts, CE pauses and reset/flush while busy.
+Compare partial progress and physical transaction logs, not just final RAM.
+
+Provisional local-memory targets with a one-beat-per-cycle-capable interface:
+eight-register MOVEM load **at most 12 cycles**, store **at most 11**, and
+MOVE16 **at most 12**. Confirm these budgets against the finalized interface
+before implementation. Report bus-limited throughput separately; additional
+queue entries cannot increase a serial external bus's transfer capacity.
+
+## Phase 6 — Make execution units accept prepared operations
+
+Deliver these as separate changes, preserving ordered completion.
+
+### 6A. Register bitfields
+
+- [ ] Move the phase-3 field datapath into staged execution with valid bits,
+  operand/result metadata, forwarding and explicit dependency handling.
+- [ ] Share it with memory bitfields through phase 5's operand-window path.
+- [ ] Measure dependent latency separately from independent initiation rate.
+  Aim to accept independent prepared register operations every cycle; the
+  current word-at-a-time decoder may still limit instruction-level throughput.
+
+### 6B. FPU dispatch and transfers
+
+- [ ] Decode static FPU command class and operand requirements once. Launch a
+  prepared command when operands, engine acceptance and deferred-exception
+  ordering permit, without repeating general dispatch/decode helper states.
+- [ ] Preserve the existing `fpu_bg` release of register-destination arithmetic.
+  Keep deferred exceptions, FPSR/FPIAR updates and save/restore semantics.
+- [ ] Route FMOVE/FMOVEM memory operands through phase 5; retain a dedicated
+  serial path for architectural state save/restore and complex exceptions.
+
+Target: register FMOVE falls below 9 CPI, initially aiming for **at most 7**;
+FMOVEM loses transfer-helper bubbles. Validate `fpudual`, exception frames,
+resume behavior and faulted operands before claiming improved FP throughput.
+Operand-sensitive arithmetic timing needs representative finite/special values.
+
+### 6C. Long multiply
+
+- [ ] Replace `mul_wait` as a global EX hold with a staged multiplier request
+  and result path; carry both possible destinations and CCR metadata.
+- [ ] Preserve signed/unsigned, 32/64-bit result, register-alias and An-update
+  behavior, including memory forms that produce three register effects.
+
+Target: independent prepared operations can enter the multiplier each cycle;
+register MUL.L instruction throughput approaches the current decoder's
+**2 local CPI** supply limit. Keep MUL.W's existing 1-CPI path. Fit the design
+before accepting additional DSPs, registers or bypass muxes.
+
+## Phase 7 — Consider overlapping iterative division
+
+Proceed when workload measurements justify the completion machinery and area.
+
+- [ ] Retain an iterative divider initially; give it captured operands,
+  destination/flag metadata and a tagged completion slot.
+- [ ] Allow independent younger arithmetic to execute only with explicit
+  dependency tracking and bounded ordered result storage. A scoreboard alone
+  cannot preserve register/CCR order or exception precision.
+- [ ] Prevent younger stores and irreversible state changes from passing an
+  unresolved older operation. Specify interrupt, trace, flush and multi-result
+  behavior before enabling overlap.
+
+Validation: signed/unsigned word and long division; zero/overflow; dependent
+consumers; CCR readers/writers; remainder aliases; memory-source faults; CE
+pauses; younger exceptions; queue-full backpressure.
+
+Exit: DIVU.L plus four independent-GPR ADDs takes **fewer than the baseline
+15 local cycles**, with architectural CCR and completion order unchanged.
+Do not assume fully pipelining/unrolling the divider is the best area tradeoff.
+
+## Phase 8 — Improve instruction assembly and qualify integration
+
+- [ ] Add wider word delivery/buffering, length/predecode information and
+  assembled instruction packets. Start with common two-word forms, then long
+  immediates and full-format/FPU extensions. A queue alone cannot exceed its
+  sustained input-word bandwidth.
+- [ ] Test producer/consumer adjacency previously hidden by gather cycles:
+  indexed EAs, dynamic bitfields, MOVES function codes, MOVEC and stack banks.
+- [ ] Preserve instruction-fetch faults, PC-relative bases, branch prediction,
+  discarded extensions, page boundaries and self-modifying-code invalidation.
+- [ ] Profile calls/returns and CAS2 before later target/return prediction or
+  operand-gather optimization. Keep these outside the initial implementation.
+- [ ] Run representative programs on the actual bus16/MMU/cache integration,
+  resolve outstanding integration failures, and complete a full-system fit.
+
+Exit: common multiword instructions improve when instruction supply is
+available; 1-CPI register operations remain unaffected; real-system workloads
+improve without correctness or timing regressions. Preserve explicit drains
+for translation changes, exceptions/RTE and cache-control ordering.
+
+## Validation and fit gates
+
+For each focused change, run affected instruction benches in ordinary mode and
+with random CE/slow memory. Include mixed sequences that exercise forwarding,
+faults and interactions rather than only isolated instructions. Broaden to the
+full suite/corpus at stage-interface and milestone boundaries.
+
+Existing runner examples (select names relevant to the phase):
+
+```sh
+python3 tests/ap040/run_pipe_verilator.py --only move_mem,chk,bitfield,bitmem --work tests/ap040/build/restructure-directed
+python3 tests/ap040/run_pipe_verilator.py --only cepause,storeonce,rmwsup,rmwfc,fpudual,smcdual,fxdual,irqdual --ce-random --slow-l1 --work tests/ap040/build/restructure-interactions
+python3 tests/ap040/run_pipe_verilator.py --only program --ce-random --work tests/ap040/build/restructure-programs
+```
+
+Inspect every OPEN program result independently of the aggregate exit status.
+Use `tests/ap040/run_cputest.py --core pipe` with the relevant instruction
+groups and the installed corpus; compare architectural results against a
+recorded reference revision. Bus semantics with deliberate corrections, such
+as CLR/Scc, also require manual-grounded transaction expectations.
+
+Run the standalone `tests/ap040/pipe_synth/run.sh` with a **new, dedicated work
+directory for each checkpoint**: the existing script deletes its argument
+directory before building. Fit after changes to forwarding, AGU placement,
+bitfield logic, functional units or memory interfaces. Record CPU hierarchy
+and whole-top ALMs, registers, RAM, DSPs, worst paths and all-corner timing.
+Do not relax the 25 ns constraint to accept a performance optimization.
+
+Each implementation change must report:
+
+- Architectural/transaction checks and remaining known failures.
+- Before/after CPI, dependent latency and independent initiation interval.
+- Changes to instruction/data bus traffic and stall causes.
+- Area/timing deltas when the datapath/interface changed; explain any increase
+  against its measured benefit. No arbitrary full-system area estimate from a
+  standalone CPU fit.
+
+Final completion requires the targeted throughput gains, resolved relevant
+fault/restart gaps, normal and stressed regressions, affected corpus coverage,
+and timing closure within the FPGA's full-system capacity. Hardware speedup
+remains unclaimed until measured on a qualified image.

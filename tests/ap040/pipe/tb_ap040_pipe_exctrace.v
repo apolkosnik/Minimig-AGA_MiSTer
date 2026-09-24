@@ -33,7 +33,10 @@
 
 module tb_ap040_pipe_exctrace;
 
-localparam PROG_WORDS      = 400;
+// Every word the fetch stage issues counts, refetches too, and since
+// bundle 10 each SR write refetches what follows it: 400 ran out before
+// the last entries. The L1 is NOP-filled, so the slack is NOPs.
+localparam PROG_WORDS      = 600;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;

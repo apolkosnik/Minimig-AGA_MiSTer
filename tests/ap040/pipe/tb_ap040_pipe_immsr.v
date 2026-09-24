@@ -46,7 +46,11 @@
 
 module tb_ap040_pipe_immsr;
 
-localparam PROG_WORDS      = 16;
+// The fetch budget counts every word the fetch stage issues, and since
+// bundle 10 an SR write refetches the words behind it (they were fetched
+// under its privilege): the two SR operations each re-issue what was
+// already fetched. The L1 is NOP beyond the program, so the slack is NOPs.
+localparam PROG_WORDS      = 28;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;

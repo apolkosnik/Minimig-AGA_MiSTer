@@ -22,6 +22,8 @@
 ;        byte, MA (the second page refused it), a longword write.
 ; 24-29  The same write with its data from a register instead of an
 ;        immediate -- the other store route on a pipelined core.
+; 30-37  CLR and Scc on a write-protected page: written without being read,
+;        refused, restarted -- once. ST (A0)+ leaves A0 one byte on, not two.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -207,6 +209,40 @@ tloop:
 	moveq	#0,d0
 	move.w	(last_ssw).l,d0
 	chkl	d0,$0C05,29
+
+;------------- 30-37: CLR and Scc, written without a read, refused and restarted
+	move.l	#$A5A5A5A5,($9000).l
+	move.l	#$4424,(fix_addr).l	; page 9
+	move.l	#$9003,(fix_val).l
+	move.l	#$9007,($4424).l	; page 9 write-protected
+	pflusha
+	clr.l	($9000).l
+	move.l	($9000).l,d0
+	chkl	d0,0,30
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,6,31
+	move.l	(last_fa).l,d0
+	chkl	d0,$9000,32
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0405,33		; ATC + long write + supervisor data
+	lea	($9004).l,a0
+	move.b	#0,($9004).l		; the handler left page 9 writable
+	move.l	#$9007,($4424).l	; protected again
+	pflusha
+	st	(a0)+			; refused, restarted
+	moveq	#0,d0
+	move.b	($9004).l,d0
+	chkl	d0,$FF,34
+	move.l	a0,d0
+	chkl	d0,$9005,35		; stepped once, not once per attempt
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,7,36
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0425,37		; ATC + byte write + supervisor data
 
 	moveq	#0,d0
 	movec	d0,tc

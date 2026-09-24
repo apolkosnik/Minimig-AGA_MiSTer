@@ -1,5 +1,10 @@
 # AP040 Implementation Plan
 
+For the instruction-performance restructuring work identified on 2026-09-24,
+see [the pipeline restructuring plan](doc_AP040_PIPELINE_RESTRUCTURING_PLAN.md).
+It uses the current repository paths and defines implementation order,
+correctness checks, performance targets, and FPGA fit gates.
+
 This repo holds two CPU cores, not one:
 
 - **`rtl_old/`** -- the working, feature-complete sequential-FSM MC68040 core.
@@ -1688,22 +1693,28 @@ real MMU or bus-error path arrives, which is the same boundary
    the exact timing, not just the instruction sequence**, and the control
    run is the only thing that tells you whether it did.
 
-   ### Bundle 10 (2026-09-24, in progress): the sequential core's programs, then the MMU
+   ### Bundle 10 (2026-09-24): the sequential core's programs, and the MMU
 
-   WIP 817ba673, 0debfa4d, 48f9c864.
+   WIP 817ba673, 0debfa4d, 48f9c864 (the programs); 969fa7ef (the MMU),
+   86f69b53 (review 16), 476cc5d3 (double faults); benches and docs
+   closing it in the commit after. Verified on 476cc5d3 (v16): corpus all
+   eleven groups, wrong 0 (BasicFPU 362/366, the reference's four); both
+   suites green but for the two fetch-budget benches the closing commit
+   fixes. Fit (ap040_pipe_core): 17,595 ALMs, 40.41 MHz, +0.251 ns at
+   25 ns.
 
    **`tb_ap040_pipe_program.v`** runs `tests/ap040/asm`'s self-checking
    programs -- `tb_ap040_program.v`'s 64 KB map, its three bus phases and its
    protocol registers around `ap040_pipe_bus16.v` -- and
-   `run_pipe_verilator.py` runs it once per program. REQUIRED, passing all
-   three phases: t_integer, t_fastpaths, t_fpu, t_fpu_frames, t_fpu_resume,
-   Dhrystone. OPEN, run on every suite and reported with the gap that holds
-   them: t_exceptions (bus errors, PTEST), t_moves_fc, t_mmu,
-   t_bitfield_mmu, t_bitfield_cache, t_atcprobe, t_movem_restart -- every
-   one of them the MMU or the access-error frame. t_cache and bench_* are
-   excluded as `run_verilator.py` excludes them for a core without caches.
+   `run_pipe_verilator.py` runs it once per program. All fifteen are
+   REQUIRED and pass all three phases, on both suites (random ce, slow L1):
+   t_integer, t_fastpaths, t_fpu, t_fpu_frames, t_fpu_resume, t_cinv_moves,
+   Dhrystone, t_exceptions, t_moves_fc, t_mmu, t_bitfield_mmu,
+   t_bitfield_cache, t_atcprobe, t_movem_restart and t_fault_edges (new,
+   passing on both cores). t_cache and bench_* are excluded as
+   `run_verilator.py` excludes them for a core without caches.
 
-   What the programs found, all fixed:
+   What the programs found before the MMU, all fixed:
    - No reset exception processing: the ISP and PC now come from $0/$4
      (`RESET_VECTORS`, default 0 for the milestone benches).
    - CINV/CPUSH were F-line exceptions. Now privileged instructions that
@@ -1720,22 +1731,72 @@ real MMU or bus-error path arrives, which is the same boundary
    - TRAPcc judged the forwarded CCR, putting EX's shifter flags on the
      path into the output chain (ae1116d8's worst path).
 
-   Dhrystone, zero wait, phase 0: 1,442,504 cycles, CPI about 11 -- the
-   sequential core with its internal caches is about 7.7. Every data access
-   crosses the 16-bit bus here; internal caches are the performance item
-   after the MMU.
+   **The MMU.** `rtl/ap040/ap040_mmu.v`, unmodified, sits between membus and
+   the 16-bit adapter (its request port is the external memory port membus
+   drives), with the walker port and a physical bus error.
+   - Access error, format $7, the restart model (ap040_core.v's): 30 words,
+     WB3S clear, the SSW's CM/MA/ATC/LK/RW/SIZE/TT/TM, FA, the EA field.
+     From EA-fetch's own reads and writes; from an instruction fetch
+     (membus hands over ILLEGAL marked faulted, decode gives up a gather at
+     a faulted extension word, EA-fetch takes it where the ILLEGAL would
+     have been; only a fetch issued FOR a request is a demand fault, and a
+     prefetch the fetch unit joined is issued again); and from EX's store
+     (EX abandons the instruction, it is refetched, and EA-fetch takes the
+     fault it is owed when it arrives, the trace it armed withdrawn).
+   - With translation able to refuse a write (TC.E, or a data TTR), a
+     write is tentative until the MMU forwards it. A refusal is held until
+     the CPU withdraws its write in a cycle it runs; a pass is held as a
+     receipt until the CPU next presents that write (review 16: a pass
+     during ce low was lost and the store went out again -- and a schedule
+     pausing at each pass re-issued one store for ever). A refused write
+     is withdrawn at once, and an instruction with a latched access error
+     does nothing more on the port (a MOVES store re-posted inside its own
+     frame held the entry for ever).
+   - PTEST/PFLUSH through the MMU's sidebands, MMUSR. MOVEC to TC, URP,
+     SRP or a TTR waits for quiet and refetches; fetches are held off while
+     it or a PTEST/PFLUSH changes what the MMU sees (a walk had started
+     with the bus still running the access it had just passed). Every SR
+     write refetches: the words behind it were fetched under its privilege.
+   - CM: a MOVEM transfer fault stacks CM and the MOVEM's first address;
+     a format $7 RTE reads the popped frame's SSW and EA and the MOVEM
+     resumes from that address, ahead of a pending interrupt; a fault
+     before it can start keeps the outer CM/EA.
+   - A transfer crossing a page goes out a byte at a time, each through
+     its own page, MA on a fault past the boundary; a crossing write is
+     first probed on both pages (the PTEST sideband as an access check),
+     so a refused one has written nothing.
+   - An FPU transfer's access fault ends the FPU sequencer (review 16: its
+     address outranked the frame's, and the frame went partly to the
+     operand).
+   - A fault during exception processing -- a refused frame write, a
+     faulted vector read -- and an odd vector 2/3 halt until reset. The
+     odd-vector halt had been a STOP, which since bundle 9 an interrupt
+     woke.
 
-   **Next: the MMU.** `rtl/ap040/ap040_mmu.v` unmodified, between membus and
-   the adapter (its request port IS the external memory port membus
-   drives), with the walker port and a physical bus error. Faults: a
-   prefetch fault stops the stream and is re-raised only by a demand
-   fetch; a read fault returns with its data; with translation on, a write
-   is tentative until the MMU forwards it, and EA-fetch only presents one
-   once nothing older remains in EX. The format $7 frame (30 words) is
-   built in EA-fetch; an RMW whose write faults in EX refetches itself
-   owing the fault; RTE format $7; PTEST/PFLUSH/MMUSR; page-crossing
-   splits; the MOVEM restart (CM). A physical bus error on a POSTED write
-   stays a gap for now (a 68040 reports it through the write-back fields).
+   New benches: `tb_ap040_pipe_wrreceipt_bus16.v` (every store route on
+   both tops, four ce schedules, writes counted), `_fpufault_bus16.v` (FPU
+   and integer operand faults and refusals, every longword, three ce
+   schedules including a pause at each refusal, every write checked
+   against the frame), `_dblfault_bus16.v` (the three double faults, then
+   IPL 7). Mutations: 26 against the MMU work, run on the programs (25
+   caught -- the refusal-clearing one by `_fpufault_bus16.v`'s pause at each
+   refusal, which exists for it; the redirect gate on a faulted gather word
+   is not observable, below); 7 against review 16 and the double faults on
+   the benches (6 caught; gating the frame's own refused beat is
+   equivalent -- the entry leaves for its vector read the next cycle).
+   Two benches' fetch budgets (`PROG_WORDS`, which counts every issued word)
+   were raised: `immsr` and `exctrace` ran out once SR writes refetched.
+
+   Known gaps: a physical bus error on a write already accepted (posted, or
+   passed by the MMU) is dropped -- a 68040 would report it through the
+   write-back fields; a fault on the CM check's own stack read is ignored;
+   the redirect gate on a faulted gather word is not observable (without it
+   the stray fetch it stops is flushed with the fault). The fit top is
+   still `ap040_pipe_core` without the MMU.
+
+   Dhrystone, zero wait, phase 0: 1,442,504 cycles before the MMU, CPI
+   about 11 against the sequential core's 7.7 with its caches. Performance
+   is next: [the restructuring plan](doc_AP040_PIPELINE_RESTRUCTURING_PLAN.md).
 
    ### Bundle 9 (2026-09-24): full-format EA, interrupts, and 40 MHz
 
