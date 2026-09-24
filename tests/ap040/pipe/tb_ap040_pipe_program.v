@@ -48,6 +48,12 @@ wire        longword;
 wire  [2:0] fc;
 
 reg         mem_ready;
+wire        walker_req, walker_we;
+wire [31:0] walker_addr, walker_wdat;
+reg         walker_ack = 0;
+reg  [31:0] walker_data = 0;
+reg         walker_berr_r = 0;   // one-shot walker bus error, armed via $F146
+reg         wberr_arm = 0;
 reg         berr_armed;
 reg         fberr_armed = 0;
 reg  [15:0] fberr_addr = 0;
@@ -86,6 +92,9 @@ ap040_pipe_bus16 #(
 (
 	.clk (clk), .nreset (nreset), .ce (ce), .clkena_in (bus_clkena),
 	.irq_lvl (ipl_lvl), .berr (berr),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (walker_berr_r),
 	.data_in (data_in), .addr_out(addr_out), .data_write(data_write),
 	.nwr (nwr), .nuds(nuds), .nlds(nlds),
 	.busstate(busstate), .longword(longword), .fc(fc),
@@ -181,6 +190,62 @@ always @(posedge clk) begin
 	else if (ipl_step != 0) begin
 		ipl_step <= ipl_step - 1'd1;
 		if (ipl_step == 8'd1) ipl_lvl <= ipl_next;
+	end
+end
+
+// $F146 arms a one-shot bus error on the NEXT table-walker descriptor
+// access (PTEST's MMUSR B bit).
+always @(posedge clk)
+	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF146)
+		wberr_arm <= 1;
+
+// The table walker's own 32-bit physical port, tb_ap040_program.v's model:
+// an independent latency profile, and never an acknowledge on the 16-bit
+// bus, so a descriptor leaking onto that bus fails every MMU test.
+reg        walker_pending, walker_armed, walker_we_latch;
+reg [31:0] walker_addr_latch, walker_wdat_latch;
+reg  [2:0] walker_lat_cnt;
+integer    walker_lat_idx;
+always @(posedge clk) begin
+	walker_ack    <= 0;
+	walker_berr_r <= 0;
+	if (!nreset) begin
+		walker_pending <= 0; walker_armed <= 1; walker_we_latch <= 0;
+		walker_addr_latch <= 0; walker_wdat_latch <= 0; walker_data <= 0;
+		walker_lat_cnt <= latency(phase, 0); walker_lat_idx <= 1;
+	end else begin
+		if (!walker_req) walker_armed <= 1;
+		if (walker_req && (busstate != 2'b01)) begin
+			errors = errors + 1;
+			$display("FAIL: walker and 16-bit CPU bus active together (pc=%h)", dbg_pc);
+			result = 2;
+		end
+		if (walker_req && walker_armed && !walker_pending) begin
+			walker_pending    <= 1;
+			walker_armed      <= 0;
+			walker_we_latch   <= walker_we;
+			walker_addr_latch <= walker_addr;
+			walker_wdat_latch <= walker_wdat;
+			walker_lat_cnt    <= latency(phase, walker_lat_idx);
+			walker_lat_idx    <= walker_lat_idx + 1;
+		end else if (walker_pending) begin
+			if (walker_lat_cnt != 0) walker_lat_cnt <= walker_lat_cnt - 1'd1;
+			else if (wberr_arm) begin
+				wberr_arm <= 0; walker_pending <= 0; walker_berr_r <= 1;
+			end else begin
+				if (walker_addr_latch[31:16] != 0 || walker_addr_latch[1:0] != 0) begin
+					errors = errors + 1;
+					$display("FAIL: invalid walker address %h", walker_addr_latch);
+					result = 2;
+				end else if (walker_we_latch) begin
+					mem[walker_addr_latch[15:1]] = walker_wdat_latch[31:16];
+					mem[walker_addr_latch[15:1] + 1'b1] = walker_wdat_latch[15:0];
+				end else
+					walker_data <= {mem[walker_addr_latch[15:1]], mem[walker_addr_latch[15:1] + 1'b1]};
+				walker_pending <= 0;
+				walker_ack     <= 1;
+			end
+		end
 	end
 end
 

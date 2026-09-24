@@ -90,6 +90,11 @@ wire [31:0] dbg_if_pc, dbg_id_pc, dbg_eac_pc, dbg_eaf_pc, dbg_ex_pc, dbg_wb_pc;
 ap040_pipe_bus16 #(.PC_RESET(32'h0000_1000), .PROG_WORDS(32'h4000_0000)) dut
 (
 	.clk(clk), .nreset(nreset), .ce(ce), .clkena_in(clkena_in), .irq_lvl(irq_drv),
+	// No bus errors and no table walks in a corpus round: tied, never left
+	// floating (the corpus ran from 817ba673 to here with berr unconnected).
+	.berr (1'b0),
+	.walker_req (), .walker_we (), .walker_addr (), .walker_wdat (),
+	.walker_ack (1'b0), .walker_data (32'd0), .walker_berr (1'b0),
 	.data_in(data_in),
 	.addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),

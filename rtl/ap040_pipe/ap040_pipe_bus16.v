@@ -39,6 +39,16 @@ module ap040_pipe_bus16
 	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none
 	input  clkena_in,    // advances the bus: one pulse per 16-bit sub-cycle
 	input  berr,         // a physical bus error on the current sub-cycle
+	// The MMU's table walker has its own physical longword port, as
+	// rtl/ap040/ap040_tg68k_compat.v's does: descriptor traffic never
+	// crosses the 16-bit CPU bus.
+	output        walker_req,
+	output        walker_we,
+	output [31:0] walker_addr,
+	output [31:0] walker_wdat,
+	input         walker_ack,
+	input  [31:0] walker_data,
+	input         walker_berr,
 
 	input  [15:0] data_in,
 	output [31:0] addr_out,
@@ -70,6 +80,13 @@ wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
+wire        l1_rflt_a, l1_rflt_b, l1_wflt, l1_flt_bus, l1_wr_sync;
+wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
+wire        mmu_flt;
+wire        mm_req, mm_write, mm_instr, mm_ack;
+wire  [1:0] mm_size;
+wire [31:0] mm_addr, mm_wdata, mm_rdata;
+wire  [2:0] mm_fc;
 wire        l1_fc_ovr;
 wire  [2:0] l1_fc_val;
 
@@ -94,6 +111,10 @@ ap040_pipe_cpu #(
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 	.l1_inval_a(l1_inval_a),
+	.l1_rflt_a(l1_rflt_a), .l1_rflt_b(l1_rflt_b), .l1_wflt(l1_wflt), .l1_flt_bus(l1_flt_bus),
+	.l1_wr_sync(l1_wr_sync),
+	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
+	.mmu_dtt0(mmu_dtt0), .mmu_dtt1(mmu_dtt1),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
@@ -125,17 +146,48 @@ ap040_pipe_membus u_bus
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),
-	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata)
+	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
+	// a physical bus error ends the sub-cycle the adapter is running, on the
+	// enable it aborts on
+	.mem_flt  (mmu_flt || (berr && clkena_in && mem_req)),
+	.mem_flt_bus(!mmu_flt && berr && clkena_in && mem_req),
+	.mem_pass (mm_req),
+	.wr_sync  (l1_wr_sync),
+	.rflt_a   (l1_rflt_a), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus)
+);
+
+// The MMU (2026-09-24): rtl/ap040/ap040_mmu.v, the sequential core's own,
+// unmodified, on the external memory port membus drives -- which is the
+// port the sequential core drives it from. ce is 1: membus runs every
+// clock, and the MMU's one-cycle fault pulse must be one membus cycle.
+ap040_mmu u_mmu
+(
+	.clk (clk), .nreset (nreset), .ce (1'b1),
+	.tc (mmu_tc), .urp (mmu_urp), .srp (mmu_srp),
+	.itt0 (mmu_itt0), .itt1 (mmu_itt1), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
+	.c_req (mem_req), .c_write (mem_write), .c_instr (mem_instr), .c_size (mem_size),
+	.c_addr (mem_addr), .c_wdata (mem_wdata), .c_fc (mem_fc),
+	.c_ack (mem_ack), .c_rdata (mem_rdata), .c_flt (mmu_flt),
+	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
+	.pt_done (), .pt_mmusr (),
+	.pf_req (1'b0), .pf_mode (2'd0), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (),
+	.m_req (mm_req), .m_write (mm_write), .m_instr (mm_instr), .m_size (mm_size),
+	.m_addr (mm_addr), .m_wdata (mm_wdata), .m_fc (mm_fc),
+	.m_ack (mm_ack), .m_rdata (mm_rdata),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (walker_berr),
+	.phys_addr (), .cache_inhibit (), .m_nocache ()
 );
 
 ap040_bus16_adapter u_bus16
 (
 	.clk (clk), .nreset (nreset), .clkena_in (clkena_in),
 
-	.mem_req  (mem_req),  .mem_berr (berr),     .mem_write(mem_write),
-	.mem_instr(mem_instr), .mem_size(mem_size), .mem_addr (mem_addr),
-	.mem_wdata(mem_wdata), .mem_fc  (mem_fc),
-	.mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
+	.mem_req  (mm_req),   .mem_berr (berr),     .mem_write(mm_write),
+	.mem_instr(mm_instr),  .mem_size(mm_size),  .mem_addr (mm_addr),
+	.mem_wdata(mm_wdata),  .mem_fc  (mm_fc),
+	.mem_ack  (mm_ack),    .mem_rdata(mm_rdata),
 
 	.data_in   (data_in),   .addr_out(addr_out), .data_write(data_write),
 	.nwr       (nwr),       .nuds    (nuds),     .nlds      (nlds),

@@ -33,7 +33,7 @@ CORE = [RTL / n for n in (
 # hiding a regression anywhere else. t_cache and bench_* are the
 # sequential core's no-cache exclusions as well (run_verilator.py): this
 # core has no internal caches.
-PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "dhry"]
+PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry"]
 PROGRAMS_OPEN = {
     "t_exceptions":     "MOVES function codes, bus errors (format $7), PTEST",
     "t_moves_fc":       "MOVES function codes on the bus",
@@ -59,6 +59,10 @@ def program_image(name, work):
     return HERE / "build" / (name + ".hex")
 
 
+# ap040_pipe_bus16.v carries the MMU (rtl/ap040/ap040_mmu.v, whose ATCs are
+# dpram rows: sim_dpram.v here, rtl/cpu_cache_new.v's in synthesis).
+BUS16 = [RTL / "ap040_pipe_bus16.v", ROOT / "rtl/ap040/ap040_bus16_adapter.v",
+         ROOT / "rtl/ap040/ap040_mmu.v", HERE / "sim_dpram.v"]
 # ap040_pipe_fpu.v runs the shared FPU engine, which includes rtl/ap040's
 # ap040_defs.svh, so every build takes that directory too.
 
@@ -120,29 +124,26 @@ def main():
         elif name.endswith("dual"):
             # The differential bench instantiates the FSM core beside the
             # pipelined one, so rtl/ap040's whole core comes too.
-            src = CORE + [RTL / "ap040_pipe_bus16.v"] + [
+            src = CORE + [RTL / "ap040_pipe_bus16.v", ROOT / "rtl/ap040/ap040_bus16_adapter.v"] + [
                 ROOT / "rtl/ap040" / n for n in (
-                    "ap040_tg68k_compat.v", "ap040_core.v", "ap040_bus16_adapter.v",
+                    "ap040_tg68k_compat.v", "ap040_core.v",
                     "ap040_regfile.v", "ap040_alu.v", "ap040_muldiv.v",
                     "ap040_mmu.v", "ap040_cache.v")   # ap040_fpu.v is in CORE
             ] + [HERE / "sim_dpram.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("inject"):
-            # ap040_pipe_bus16.v, which brings the FSM core's adapter with it
-            # -- the same top the corpus replay would drive.
-            src = CORE + [RTL / "ap040_pipe_bus16.v",
-                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            # ap040_pipe_bus16.v, which brings the FSM core's adapter and MMU
+            # with it -- the same top the corpus replay would drive.
+            src = CORE + BUS16
             inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("program"):
-            # ap040_pipe_bus16.v and its adapter, as for the bus16 bench.
-            src = CORE + [RTL / "ap040_pipe_bus16.v",
-                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            # ap040_pipe_bus16.v with its adapter and MMU, as for the bus16 bench.
+            src = CORE + BUS16
             inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("bus16"):
             # ap040_pipe_bus16.v instantiates the FSM core's own 16-bit
-            # adapter, so that file and its include directory come too.
-            src = CORE + [RTL / "ap040_pipe_bus16.v",
-                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            # adapter and MMU, so those files and their include directory come.
+            src = CORE + BUS16
             inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("alu_equiv"):
             src = [RTL / "ap040_pipe_alu.v", ROOT / "rtl/ap040/ap040_alu.v"]

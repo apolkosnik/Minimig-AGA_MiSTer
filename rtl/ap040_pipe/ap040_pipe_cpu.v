@@ -187,6 +187,16 @@ module ap040_pipe_cpu
 	output [31:0] l1_data_b,
 	input         l1_wr_busy,
 	output        l1_inval_a,   // empty the prefetch stream: CINV/CPUSH's refetch
+	// Access faults from the memory side (2026-09-24): with the return, the
+	// fetch or read faulted; the tentative write being presented faulted;
+	// and which kind it was (a physical bus error rather than the MMU).
+	input         l1_rflt_a,
+	input         l1_rflt_b,
+	input         l1_wflt,
+	input         l1_flt_bus,
+	output        l1_wr_sync,   // translation can refuse a data write now
+	// The MMU's registers, for rtl/ap040/ap040_mmu.v beside the bus.
+	output [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1,
 	input  [31:0] l1_q_b,
 	input         l1_rvalid_b,
 
@@ -659,6 +669,12 @@ always @(posedge clk) begin
 		endcase
 	end
 end
+
+assign mmu_tc = tc;     assign mmu_urp = urp;   assign mmu_srp = srp;
+assign mmu_itt0 = itt0; assign mmu_itt1 = itt1; assign mmu_dtt0 = dtt0; assign mmu_dtt1 = dtt1;
+// A data TTR can refuse a write (its W bit) with TC.E clear, so either
+// makes a write tentative.
+assign l1_wr_sync = tc[15] || dtt0[15] || dtt1[15];
 
 wire [31:0] usp_q, isp_q, msp_q;   // ap040_pipe_regfile.v's own state, read
                                     // back here for MOVEC's read direction

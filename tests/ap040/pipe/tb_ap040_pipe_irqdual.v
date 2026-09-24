@@ -524,6 +524,8 @@ ap040_pipe_bus16 #(
 	.clk (clk), .nreset (nreset), .ce (1'b1), .clkena_in (p_clkena),
 	.irq_lvl (p_lvl),
 	.berr (1'b0),   // no bus errors in this bench
+	.walker_req (), .walker_we (), .walker_addr (), .walker_wdat (),
+	.walker_ack (1'b0), .walker_data (32'd0), .walker_berr (1'b0),   // no MMU walks here
 	.data_in (p_din), .addr_out(p_addr), .data_write(p_dwrite),
 	.nwr (p_nwr), .nuds(p_nuds), .nlds(p_nlds),
 	.busstate(p_busstate), .longword(p_longword), .fc(p_fc),

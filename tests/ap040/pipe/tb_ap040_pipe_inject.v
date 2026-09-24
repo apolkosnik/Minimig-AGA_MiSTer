@@ -73,6 +73,8 @@ ap040_pipe_bus16 #(
 ) dut (
 	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.berr (1'b0),   // no bus errors in this bench
+	.walker_req (), .walker_we (), .walker_addr (), .walker_wdat (),
+	.walker_ack (1'b0), .walker_data (32'd0), .walker_berr (1'b0),   // no MMU walks here
 	.clk(clk), .nreset(nreset), .ce(ce), .clkena_in(clkena_in),
 	.data_in(data_in), .addr_out(addr_out), .data_write(data_write),
 	.nwr(nwr), .nuds(nuds), .nlds(nlds),
