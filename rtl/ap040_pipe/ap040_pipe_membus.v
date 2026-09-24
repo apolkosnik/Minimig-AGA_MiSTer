@@ -28,9 +28,23 @@
 // the new address re-issued -- the CPU never sees the stale word, which is //
 // the same guarantee ap040_pipe_l1.v gives by restarting its port A.       //
 //                                                                          //
-// Transaction sizes: a fetch is a Word; data accesses carry the CPU's own  //
-// size and address, at whatever alignment, and the adapter below splits    //
-// them (milestone 86).                                                     //
+// Transaction sizes: data accesses carry the CPU's own size and address,  //
+// at whatever alignment, and the adapter below splits them (milestone 86). //
+//                                                                          //
+// Instruction prefetch (2026-09-24). Fetching one Word per transaction,    //
+// and only once the previous word had been handed over, held the pipeline  //
+// to 4 cycles per instruction on a zero-wait bus where the sequential core //
+// ran at 2. Fetches are now aligned longwords into a four-entry stream     //
+// buffer that runs ahead of the fetch unit whenever the bus has nothing    //
+// else to do. A request inside the buffered window is answered the next   //
+// cycle -- the timing the L1 array's port A gives, so ap040_inst_fetch.v   //
+// issues back to back -- and the window slides forward to it. A request    //
+// for the longword on the bus waits for it; anything else is a redirect:   //
+// the window is emptied, the read in flight is discarded when it returns,  //
+// and the stream restarts at the new address. A CPU write that touches the //
+// window or the read in flight empties it, and writes go out before the   //
+// refetch, so a store into the instruction stream is fetched. A change of  //
+// privilege does the same, so every word carries its own function code.   //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -78,10 +92,23 @@ localparam [1:0] WHO_A = 2'd0, WHO_BR = 2'd1, WHO_BW = 2'd2;
 
 reg        busy;        // a transaction is on the bus
 reg  [1:0] who;         // whose it is
-reg [31:0] cur_addr_a;  // the address the in-flight FETCH was started for
 
 reg        a_pend;      // a fetch is wanted and has not been returned
 reg [31:0] a_addr;
+
+// The prefetch stream. Entry i holds the longword whose address bits [3:2]
+// are i; the window is pf_cnt longwords from pf_base, never more than four,
+// so no two of them share an entry and nothing is ever shifted. The next
+// longword to fetch -- and the one on the bus, if pf_out -- is always
+// pf_base + 4 * pf_cnt: sliding the window forward adds to the one what it
+// takes from the other.
+localparam [2:0] PF_N = 3'd4;
+reg [31:0] pf_q [0:3];
+reg [29:0] pf_base;     // longword address
+reg  [2:0] pf_cnt;
+reg        pf_out;      // a prefetch read is on the bus
+reg        pf_kill;     // ...for a window since emptied: drop it when it returns
+reg        pf_sup;      // the privilege the stream was fetched under
 reg        b_pend;      // a data read is wanted and has not been returned
 reg [31:0] b_addr;
 reg  [1:0] b_size;
@@ -108,9 +135,50 @@ function [2:0] fc_of;
 	end
 endfunction
 
+// This cycle's view of the window, with a prefetch that returns now already
+// in it -- a request in the same cycle must see it.
+wire        pf_ack     = busy && mem_ack && (who == WHO_A);
+wire        pf_app     = pf_ack && !pf_kill;
+wire [29:0] pf_next    = pf_base + {27'd0, pf_cnt};
+wire  [2:0] pf_cnt1    = pf_cnt + {2'd0, pf_app};
+function [31:0] pf_word1;   // entry i, including the longword arriving now
+	input [1:0] i;
+	begin
+		pf_word1 = (pf_app && (i == pf_next[1:0])) ? mem_rdata : pf_q[i];
+	end
+endfunction
+wire [29:0] req_lw     = address_a[31:2];
+wire [29:0] req_k      = req_lw - pf_base;
+wire        req_hit    = (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
+wire [31:0] req_long   = pf_word1(req_lw[1:0]);
+// ...or the one still on the bus, which it will wait for.
+wire        req_onbus  = pf_out && !pf_ack && !pf_kill && (req_lw == pf_next) && (sup == pf_sup);
+// A pending request whose longword arrives now. It always is the one: a
+// miss restarts the window AT the requested longword with nothing in it, so
+// the first fill to join -- after any write empties it again -- is that
+// longword. (An address compare here could never be false.)
+wire        pend_fill  = a_pend && pf_app;
+// A write accepted this cycle that touches the window or the read in flight.
+wire [29:0] w_lo       = address_b[31:2];
+wire [29:0] w_hi       = w_lo + {29'd0, (size_b == `AP040_SZ_L) && (address_b[1:0] != 2'd0)} +
+                         {29'd0, (size_b == `AP040_SZ_W) && (address_b[1:0] == 2'd3)};
+wire        w_accept   = wren_b && !w_pend;
+wire        w_hits_pf  = w_accept && (w_hi >= pf_base) && (w_lo <= pf_base + {27'd0, PF_N});
+// What the next prefetch would be once this cycle's request is applied. A
+// hit leaves base + count where it was; a miss starts the new stream, which
+// can go out in the same cycle. Keeping prefetch out of every request cycle
+// instead refilled the window only once the fetch unit had drained it --
+// 2.5 cycles per instruction on the zero-wait bus rather than the bus's own
+// rate.
+wire [29:0] pf_issue_lw = (en_a && !req_hit) ? req_lw : pf_next;
+wire  [2:0] pf_cnt_aft  = !en_a ? pf_cnt1 : req_hit ? (pf_cnt1 - req_k[2:0]) : 3'd0;
+wire        pf_issue_sp = (en_a && !req_hit) ? sup : pf_sup;
+
 always @(posedge clk) begin
 	if (!nreset) begin
-		busy <= 1'b0; who <= WHO_A; cur_addr_a <= 32'd0;
+		busy <= 1'b0; who <= WHO_A;
+		pf_base <= 30'd0; pf_cnt <= 3'd0; pf_out <= 1'b0; pf_kill <= 1'b0; pf_sup <= 1'b1;
+		pf_q[0] <= 32'd0; pf_q[1] <= 32'd0; pf_q[2] <= 32'd0; pf_q[3] <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
 		a_sup <= 1'b1; b_sup <= 1'b1; w_sup <= 1'b1;
@@ -121,12 +189,47 @@ always @(posedge clk) begin
 		mem_size <= `AP040_SZ_L; mem_addr <= 32'd0; mem_wdata <= 32'd0;
 		mem_fc <= `AP040_FC_SUPER_PROG;
 	end else begin
-		// ---- new requests ----
+		// ---- the prefetch stream ----
+		// A prefetch arriving for the live window joins it.
+		if (pf_ack) begin
+			pf_out <= 1'b0;
+			if (pf_kill) pf_kill <= 1'b0;
+			else begin
+				pf_q[pf_next[1:0]] <= mem_rdata;
+				pf_cnt <= pf_cnt1;
+			end
+		end
 		if (en_a) begin
-			a_addr   <= {address_a[31:1], 1'b0};
-			a_sup    <= sup;
-			a_pend   <= 1'b1;
-			rvalid_a <= 1'b0;
+			a_addr <= {address_a[31:1], 1'b0};
+			a_sup  <= sup;
+			if (req_hit) begin
+				// Buffered: answered next cycle, and the window starts here.
+				q_a      <= address_a[1] ? req_long[15:0] : req_long[31:16];
+				rvalid_a <= 1'b1;
+				a_pend   <= 1'b0;
+				pf_base  <= req_lw;
+				pf_cnt   <= pf_cnt1 - req_k[2:0];
+			end else begin
+				rvalid_a <= 1'b0;
+				a_pend   <= 1'b1;
+				pf_base  <= req_lw;
+				pf_cnt   <= 3'd0;
+				pf_sup   <= sup;
+				// On the bus and still wanted: it lands at the new base. Any
+				// other read in flight belongs to the old window.
+				if (pf_out && !pf_ack && !req_onbus) pf_kill <= 1'b1;
+			end
+		end else if (pend_fill) begin
+			q_a      <= a_addr[1] ? mem_rdata[15:0] : mem_rdata[31:16];
+			rvalid_a <= 1'b1;
+			a_pend   <= 1'b0;
+		end
+		// A write into the window, or into the read in flight, empties it;
+		// what was pending is fetched again, after the write.
+		if (w_hits_pf) begin
+			pf_cnt <= 3'd0;
+			if (pf_out && !pf_ack) pf_kill <= 1'b1;
+			if (en_a && req_hit) pf_base <= req_lw + 30'd1;   // the word just served is gone past
 		end
 		if (rd_b) begin
 			b_addr   <= address_b;
@@ -149,30 +252,7 @@ always @(posedge clk) begin
 				busy    <= 1'b0;
 				mem_req <= 1'b0;   // dropped in the ack cycle, per the contract
 				case (who)
-				WHO_A: begin
-					// ...unless a redirect moved the fetch while it was out.
-					// TWO ways that happens, and the address compare alone
-					// only catches one (milestone 92). A redirect from an
-					// EARLIER cycle has already changed a_addr, so the
-					// compare fails and the word is dropped. A redirect
-					// accepted in THIS cycle has not: a_addr is written
-					// non-blocking above and still reads as the old address
-					// here, so the compare passes, the abandoned word is
-					// published as valid, and a_pend is cleared -- which
-					// also cancels the fetch the redirect had just asked
-					// for. en_a says so directly.
-					//
-					// It does not cost the ordinary back-to-back fetch:
-					// rvalid_a is a register, so ap040_inst_fetch.v sees it
-					// the cycle AFTER the acknowledgement and issues its
-					// next request then. The two coincide only on a
-					// redirect.
-					if (cur_addr_a == a_addr && !en_a) begin
-						q_a      <= mem_rdata[15:0];
-						rvalid_a <= 1'b1;
-						a_pend   <= 1'b0;
-					end
-				end
+				WHO_A: ;   // the prefetch stream, above
 				WHO_BR: begin
 					q_b      <= mem_rdata;
 					rvalid_b <= 1'b1;
@@ -191,12 +271,14 @@ always @(posedge clk) begin
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
 			mem_size  <= b_size; mem_addr <= b_addr;
 			mem_fc    <= fc_of(1'b0, b_sup);
-		end else if (a_pend) begin
+		end else if (!pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf) begin
+			// The next longword of the stream, as the window stands after
+			// this cycle's request.
 			busy       <= 1'b1;  who <= WHO_A;
-			cur_addr_a <= a_addr;
+			pf_out     <= 1'b1;
 			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;
-			mem_size   <= `AP040_SZ_W; mem_addr <= a_addr;
-			mem_fc     <= fc_of(1'b1, a_sup);
+			mem_size   <= `AP040_SZ_L; mem_addr <= {pf_issue_lw, 2'b00};
+			mem_fc     <= fc_of(1'b1, pf_issue_sp);
 		end
 	end
 end

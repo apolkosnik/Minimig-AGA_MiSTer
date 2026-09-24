@@ -145,7 +145,7 @@ always @(posedge clk) begin
 					if (mem_fc !== `AP040_FC_SUPER_PROG)
 						handler_fc_bad = handler_fc_bad + 1;
 				end
-				if (mem_size !== `AP040_SZ_W)        size_bad = size_bad + 1;
+				if (mem_size !== `AP040_SZ_L || mem_addr[1:0] != 2'b00) size_bad = size_bad + 1;   // prefetch: aligned Longs
 			end else begin
 				if (mem_fc === `AP040_FC_USER_DATA)  data_user  = data_user + 1;
 				if (mem_fc === `AP040_FC_SUPER_DATA) data_super = data_super + 1;

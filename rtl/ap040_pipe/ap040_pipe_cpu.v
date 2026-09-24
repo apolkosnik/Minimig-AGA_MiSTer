@@ -278,7 +278,7 @@ wire        id_chk_long, eac_chk_long;
 wire        id_is_bsr, id_is_jsr, id_is_trap, id_is_illegal;
 wire  [1:0] id_illegal_kind, eac_illegal_kind;
 wire        id_is_movesr, id_is_movec;
-wire        id_is_rts, id_is_rte, id_is_nop, id_is_reset, id_is_rtr;
+wire        id_is_rts, id_is_rte, id_is_nop, id_is_reset, id_is_rtr, id_bnt;
 wire  [3:0] id_cond;
 
 wire        eac_valid; wire [31:0] eac_pc; wire [31:0] eac_next_pc;
@@ -313,7 +313,7 @@ wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
 wire        rf3_we;
 wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
-wire        eaf_is_rmw, eaf_is_link, eaf_is_mm, eaf_is_xm;
+wire        eaf_is_rmw, eaf_is_link, eaf_is_mm, eaf_is_xm, eaf_bnt;
 wire  [1:0] eaf_mvfsr;
 wire  [6:0] eaf_ml;
 wire  [2:0] eaf_bf;
@@ -323,7 +323,7 @@ wire  [5:0] eaf_rtr_ccr;
 wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
-wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr;
+wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr, eac_bnt;
 wire  [3:0] eac_cond;
 
 wire        eaf_valid; wire [31:0] eaf_pc; wire [31:0] eaf_next_pc;
@@ -834,6 +834,7 @@ ap040_decode u_id
 	.id_is_movec     (id_is_movec),
 	.id_is_rts       (id_is_rts),
 	.id_is_nop       (id_is_nop),
+	.id_bnt          (id_bnt),
 	.id_is_rtr       (id_is_rtr),
 	.id_is_reset     (id_is_reset),
 	.id_is_rte       (id_is_rte),
@@ -916,6 +917,7 @@ ap040_ea_calc u_eac
 	.id_is_movec      (id_is_movec),
 	.id_is_rts        (id_is_rts),
 	.id_is_nop        (id_is_nop),
+	.id_bnt           (id_bnt),
 	.id_is_rtr        (id_is_rtr),
 	.id_is_reset      (id_is_reset),
 	.id_is_rte        (id_is_rte),
@@ -991,6 +993,7 @@ ap040_ea_calc u_eac
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
 	.eac_is_rte       (eac_is_rte),
@@ -1088,6 +1091,7 @@ ap040_ea_fetch #(
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
 	.eaf_is_xm        (eaf_is_xm),
+	.eaf_bnt          (eaf_bnt),
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),
@@ -1104,6 +1108,7 @@ ap040_ea_fetch #(
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
 	.eac_is_rte       (eac_is_rte),
@@ -1245,6 +1250,7 @@ ap040_execute u_ex
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_mm        (eaf_is_mm),
 	.eaf_is_xm        (eaf_is_xm),
+	.eaf_bnt          (eaf_bnt),
 	.eaf_mvfsr        (eaf_mvfsr),
 	.eaf_ml           (eaf_ml),
 	.eaf_bf           (eaf_bf),

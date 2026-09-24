@@ -366,6 +366,7 @@ module ap040_decode
 	output reg        id_is_movec,
 	output reg        id_is_rts,
 	output reg        id_is_nop,       // T0 trace treats NOP as a change of flow (milestone 79)
+	output reg        id_bnt,          // a conditional branch predicted NOT taken (2026-09-24)
 	output reg        id_is_reset,     // RESET: privileged, nothing else (milestone 117)
 	output reg        id_is_rte,
 	output reg        id_is_rtr,       // RTR: rides RTE's pops (milestone 117)
@@ -2444,7 +2445,16 @@ wire [31:0] gather_disp = held_is_long ? {disp_acc[15:0], if_opcode}
 // value, not known until EA-fetch -- see header comment). BSR is NOT
 // excluded here -- unconditionally taken, same as BRA, so the "assume
 // taken" guess is always correct -- see this file's header.
-wire redirect_from_byte   = if_valid && (is_branch_byte || is_bsr_byte) && (ext_pending == 3'd0);
+// Static branch prediction (2026-09-24): backward taken, forward not taken,
+// for the CONDITIONAL branches. Every branch used to be predicted taken, so
+// a forward branch that fell through -- the common if-then shape -- paid a
+// full recovery: 4 cycles on the local array and 6 on the bus against the
+// sequential core's 1.5. A forward conditional branch now does not redirect;
+// id_bnt tells EX, which redirects to the target when it IS taken. BRA and
+// BSR always go, and a backward Bcc and DBcc -- loops -- keep the old guess.
+wire bnt_byte   = is_branch_byte && (if_opcode[11:8] != 4'h0) && !if_opcode[7];
+wire bnt_gather = held_is_branch && (held_cond != 4'h0) && !gather_disp[31];
+wire redirect_from_byte   = if_valid && ((is_branch_byte && !bnt_byte) || is_bsr_byte) && (ext_pending == 3'd0);
 // ... and NOT an immediate-source ALU op (milestone 26): its gathered words
 // are an operand, not a displacement, so there is no target to speculate
 // with. Without this exclusion the completing gather redirects to
@@ -2463,7 +2473,8 @@ wire redirect_from_gather = if_valid && completing_gather && !held_is_move_disp 
                              !held_is_scc_mem &&
                              !held_is_trapcc && !held_is_pack && !held_is_rtd && !held_mm &&
                              !held_moves && !held_mvto && !held_mvf && !held_movep && !held_ml && !held_bf &&
-                             !held_ck2 && !held_cas && !held_m16 && !held_cas2;
+                             !held_ck2 && !held_cas && !held_m16 && !held_cas2 &&
+                             !bnt_gather;
 
 // MOVEC gather-completion helper: an otherwise-recognized MOVEC whose
 // extension-word selector names something this core doesn't model (the MMU
@@ -2630,6 +2641,7 @@ always @(posedge clk) begin
 		id_is_movec     <= 1'b0;
 		id_is_rts       <= 1'b0;
 		id_is_nop       <= 1'b0;
+		id_bnt          <= 1'b0;
 		id_is_reset     <= 1'b0;
 		id_is_rte       <= 1'b0;
 		id_is_rtr       <= 1'b0;
@@ -3101,6 +3113,7 @@ always @(posedge clk) begin
 					id_is_movec     <= held_is_movec;
 					id_is_rts       <= held_is_rtd;
 					id_is_nop       <= 1'b0;
+					id_bnt          <= bnt_gather;
 					id_is_reset     <= 1'b0;
 					id_is_rte       <= 1'b0;
 					id_is_rtr       <= 1'b0;
@@ -3587,6 +3600,7 @@ always @(posedge clk) begin
 				id_is_movec     <= if_valid && is_move_usp;
 				id_is_rts       <= if_valid && is_rts;
 				id_is_nop       <= if_valid && is_nop;
+				id_bnt          <= if_valid && bnt_byte;
 				id_is_reset     <= if_valid && is_reset;
 				id_is_rte       <= if_valid && is_rte;
 				id_is_rtr       <= if_valid && is_rtr;

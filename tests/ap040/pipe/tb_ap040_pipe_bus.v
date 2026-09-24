@@ -32,10 +32,11 @@
 // byte addresses.                                                          //
 //                                                                          //
 // Besides the program's result the bench watches the bus itself: every     //
-// fetch must be a Word with a supervisor-program function code, every      //
-// data access a supervisor-data one, and the store must appear as one      //
-// Long write to $0800 -- a byte-at-a-time or wrongly-sized bridge would    //
-// still leave the right bytes in memory here.                              //
+// fetch must be an aligned Long -- the prefetch stream's unit since         //
+// 2026-09-24; it was a Word -- with a supervisor-program function code,    //
+// every data access a supervisor-data one, and the store must appear as   //
+// one Long write to $0800 -- a byte-at-a-time or wrongly-sized bridge      //
+// would still leave the right bytes in memory here.                        //
 //                                                                          //
 // There is no milestone-80 control for this bench: ap040_pipe_sys.v does   //
 // not exist before milestone 81, and the CPU could not be instantiated     //
@@ -141,7 +142,7 @@ always @(posedge clk) begin
 			if (mem_instr) begin
 				fetches = fetches + 1;
 				if (mem_fc !== `AP040_FC_SUPER_PROG) fc_bad = fc_bad + 1;
-				if (mem_size !== `AP040_SZ_W)        size_bad = size_bad + 1;
+				if (mem_size !== `AP040_SZ_L || mem_addr[1:0] != 2'b00) size_bad = size_bad + 1;   // prefetch: aligned Longs
 			end else begin
 				if (mem_fc !== `AP040_FC_SUPER_DATA) fc_bad = fc_bad + 1;
 				if (mem_write) begin

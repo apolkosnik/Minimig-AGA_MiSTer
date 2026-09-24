@@ -210,6 +210,7 @@ module ap040_execute
 	input             eaf_is_rmw,
 	input             eaf_is_mm,
 	input             eaf_is_xm,
+	input             eaf_bnt,
 	input       [1:0] eaf_mvfsr,
 	input       [6:0] eaf_ml,
 	input       [2:0] eaf_bf,
@@ -378,8 +379,34 @@ always @(posedge clk) begin
 end
 
 wire        div_req    = eaf_valid && eaf_is_div;
-wire [32:0] div_rem_sh = {div_rem[31:0], div_dvd[31]};
-wire        div_rem_ge = (div_rem_sh >= {1'b0, div_dsr});
+// DIV_STEP restoring steps a cycle (2026-09-24). One a cycle made every
+// divide 34-35 cycles against the sequential core's 21-23, whose divider
+// does four; the four chained compare-subtracts stay inside the divider's
+// own registers, off the ALU's paths. 32 must divide by it: 1, 2, 4 or 8.
+localparam integer DIV_STEP = 4;
+function [64:0] div_steps;   // {remainder[32:0], dividend/quotient[31:0]}
+	input [32:0] rem;
+	input [31:0] dvd;
+	input [31:0] dsr;
+	integer k;
+	reg   [32:0] r, sh;
+	reg   [31:0] d;
+	begin
+		r = rem; d = dvd;
+		for (k = 0; k < DIV_STEP; k = k + 1) begin
+			sh = {r[31:0], d[31]};
+			if (sh >= {1'b0, dsr}) begin
+				r = sh - {1'b0, dsr};
+				d = {d[30:0], 1'b1};
+			end else begin
+				r = sh;
+				d = {d[30:0], 1'b0};
+			end
+		end
+		div_steps = {r, d};
+	end
+endfunction
+wire [64:0] div_next   = div_steps(div_rem, div_dvd, div_dsr);
 wire        div_fin    = div_busy && (div_cnt == 6'd0);
 wire        div_wait   = div_req && !div_fin;
 
@@ -444,15 +471,15 @@ always @(posedge clk) begin
 	end else if (ce) begin
 		if (div_req && !div_busy) begin
 			div_busy <= 1'b1;
-			div_cnt  <= 6'd32;
+			div_cnt  <= 6'd32 / DIV_STEP;
 			div_rem  <= {1'b0, dvd_mag[63:32]};
 			div_dvd  <= dvd_mag[31:0];
 			div_dsr  <= dsr_mag;
 			div_qneg <= dvd_neg ^ dsr_neg;
 			div_rneg <= dvd_neg;
 		end else if (div_busy && div_cnt != 6'd0) begin
-			div_rem <= div_rem_ge ? (div_rem_sh - {1'b0, div_dsr}) : div_rem_sh;
-			div_dvd <= {div_dvd[30:0], div_rem_ge};
+			div_rem <= div_next[64:32];
+			div_dvd <= div_next[31:0];
 			div_cnt <= div_cnt - 6'd1;
 		end else if (div_fin) begin
 			div_busy <= 1'b0;
@@ -626,13 +653,17 @@ wire exc_reaching_ex = eaf_is_trap || eaf_is_illegal || eaf_is_priv || eaf_is_ad
 wire redirect_always = eaf_is_jmp || eaf_is_jsr || eaf_is_rts || eaf_is_rte ||
                         exc_reaching_ex;
 
-assign ex_mispredict   = eaf_valid && ((eaf_is_branch && !cond_result) ||
+// A branch decode predicted NOT taken (eaf_bnt, 2026-09-24) mispredicts when
+// it is taken, and recovers to its target, which EA-fetch sent in
+// eaf_operand_a; one predicted taken mispredicts when it is not, as before.
+wire br_wrong = eaf_is_branch && (eaf_bnt ? cond_result : !cond_result);
+assign ex_mispredict   = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
                                         redirect_always);
-assign ex_flush        = eaf_valid && ((eaf_is_branch && !cond_result) ||
+assign ex_flush        = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
                                         redirect_always || eaf_is_stop);
-assign ex_recovery_pc  = redirect_always ? eaf_operand_a : eaf_next_pc;
+assign ex_recovery_pc  = (redirect_always || (eaf_is_branch && eaf_bnt)) ? eaf_operand_a : eaf_next_pc;
 
 wire [31:0] scc_fill   = {24'd0, {8{cond_result}}};
 wire [31:0] scc_merged = {eaf_operand_b[31:8], scc_fill[7:0]};

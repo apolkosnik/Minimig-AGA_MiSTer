@@ -472,6 +472,7 @@ reg [7:0]  cap_vec;
 reg [15:0] cap_sr;
 reg [31:0] cap_sp;
 reg [31:0] cap_pc;   // the faulting instruction's address, whose entry retires under it
+reg [15:0] cap_sr_stk;   // the SR the latest frame stacked
 integer    ci;
 
 always @(posedge clk) begin
@@ -496,6 +497,16 @@ always @(posedge clk) begin
 			cap_sp   <= dut.u_cpu.u_eaf.exc_new_sp;
 			cap_pc   <= dut.u_cpu.u_eaf.eac_pc;
 		end
+		// The SR is the one the frame STACKS, taken from its first beat. The
+		// verdict can come while an older instruction is still in EX -- an
+		// ILLEGAL behind a 34-cycle divide, once instruction prefetch
+		// brought it there in time -- and the status register it read then
+		// had none of that instruction's flags; the beats wait for EX, and
+		// carry them (2026-09-24).
+		// Every first beat during a round; the last one before the round is
+		// judged is the entry it is judged on.
+		if (dut.u_cpu.u_eaf.exc_beat_ack && dut.u_cpu.u_eaf.exc_ph == 2'd0)
+			cap_sr_stk <= dut.u_cpu.u_eaf.exc_sr_word;
 	end
 end
 
@@ -615,7 +626,12 @@ task check_final;
 				mismatch(fi < 8 ? "D register" : "A register", e_regs[fi], got);
 			end
 		end
-		got_sr = cap_done ? cap_sr : dbg_sr;
+		// The stacked SR belongs to the round only when the entry does: the
+		// tested instruction's own, a trace, or a traced program's terminal
+		// ILLEGAL. A round judged at its own retirement uses the live SR --
+		// a later instruction may already have its verdict, not its frame.
+		got_sr = (cap_done && (cap_pc == i_pc || e_trace == 2 || e_exc == 9 || cap_latest))
+		         ? cap_sr_stk : dbg_sr;
 		if (((got_sr ^ e_sr[15:0]) & e_srmask[15:0]) != 0)
 			mismatch("SR", e_sr, {16'd0, got_sr});
 		for (fi = 0; fi < em_cnt; fi = fi + 1)

@@ -140,6 +140,7 @@ module ap040_ea_calc
 	input             id_is_movec,
 	input             id_is_rts,
 	input             id_is_nop,
+	input             id_bnt,
 	input             id_is_rtr,
 	input             id_is_reset,
 	input             id_is_rte,
@@ -219,6 +220,7 @@ module ap040_ea_calc
 	output reg        eac_is_movec,
 	output reg        eac_is_rts,
 	output reg        eac_is_nop,
+	output reg        eac_bnt,
 	output reg        eac_is_rtr,
 	output reg        eac_is_reset,
 	output reg        eac_is_rte,
@@ -297,6 +299,7 @@ always @(posedge clk) begin
 		eac_is_movec     <= 1'b0;
 		eac_is_rts       <= 1'b0;
 		eac_is_nop       <= 1'b0;
+		eac_bnt          <= 1'b0;
 		eac_is_rtr       <= 1'b0;
 		eac_is_reset     <= 1'b0;
 		eac_is_rte       <= 1'b0;
@@ -373,6 +376,7 @@ always @(posedge clk) begin
 			eac_is_movec     <= id_is_movec;
 			eac_is_rts       <= id_is_rts;
 			eac_is_nop       <= id_is_nop;
+			eac_bnt          <= id_bnt;
 			eac_is_rtr       <= id_is_rtr;
 			eac_is_reset     <= id_is_reset;
 			eac_is_rte       <= id_is_rte;

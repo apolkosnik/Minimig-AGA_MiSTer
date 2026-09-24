@@ -344,6 +344,7 @@ module ap040_ea_fetch
 	input             eac_is_rts,
 	input             eac_is_rte,
 	input             eac_is_nop,
+	input             eac_bnt,
 	input             eac_is_rtr,
 	input             eac_is_reset,
 	input       [3:0] eac_cond,
@@ -441,6 +442,7 @@ module ap040_ea_fetch
 	output reg        eaf_is_rmw,
 	output reg        eaf_is_mm,
 	output reg        eaf_is_xm,    // ADDX/SUBX/ABCD/SBCD/CMPM to memory (milestone 117)
+	output reg        eaf_bnt,      // a branch predicted not taken; eaf_operand_a is its target
 	output reg  [1:0] eaf_mvfsr,
 	output reg  [6:0] eaf_ml,
 	output reg  [2:0] eaf_bf,       // bitfield: {it is one, N, Z} -- EX takes the flags from here
@@ -1999,6 +2001,7 @@ always @(posedge clk) begin
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_mm      <= 1'b0;
 		eaf_is_xm      <= 1'b0;
+		eaf_bnt        <= 1'b0;
 		xm_have        <= 1'b0;
 		xm_src         <= 32'h0;
 		eaf_mvfsr      <= 2'd0;
@@ -2329,6 +2332,7 @@ always @(posedge clk) begin
 				eaf_casf       <= {cas, cas_fl};
 				eaf_is_mm      <= mm && !xm;
 				eaf_is_xm      <= xm;
+				eaf_bnt        <= 1'b0;
 				xm_have        <= 1'b0;
 				eaf_mvfsr      <= eac_mvfsr;
 				eaf_ml         <= eac_ml;
@@ -2772,6 +2776,7 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= 1'b0;
 				eaf_is_mm      <= 1'b0;
 				eaf_is_xm      <= 1'b0;
+				eaf_bnt        <= 1'b0;
 				eaf_mvfsr      <= 2'd0;
 				eaf_ml         <= 7'd0;
 				eaf_bf         <= 3'd0;
@@ -2921,6 +2926,7 @@ always @(posedge clk) begin
 				eaf_is_rmw      <= 1'b0;
 				eaf_is_mm       <= 1'b0;
 				eaf_is_xm       <= 1'b0;
+				eaf_bnt         <= 1'b0;
 				eaf_mvfsr       <= 2'd0;
 				eaf_ml          <= 7'd0;
 				eaf_bf          <= 3'd0;
@@ -2995,7 +3001,10 @@ always @(posedge clk) begin
 				// port A (milestone 91), so the data -- which is what MOVE
 				// sets N and Z from -- is on port B. A registered
 				// assignment, not the address path.
-				eaf_operand_a  <= cas2 ? c2_m2 : (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
+				// A branch predicted not taken carries its target to EX, which
+				// redirects there if it is taken (2026-09-24).
+				eaf_operand_a  <= (eac_is_branch && eac_bnt) ? br_target :
+				                  cas2 ? c2_m2 : (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
 				                  eac_is_packop                            ? pack_value :
 				                  mvp                                      ? mvp_acc :
 				                  bfv                                      ? bf_res :
@@ -3039,6 +3048,7 @@ always @(posedge clk) begin
 				eaf_is_rmw     <= mm;
 				eaf_is_mm      <= mm;
 				eaf_is_xm      <= m16_pp;
+				eaf_bnt        <= eac_is_branch && eac_bnt;
 				eaf_mvfsr      <= eac_mvfsr;
 				eaf_ml         <= eac_ml;
 				if (!bfv) eaf_bf <= 3'd0;
