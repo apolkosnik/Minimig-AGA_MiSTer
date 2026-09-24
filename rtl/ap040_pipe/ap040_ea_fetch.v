@@ -1134,7 +1134,21 @@ wire chk_c = chk_long ? (((chk_value_l < 32'sd0) && (chk_bound_l >= 32'sd0)) ||
                       : (((chk_value < 16'sd0) && (chk_bound >= 16'sd0)) ||
                          ((chk_bound >= 16'sd0) && (chk_value >= chk_bound)) ||
                          ((chk_value < 16'sd0) && (chk_bound < chk_value)));
-wire chk_now = eac_valid && eac_is_chk &&
+// CHK decides its trap in this stage from the checked register, and the
+// trap steers the whole output register through exc_active. With that
+// register forwarded from EX, every one of the 40 worst paths of the
+// perf-1b fit ran EX's shifter or ALU -> ex_fwd_data -> the bounds compare
+// -> exc_active (-0.429 ns at 25 ns). So CHK waits out one bubble when
+// the instruction in EX may write that register, judged on EX's registered
+// destinations alone, and reads it from the register file's commit bypass
+// the cycle after. CHK straight behind its value's producer is the only
+// cost. CHK2 needs none: its compare is latched in ck_c and traps from
+// registers.
+wire chk_ex_writes  = eaf_valid && ((eaf_dest_reg == eac_dest_reg) ||
+                                    (eaf_writes_an && (eaf_an_reg == eac_dest_reg)) ||
+                                    (eaf_ml[6] && ({1'b0, eaf_ml[2:0]} == eac_dest_reg)));
+wire chk_fwd_hazard = eac_valid && eac_is_chk && chk_ex_writes;
+wire chk_now = eac_valid && eac_is_chk && !chk_fwd_hazard &&
                (eac_is_mem_src ? (mem_pending && l1_rvalid_b) : !stall_in) &&
                (chk_negative || chk_over);
 reg exc_pend_chk;
@@ -1325,6 +1339,7 @@ wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
 wire movec_rd       = eac_is_movec && !eac_imm[4];
 wire creg_rd_hazard = movec_rd && ex_creg_any;
 wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
+wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard);   // chk_fwd_hazard: see chk_now
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1336,7 +1351,7 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // holds the MOVEC in EX for ever, which is a deadlock rather than a stall.
 // The hazard emits a BUBBLE instead -- the branch below -- and stall_self
 // keeps the held instruction's requests off the memory while it waits.
-wire stall_self = stall_in || creg_hazard;
+wire stall_self = stall_in || hold_hazard;
 
 wire mem_issue    = live && eac_is_mem_src && !mem_pending && !port_taken && !trace_hold && !ae_busy &&
                     !moves_priv;
@@ -1630,7 +1645,7 @@ assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second wo
 // it is not lost, it is late, which is why two NOPs "fixed" it. Waiting
 // puts the read in the commit cycle, where the auxiliary bypass answers
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
-assign eaf_stall = stall_in || creg_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
+assign eaf_stall = stall_in || hold_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall || ck_stall || m16_stall ||
                    c2_stall ||
                    (eac_valid && xm && !xm_have) ||
@@ -2267,7 +2282,7 @@ always @(posedge clk) begin
 			ret_ph          <= RET_BEAT0;
 			ret_pending     <= 1'b0;
 		end else if (!stall_in) begin
-			if (creg_hazard) begin
+			if (hold_hazard) begin
 				// The bubble, and it has to come FIRST. Below mem_issue it
 				// set mem_pending for a read that stall_self had already
 				// kept off the memory, and the stage then waited for a

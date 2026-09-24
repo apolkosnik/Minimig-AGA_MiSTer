@@ -34,7 +34,13 @@
 //   MOVE.L #-1,D0    / CHK #10,D0   traps, N must be SET                   //
 //   MOVE.L #5,D0     / CHK #10,D0   must NOT trap                          //
 //   MOVE.L #20,D0    / CHK #10,D0   traps, N must be CLEAR                 //
+//   LSL.L #3,D0      / CHK D4,D0    24, straight behind: traps, N CLEAR    //
+//   ADDQ.L #1,D0     / CHK D4,D0    5, straight behind: must NOT trap      //
+//   DIVU.W #1,D0     / CHK D4,D0    $9000, straight behind: traps, N SET   //
+//   MOVE.L (A1),D0   / CHK (A2),D0  7 loaded, bound 6: traps, N CLEAR      //
 //   ORI #$1F,CCR     / CHK #30,D0   in bounds: CCR must become $16         //
+// The four behind their value's producer are the perf-1b timing fix: CHK //
+// no longer judges EX's forward, and waits a bubble for the commit.      //
 //                                                                          //
 //   handler: MOVE.L (A7),D2    the stacked {SR, PC_hi}                     //
 //            MOVE.L D2,(A0)+   filed away, one slot per trap               //
@@ -68,7 +74,7 @@
 
 module tb_ap040_pipe_chk;
 
-localparam PROG_WORDS      = 48;
+localparam PROG_WORDS      = 160;
 localparam [31:0] PC_RESET = 32'h0000_0400;
 
 reg clk = 0;
@@ -143,10 +149,43 @@ initial begin
 	dut.u_l1.mem[18] = 16'h76FF;   // MOVEQ #-1,D3  -- live N := 1, the OPPOSITE of CHK's
 	dut.u_l1.mem[19] = 16'h41BC;   // CHK #10,D0   -- over bound: traps, stacked N must be 0
 	dut.u_l1.mem[20] = 16'h000A;
-	dut.u_l1.mem[21] = 16'h003C;   // ORI #$1F,CCR  -- every flag set
-	dut.u_l1.mem[22] = 16'h001F;
-	dut.u_l1.mem[23] = 16'h41BC;   // CHK #30,D0   -- 20 is in bounds: CCR := $16
-	dut.u_l1.mem[24] = 16'h001E;
+	// The checked register produced by the instruction straight ahead:
+	// CHK waits out a bubble rather than judge EX's forward.
+	dut.u_l1.mem[21] = 16'h780A;   // MOVEQ #10,D4  -- the bound, in a register: CHK D4,D0 is one
+	                               //   word, and only a one-word CHK can sit straight behind
+	                               //   anything (a gathered one never does)
+	dut.u_l1.mem[22] = 16'h7003;   // MOVEQ #3,D0
+	dut.u_l1.mem[23] = 16'hE788;   // LSL.L #3,D0   -- D0 = 24, from the shifter straight ahead
+	dut.u_l1.mem[24] = 16'h4184;   // CHK D4,D0    -- over bound: trap 3, N clear, C set
+	dut.u_l1.mem[25] = 16'h7004;   // MOVEQ #4,D0
+	dut.u_l1.mem[26] = 16'h5280;   // ADDQ.L #1,D0  -- D0 = 5, straight ahead
+	dut.u_l1.mem[27] = 16'h4184;   // CHK D4,D0    -- in range: must NOT trap
+	dut.u_l1.mem[28] = 16'h203C;   // MOVE.L #$00009000,D0
+	dut.u_l1.mem[29] = 16'h0000;
+	dut.u_l1.mem[30] = 16'h9000;
+	dut.u_l1.mem[31] = 16'h80FC;   // DIVU.W #1,D0 -- D0 = $9000, EX held while CHK waits
+	dut.u_l1.mem[32] = 16'h0001;
+	dut.u_l1.mem[33] = 16'h4184;   // CHK D4,D0    -- word negative: trap 4, N set, C set
+	dut.u_l1.mem[34] = 16'h4E71;   // NOP
+	dut.u_l1.mem[35] = 16'h4E71;   // NOP
+	dut.u_l1.mem[36] = 16'h227C;   // MOVEA.L #$00000580,A1
+	dut.u_l1.mem[37] = 16'h0000;
+	dut.u_l1.mem[38] = 16'h0580;
+	dut.u_l1.mem[39] = 16'h247C;   // MOVEA.L #$00000590,A2
+	dut.u_l1.mem[40] = 16'h0000;
+	dut.u_l1.mem[41] = 16'h0590;
+	dut.u_l1.mem[42] = 16'h2011;   // MOVE.L (A1),D0 -- D0 = 7, loaded straight ahead
+	dut.u_l1.mem[43] = 16'h4192;   // CHK (A2),D0  -- bound 6 in memory: trap 5, N clear, C set
+	dut.u_l1.mem[44] = 16'h203C;   // MOVE.L #$00000014,D0   (20 again)
+	dut.u_l1.mem[45] = 16'h0000;
+	dut.u_l1.mem[46] = 16'h0014;
+	dut.u_l1.mem[47] = 16'h003C;   // ORI #$1F,CCR  -- every flag set
+	dut.u_l1.mem[48] = 16'h001F;
+	dut.u_l1.mem[49] = 16'h41BC;   // CHK #30,D0   -- 20 is in bounds: CCR := $16
+	dut.u_l1.mem[50] = 16'h001E;
+	dut.u_l1.mem[192] = 16'h0000;  // $580: the loaded value, 7
+	dut.u_l1.mem[193] = 16'h0007;
+	dut.u_l1.mem[200] = 16'h0006;  // $590: the bound, 6
 
 	// CHK handler @ word idx 512 (byte $800)
 	dut.u_l1.mem[512] = 16'h2417;  // MOVE.L (A7),D2   -- stacked {SR, PC_hi}
@@ -173,9 +212,9 @@ initial begin
 
 	repeat ((PROG_WORDS + 500) * `AP040_PIPE_WAIT_SCALE) @(posedge clk);
 
-	if (dbg_d1 !== 32'h0000_0002) begin
+	if (dbg_d1 !== 32'h0000_0005) begin
 		errors = errors + 1;
-		$display("FAIL: trap count D1 = %h, expected 00000002 (00000003 means the in-range CHK trapped too)",
+		$display("FAIL: trap count D1 = %h, expected 00000005 (00000006 or more means an in-range CHK trapped)",
 		         dbg_d1);
 	end
 	// The handler filed each stacked {SR, PC_hi} at $0500 and $0504, word
@@ -200,6 +239,20 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: stacked SR of trap 2 = %h, C must be SET (value at or above a non-negative bound)",
 		         dut.u_l1.mem[130]);
+	end
+	// The three traps straight behind their value's producer, at $0508,
+	// $050C and $0510: over, negative, over.
+	if (dut.u_l1.mem[132][3] !== 1'b0 || dut.u_l1.mem[132][0] !== 1'b1) begin
+		errors = errors + 1;
+		$display("FAIL: stacked SR of trap 3 (behind LSL.L) = %h, expected N clear and C set", dut.u_l1.mem[132]);
+	end
+	if (dut.u_l1.mem[134][3] !== 1'b1 || dut.u_l1.mem[134][0] !== 1'b1) begin
+		errors = errors + 1;
+		$display("FAIL: stacked SR of trap 4 (behind DIVU.W) = %h, expected N set and C set", dut.u_l1.mem[134]);
+	end
+	if (dut.u_l1.mem[136][3] !== 1'b0 || dut.u_l1.mem[136][0] !== 1'b1) begin
+		errors = errors + 1;
+		$display("FAIL: stacked SR of trap 5 (behind a load) = %h, expected N clear and C set", dut.u_l1.mem[136]);
 	end
 	if (dbg_ccr !== 5'h16) begin
 		errors = errors + 1;
