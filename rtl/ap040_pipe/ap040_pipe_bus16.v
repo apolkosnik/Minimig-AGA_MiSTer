@@ -29,7 +29,8 @@
 module ap040_pipe_bus16
 #(
 	parameter [31:0] PC_RESET   = 32'h0000_0400,
-	parameter         PROG_WORDS = 10
+	parameter         PROG_WORDS = 10,
+	parameter         RESET_VECTORS = 0   // see ap040_pipe_cpu.v
 )
 (
 	input  clk,
@@ -37,6 +38,7 @@ module ap040_pipe_bus16
 	input  ce,           // advances the CPU
 	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none
 	input  clkena_in,    // advances the bus: one pulse per 16-bit sub-cycle
+	input  berr,         // a physical bus error on the current sub-cycle
 
 	input  [15:0] data_in,
 	output [31:0] addr_out,
@@ -67,6 +69,7 @@ wire [15:0] l1_rdata_a;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        l1_sup_b, l1_sup_a;
+wire        l1_inval_a;
 
 wire        mem_req, mem_write, mem_instr, mem_ack;
 wire  [1:0] mem_size;
@@ -75,7 +78,8 @@ wire  [2:0] mem_fc;
 
 ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
-	.PROG_WORDS(PROG_WORDS)
+	.PROG_WORDS(PROG_WORDS),
+	.RESET_VECTORS(RESET_VECTORS)
 ) u_cpu
 (
 	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
@@ -87,6 +91,7 @@ ap040_pipe_cpu #(
 	.l1_sup_b  (l1_sup_b), .l1_sup_a (l1_sup_a),
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
 	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
+	.l1_inval_a(l1_inval_a),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
 	.dbg_id_valid (dbg_id_valid),  .dbg_id_pc (dbg_id_pc),
@@ -112,6 +117,7 @@ ap040_pipe_membus u_bus
 
 	.sup      (l1_sup_a),
 	.sup_b    (l1_sup_b),
+	.pf_inval (l1_inval_a),
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),
@@ -122,7 +128,7 @@ ap040_bus16_adapter u_bus16
 (
 	.clk (clk), .nreset (nreset), .clkena_in (clkena_in),
 
-	.mem_req  (mem_req),  .mem_berr (1'b0),     .mem_write(mem_write),
+	.mem_req  (mem_req),  .mem_berr (berr),     .mem_write(mem_write),
 	.mem_instr(mem_instr), .mem_size(mem_size), .mem_addr (mem_addr),
 	.mem_wdata(mem_wdata), .mem_fc  (mem_fc),
 	.mem_ack  (mem_ack),   .mem_rdata(mem_rdata),

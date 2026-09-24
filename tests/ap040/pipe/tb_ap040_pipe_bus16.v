@@ -100,6 +100,7 @@ ap040_pipe_bus16 #(
 ) dut
 (
 	.irq_lvl (3'd0),   // no interrupt source in this bench
+	.berr (1'b0),   // no bus errors in this bench
 	.clk (clk), .nreset (nreset), .ce (ce), .clkena_in (clkena_in),
 
 	.data_in (data_in), .addr_out(addr_out), .data_write(data_write),

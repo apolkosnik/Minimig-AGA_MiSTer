@@ -26,6 +26,39 @@ CORE = [RTL / n for n in (
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
     "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
+# tb_ap040_pipe_program runs tests/ap040/asm's self-checking programs, the
+# ones tests/ap040/run_verilator.py runs on the sequential core. REQUIRED
+# must each print ALL TESTS PASSED; OPEN run too and are reported with the
+# gap that holds them, so a known gap is visible on every run without
+# hiding a regression anywhere else. t_cache and bench_* are the
+# sequential core's no-cache exclusions as well (run_verilator.py): this
+# core has no internal caches.
+PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "dhry"]
+PROGRAMS_OPEN = {
+    "t_exceptions":     "MOVES function codes, bus errors (format $7), PTEST",
+    "t_moves_fc":       "MOVES function codes on the bus",
+    "t_mmu":            "the MMU",
+    "t_bitfield_mmu":   "the MMU",
+    "t_bitfield_cache": "the MMU (PFLUSHA with TC.E set)",
+    "t_atcprobe":       "the MMU",
+    "t_movem_restart":  "the MMU and the format $7 MOVEM restart",
+}
+VASM = Path(os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"))
+
+
+def program_image(name, work):
+    """Assemble tests/ap040/asm/<name>.s into work, or fall back to the image
+    tests/ap040/build/ carries (dhry is C, built by build_tests.sh)."""
+    src = HERE / "asm" / (name + ".s")
+    if src.exists() and VASM.exists():
+        b = work / (name + ".bin")
+        h = work / (name + ".hex")
+        if subprocess.run([str(VASM), "-quiet", "-Fbin", "-m68040", "-no-opt", "-o", str(b), str(src)]).returncode == 0:
+            subprocess.run([sys.executable, str(HERE / "bin2hex.py"), str(b), str(h)], stdout=subprocess.DEVNULL)
+            return h
+    return HERE / "build" / (name + ".hex")
+
+
 # ap040_pipe_fpu.v runs the shared FPU engine, which includes rtl/ap040's
 # ap040_defs.svh, so every build takes that directory too.
 
@@ -100,6 +133,11 @@ def main():
             src = CORE + [RTL / "ap040_pipe_bus16.v",
                           ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
+        elif name.endswith("program"):
+            # ap040_pipe_bus16.v and its adapter, as for the bus16 bench.
+            src = CORE + [RTL / "ap040_pipe_bus16.v",
+                          ROOT / "rtl/ap040/ap040_bus16_adapter.v"]
+            inc = [RTL, ROOT / "rtl/ap040"]
         elif name.endswith("bus16"):
             # ap040_pipe_bus16.v instantiates the FSM core's own 16-bit
             # adapter, so that file and its include directory come too.
@@ -111,7 +149,8 @@ def main():
             inc = [RTL, ROOT / "rtl/ap040"]
         obj = work / ("obj-" + name)
         log = work / (name + ".log")
-        with log.open("w") as out:
+        blog_path = work / (name + ".build.log")
+        with log.open("w") as out, blog_path.open("w") as blog:
             rc = subprocess.run(
                 ["verilator", "--binary", "--timing", "--top-module", name,
                  "--Mdir", str(obj), "-j", str(args.jobs), "-Wno-fatal",
@@ -127,8 +166,29 @@ def main():
                                                else "1"),
                  *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []),
                  *(["-DAP040_PIPE_CE_RANDOM"] if args.ce_random else []), str(b)] + [str(s) for s in src],
-                stdout=out, stderr=subprocess.STDOUT, env=env).returncode
-            if rc == 0:
+                stdout=blog, stderr=subprocess.STDOUT, env=env).returncode
+            # The build's own output goes to <bench>.build.log: a warning quotes
+            # source lines, and a quoted $display("FAIL: ...") read as a failure.
+            # A build that fails is still a failure, and says so here.
+            if rc != 0:
+                out.write(f"%Error: the build failed, see {blog.name}\n")
+            if rc == 0 and name.endswith("program"):
+                for prog in PROGRAMS_REQUIRED + list(PROGRAMS_OPEN):
+                    out.write(f"== {prog}\n"); out.flush()
+                    r = subprocess.run([str(obj / ("V" + name)), "+prog=" + str(program_image(prog, work))],
+                                       capture_output=True, text=True, timeout=1800, env=env)
+                    text_p = r.stdout + r.stderr
+                    passed_p = r.returncode == 0 and "ALL TESTS PASSED" in text_p
+                    if prog in PROGRAMS_OPEN:
+                        # reported, not judged: the output is kept out of the
+                        # log's FAIL scan below and summarised instead
+                        out.write(f"  open ({PROGRAMS_OPEN[prog]}): {'passes now' if passed_p else 'not yet'}\n")
+                    else:
+                        out.write(text_p)
+                        if not passed_p:
+                            out.write(f"FAIL: {prog} did not pass\n")
+                            rc = 1
+            elif rc == 0:
                 rc = subprocess.run([str(obj / ("V" + name))], stdout=out,
                                     stderr=subprocess.STDOUT, timeout=300, env=env).returncode
         text = log.read_text()

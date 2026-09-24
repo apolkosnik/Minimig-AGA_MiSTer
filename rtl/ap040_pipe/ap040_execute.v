@@ -136,6 +136,10 @@ module ap040_execute
 	input             eaf_chk_ok,
 	input             eaf_is_immsr,
 	input             eaf_is_stop,
+	input             eaf_refetch,       // CINV/CPUSH: refetch what follows
+	// This instruction's read-modify-write store, accepted this cycle, landed
+	// on an instruction fetched behind it (ap040_pipe_cpu.v's store snoop).
+	input             st_smc,
 	input             eaf_immsr_to_sr,
 	input             eaf_is_pea,
 	input             eaf_is_link,
@@ -263,6 +267,7 @@ module ap040_execute
 	// EA-fetch and redirects IF to ex_recovery_pc.
 	output            ex_mispredict,
 	output            ex_fwd2_slow,
+	output            ex_pf_inval,       // empty the prefetch stream for that refetch
 	// The broadcast flush: everything ex_mispredict causes a flush for, plus
 	// STOP, which discards younger work without redirecting anywhere
 	// (milestone 108). Computed HERE rather than OR'd onto ex_mispredict in
@@ -317,6 +322,10 @@ module ap040_execute
 assign ex_st_req = eaf_valid && eaf_is_rmw;
 wire   rmw_wait  = ex_st_req && l1_wr_busy;
 assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait;
+// ...and the refetch it then owes, raised only in a cycle this stage moves
+// on in: the flush that goes with a redirect clears EA-fetch's output
+// registers, which are this stage's input, stalled or not.
+wire   ex_smc    = ex_st_req && st_smc && !ex_stall;
 
 // ------------------------------------------------------------- divide
 // A 32/16 divide cannot be combinational the way the 16x16 multiply can, so
@@ -666,10 +675,14 @@ wire br_wrong = eaf_is_branch && (eaf_bnt ? cond_result : !cond_result);
 // L1 answers the next cycle, which kept the fetch PC on that word.
 assign ex_mispredict   = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
-                                        redirect_always || eaf_is_stop);
+                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc);
 assign ex_flush        = eaf_valid && (br_wrong ||
                                         (eaf_is_dbcc   && !dbcc_branch_taken) ||
-                                        redirect_always || eaf_is_stop);
+                                        redirect_always || eaf_is_stop || eaf_refetch || ex_smc);
+// A refetch's recovery is eaf_next_pc, the default below. The stream it
+// would otherwise be served from goes in the same cycle, so the refetch
+// reads memory.
+assign ex_pf_inval     = eaf_valid && eaf_refetch && !ex_stall;
 assign ex_recovery_pc  = (redirect_always || (eaf_is_branch && eaf_bnt)) ? eaf_operand_a : eaf_next_pc;
 
 wire [31:0] scc_fill   = {24'd0, {8{cond_result}}};

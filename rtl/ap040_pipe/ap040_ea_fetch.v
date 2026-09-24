@@ -355,6 +355,12 @@ module ap040_ea_fetch
 	input             eac_is_rts,
 	input             eac_is_rte,
 	input             eac_is_nop,
+	input       [2:0] eac_cinv,        // CINV/CPUSH {valid, IC, DC}, see ap040_decode.v
+	// A store accepted this cycle overlaps an instruction fetched behind
+	// this one (ap040_pipe_cpu.v's snoop). Self-modifying code: t_integer's
+	// test 192 rewrites the very next instruction while a divide keeps the
+	// fetch running ahead, and the 68040 program expects the new one to run.
+	input             smc_hit,
 	input             eac_bnt,
 	input             eac_is_rtr,
 	input             eac_is_reset,
@@ -366,6 +372,10 @@ module ap040_ea_fetch
 	// simply THIS value, no synthesis -- and sr_in[13] (S) is what a
 	// privilege check actually reads -- see header.
 	input      [15:0] sr_in,
+	// TRAPcc's view (2026-09-24): the CCR without EX's same-cycle flags,
+	// and whether EX is producing flags this cycle.
+	input       [4:0] ccr_nofwd,
+	input             ccr_fwd_busy,
 
 	// ap040_pipe_regfile.v's OWN ISP/MSP state, read directly -- an
 	// exception's stack access must always target one of these, never
@@ -474,6 +484,9 @@ module ap040_ea_fetch
 	output reg        eaf_chk_ok,
 	output reg        eaf_is_immsr,
 	output reg        eaf_is_stop,
+	// Retire, then refetch what follows (CINV/CPUSH): EX redirects to
+	// eaf_next_pc, flushing everything fetched behind this instruction.
+	output reg        eaf_refetch,
 	output reg        eaf_immsr_to_sr,
 	output reg        eaf_is_pea,
 	output reg        eaf_is_link,
@@ -1411,12 +1424,18 @@ function trapcc_cond_true;
 		endcase
 	end
 endfunction
+// ...judged on the CCR WITHOUT EX's same-cycle flag forward, waiting a
+// cycle (trapcc_hz) when EX is producing flags. With the forward, the
+// shifter's flags ran through the verdict into the output chain: the worst
+// path at ae1116d8 (-0.038 ns). A forward into an exception decision is
+// the milestone-88 rule's case, as CHK's and DIV's were.
 // ...and only judged while EX is not stalled: a divide in EX has not
 // produced its flags yet, and the forward that makes sr_in current for an
 // EA-fetch consumer (ap040_pipe_core.v's ex_ccr_fwd) is valid only in the
 // cycle EX's instruction actually registers.
-wire trapcc_now = eac_valid && eac_is_trapcc && !stall_in &&
-                  trapcc_cond_true(eac_cond, sr_in[4:0]);
+wire trapcc_hz  = live && eac_is_trapcc && ccr_fwd_busy;
+wire trapcc_now = eac_valid && eac_is_trapcc && !stall_in && !hold_hazard &&
+                  trapcc_cond_true(eac_cond, ccr_nofwd);
 reg  exc_pend_trapcc;
 wire eac_is_trapcc_trap = trapcc_now || exc_pend_trapcc;
 
@@ -1573,6 +1592,17 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // did not need to, while one missing would compute its address from a
 // stale register (the Verilator check below reports any that touches
 // port B).
+// The store snoop, kept until the instruction departs: MOVEM's beats span
+// cycles, and the refetch belongs to the whole instruction.
+wire smc_now = smc_hit && !exc_writing;
+reg  smc_seen;
+always @(posedge clk)
+	if (!nreset) smc_seen <= 1'b0;
+	else if (ce) begin
+		if (flush || (eac_valid && !eaf_stall)) smc_seen <= 1'b0;
+		else if (smc_now)                       smc_seen <= 1'b1;
+	end
+
 wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw || eac_st_disp ||
                    eac_is_postinc || eac_is_predec || eac_is_abs || eac_ea_indexed || eac_ea_pcrel ||
                    eac_is_jmp || eac_is_jsr || eac_is_lea || eac_is_pea || eac_is_bsr ||
@@ -1607,7 +1637,8 @@ always @(posedge clk)
 wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_hazard: see chk_now
                       (live && fx_hold_go) ||                      // a full-format pointer read
                       (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
-                      addr_hz;                                     // an address from a long forward
+                      addr_hz ||                                   // an address from a long forward
+                      trapcc_hz;                                   // TRAPcc behind a flag producer
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -1665,7 +1696,7 @@ reg       exc_vec_pending;
 // cycle -- see header for why the check couldn't happen any earlier.
 // The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
 // that is the whole difference between them at this level.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset ||
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset || eac_cinv[2] ||
                             (eac_mvfsr[1] && !eac_mvfsr[0]) ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
@@ -2372,6 +2403,7 @@ always @(posedge clk) begin
 		eaf_is_trapcc     <= 1'b0;
 		eaf_is_immsr   <= 1'b0;
 		eaf_is_stop    <= 1'b0;
+		eaf_refetch    <= 1'b0;
 		eaf_immsr_to_sr<= 1'b0;
 		eaf_is_pea     <= 1'b0;
 		eaf_is_link    <= 1'b0;
@@ -2656,6 +2688,11 @@ always @(posedge clk) begin
 			ret_pending     <= 1'b0;
 			ret_f1          <= 1'b0;
 		end else if (!stall_in) begin
+			// ...on the departure itself, whichever branch below it takes:
+			// CINV/CPUSH, or a store that landed on an instruction already
+			// fetched behind this one (smc_seen). An exception entry
+			// redirects anyway.
+			eaf_refetch <= eac_valid && !eaf_stall && !exc_go && (eac_cinv[2] || smc_seen || smc_now);
 			if (hold_hazard) begin
 				// The bubble, and it has to come FIRST. Below mem_issue it
 				// set mem_pending for a read that stall_self had already

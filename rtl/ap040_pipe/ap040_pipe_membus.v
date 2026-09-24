@@ -75,6 +75,9 @@ module ap040_pipe_membus
 	// still says (milestone 92).
 	input             sup,
 	input             sup_b,
+	// CINV/CPUSH: empty the window. The refetch that follows arrives in the
+	// same cycle and must go to memory, not to what the window held.
+	input             pf_inval,
 
 	// ---- bus side: ap040_core.v's external memory port ----
 	output reg        mem_req,
@@ -150,7 +153,13 @@ function [31:0] pf_word1;   // entry i, including the longword arriving now
 endfunction
 wire [29:0] req_lw     = address_a[31:2];
 wire [29:0] req_k      = req_lw - pf_base;
-wire        req_hit    = (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
+// ...and not from a longword a write accepted this same cycle touches: the
+// window's copy is stale by then, and a refetch the write itself caused
+// (a store onto an instruction already fetched behind it) asks for exactly
+// that longword in exactly that cycle. It then misses, and queues behind the
+// write. (w_lo/w_hi are declared below; the tools take either order.)
+wire        req_wr     = w_accept && ((w_lo == req_lw) || (w_hi == req_lw));
+wire        req_hit    = !pf_inval && !req_wr && (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
 wire [31:0] req_long   = pf_word1(req_lw[1:0]);
 // ...or the one still on the bus, which it will wait for.
 wire        req_onbus  = pf_out && !pf_ack && !pf_kill && (req_lw == pf_next) && (sup == pf_sup);
@@ -238,7 +247,7 @@ always @(posedge clk) begin
 		end
 		// A write into the window, or into the read in flight, empties it;
 		// what was pending is fetched again, after the write.
-		if (w_hits_pf) begin
+		if (w_hits_pf || pf_inval) begin
 			pf_cnt <= 3'd0;
 			if (pf_out && !pf_ack) pf_kill <= 1'b1;
 			if (en_a && req_hit) pf_base <= req_lw + 30'd1;   // the word just served is gone past
@@ -283,7 +292,7 @@ always @(posedge clk) begin
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
 			mem_size  <= b_size; mem_addr <= b_addr;
 			mem_fc    <= fc_of(1'b0, b_sup);
-		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf) begin
+		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf && !pf_inval) begin
 			// The next longword of the stream, as the window stands after
 			// this cycle's request. Not before the first request (review 15):
 			// pf_base is zero out of reset, and a read of $0 the fetch unit

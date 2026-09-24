@@ -155,7 +155,11 @@
 module ap040_pipe_cpu
 #(
 	parameter [31:0] PC_RESET   = 32'h0000_0400,
-	parameter         PROG_WORDS = 10
+	parameter         PROG_WORDS = 10,
+	// 1: reset exception processing reads the initial ISP and PC from $0
+	// and $4, as a 68040 does; 0: the fetch starts at PC_RESET with ISP
+	// zero, which every milestone bench was written against.
+	parameter         RESET_VECTORS = 0
 )
 (
 	input  clk,
@@ -180,6 +184,7 @@ module ap040_pipe_cpu
 	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
 	input         l1_wr_busy,
+	output        l1_inval_a,   // empty the prefetch stream: CINV/CPUSH's refetch
 	input  [31:0] l1_q_b,
 	input         l1_rvalid_b,
 
@@ -338,6 +343,10 @@ wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
 wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr, eac_bnt;
+wire  [2:0] id_cinv, eac_cinv;
+wire        dec_holding, smc_hit;
+wire [31:0] dec_hold_pc;
+wire        eaf_refetch, ex_pf_inval;
 wire  [3:0] eac_cond;
 
 wire        eaf_valid; wire [31:0] eaf_pc; wire [31:0] eaf_next_pc;
@@ -387,8 +396,32 @@ wire [31:0] ex_recovery_pc;
 // Recovery takes priority over a fresh speculative guess -- fixing a
 // confirmed wrong guess matters more than starting a new one the same
 // cycle (and in practice they concern different instructions anyway).
-wire        final_redirect_valid = ex_mispredict || id_redirect_valid;
-wire [31:0] final_redirect_pc    = ex_mispredict ? ex_recovery_pc : id_redirect_pc;
+// Reset exception processing (2026-09-24, RESET_VECTORS): the fetch is
+// held while two supervisor-data longword reads through port B -- nothing
+// else can want it, no instruction has been fetched -- load the ISP from
+// $0 and the PC from $4; the PC then redirects the fetch like a branch.
+localparam [1:0] RV_SSP = 2'd0, RV_PC = 2'd1, RV_GO = 2'd2, RV_DONE = 2'd3;
+reg  [1:0] rv_ph;
+reg        rv_pend;
+reg [31:0] rv_pc;
+wire       rv_active = (rv_ph == RV_SSP) || (rv_ph == RV_PC);
+wire       rv_issue  = rv_active && !rv_pend;
+wire       rv_back   = rv_active && rv_pend && l1_rvalid_b;
+wire       rv_go     = (rv_ph == RV_GO);
+always @(posedge clk)
+	if (!nreset) begin
+		rv_ph <= (RESET_VECTORS != 0) ? RV_SSP : RV_DONE; rv_pend <= 1'b0; rv_pc <= 32'd0;
+	end else if (ce) begin
+		if (rv_issue) rv_pend <= 1'b1;
+		else if (rv_back) begin
+			rv_pend <= 1'b0;
+			if (rv_ph == RV_PC) begin rv_pc <= l1_q_b; rv_ph <= RV_GO; end
+			else rv_ph <= RV_PC;
+		end else if (rv_go) rv_ph <= RV_DONE;
+	end
+
+wire        final_redirect_valid = ex_mispredict || id_redirect_valid || rv_go;
+wire [31:0] final_redirect_pc    = rv_go ? rv_pc : ex_mispredict ? ex_recovery_pc : id_redirect_pc;
 
 // Broadcast flush: discards whatever ID/EA-calc/EA-fetch are currently
 // holding, all speculatively advanced down the (wrong) assumed-taken guess.
@@ -635,11 +668,14 @@ wire [31:0] usp_q, isp_q, msp_q;   // ap040_pipe_regfile.v's own state, read
 // written, unused until now. aux_sel's 0=USP/1=ISP/2=MSP numbering is one
 // bit-shift away from AP040_CREG_USP/ISP/MSP's own 4/5/6 -- see
 // ap040_pipe_defs.svh's comment on why that ordering was chosen.
-wire        aux_we    = commit_creg && (exe_creg_sel == `AP040_CREG_USP ||
+// ...and the reset sequence's initial ISP, before any instruction exists.
+wire        rv_isp_we = ce && rv_back && (rv_ph == RV_SSP);
+wire        aux_we    = rv_isp_we ||
+                        (commit_creg && (exe_creg_sel == `AP040_CREG_USP ||
                                           exe_creg_sel == `AP040_CREG_ISP ||
-                                          exe_creg_sel == `AP040_CREG_MSP);
-wire [1:0]  aux_sel    = exe_creg_sel[1:0];   // USP=4'b100->00, ISP=101->01, MSP=110->10
-wire [31:0] aux_wdata  = exe_creg_data;
+                                          exe_creg_sel == `AP040_CREG_MSP));
+wire [1:0]  aux_sel    = rv_isp_we ? 2'd1 : exe_creg_sel[1:0];   // USP=4'b100->00, ISP=101->01, MSP=110->10
+wire [31:0] aux_wdata  = rv_isp_we ? l1_q_b : exe_creg_data;
 
 //---------------------------------------------------------------------------
 // Register file: this directory's own fork (ap040_pipe_regfile.v, see its
@@ -731,21 +767,47 @@ wire      [31:0] eaf_l1_addr_b;
 wire eaf_l1_rd_b;
 wire eaf_l1_sup_b;
 // Whoever owns port B this cycle owns its privilege too (milestone 93).
-assign l1_sup_b  = ex_st_req ? ex_st_sup : eaf_l1_sup_b;
+assign l1_sup_b  = rv_active ? 1'b1 : ex_st_req ? ex_st_sup : eaf_l1_sup_b;
 // The fetch's privilege is the mode the fetched instruction will RUN in,
 // which for the first instruction of a handler is supervisor -- and the
 // exception's own SR write has not committed when that fetch goes out.
 // sr_resolved carries EX's pending write; the committed register does not.
 assign l1_sup_a  = sr_resolved[13];
-assign l1_rd_b   = ce && eaf_l1_rd_b;
-assign l1_addr_b = ex_st_req ? ex_st_addr : eaf_l1_addr_b;
+assign l1_rd_b   = ce && (rv_active ? rv_issue : eaf_l1_rd_b);
+assign l1_inval_a = ce && ex_pf_inval;
+
+// The store snoop (2026-09-24). A store EA-fetch posts can land on an
+// instruction already fetched behind it -- in EA-calc, in decode's gather,
+// or the word the fetch is presenting -- where ap040_pipe_membus.v's
+// stream snoop can no longer reach it. The storing instruction then
+// retires with a refetch of what follows (ap040_ea_fetch.v's smc_hit), so
+// the rewritten instruction is fetched again after the write. Ranges are
+// half-open byte ranges; a gather in progress owns everything from its
+// first word up to the fetch word.
+wire [31:0] snp_a   = eaf_l1_addr_b;
+wire [31:0] snp_e   = eaf_l1_addr_b + ((eaf_l1_size_b == `AP040_SZ_L) ? 32'd4 :
+                                       (eaf_l1_size_b == `AP040_SZ_W) ? 32'd2 : 32'd1);
+wire [31:0] snp_dlo = dec_holding ? dec_hold_pc : if_pc;
+wire        snp_dec = (dec_holding || if_valid_id) && (snp_a < if_pc + 32'd2) && (snp_e > snp_dlo);
+wire        snp_id  = id_valid && (snp_a < id_next_pc) && (snp_e > id_pc);
+assign smc_hit = ce && !rv_active && !ex_st_req && eaf_l1_wren_b && !l1_wr_busy && (snp_dec || snp_id);
+// EX's read-modify-write store (and MOVE #imm to memory, which goes the
+// same way): one instruction more is younger than it, the one in EA-fetch.
+wire [31:0] snx_a   = ex_st_addr;
+wire [31:0] snx_e   = ex_st_addr + ((ex_st_size == `AP040_SZ_L) ? 32'd4 :
+                                    (ex_st_size == `AP040_SZ_W) ? 32'd2 : 32'd1);
+wire        snx_dec = (dec_holding || if_valid_id) && (snx_a < if_pc + 32'd2) && (snx_e > snp_dlo);
+wire        snx_id  = id_valid  && (snx_a < id_next_pc)  && (snx_e > id_pc);
+wire        snx_eac = eac_valid && (snx_a < eac_next_pc) && (snx_e > eac_pc);
+wire        st_smc  = ex_st_req && !l1_wr_busy && (snx_dec || snx_id || snx_eac);
+assign l1_addr_b = rv_active ? {29'd0, (rv_ph == RV_PC), 2'b00} : ex_st_req ? ex_st_addr : eaf_l1_addr_b;
 // Gated by ce, all of them (milestone 92). ap040_pipe_l1.v has no clock
 // enable, and neither does real memory: a request left asserted through a
 // disabled cycle is a request the memory sees again. The write buffer
 // accepted one store 134 times that way. en_a needs no gate here --
 // ap040_inst_fetch.v already builds it from ce.
-assign l1_wren_b = ce && (ex_st_req ? 1'b1  : eaf_l1_wren_b);
-assign l1_size_b   = ex_st_req ? ex_st_size : eaf_l1_size_b;
+assign l1_wren_b = ce && !rv_active && (ex_st_req ? 1'b1  : eaf_l1_wren_b);
+assign l1_size_b   = rv_active ? `AP040_SZ_L : ex_st_req ? ex_st_size : eaf_l1_size_b;
 assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 
 
@@ -757,7 +819,7 @@ ap040_inst_fetch #(
 	.clk       (clk),
 	.nreset    (nreset),
 	.ce        (ce),
-	.stall_in  (id_stall || stopped),
+	.stall_in  (id_stall || stopped || rv_active),
 
 	.flush          (flush),
 	.redirect_valid (final_redirect_valid),
@@ -805,6 +867,8 @@ ap040_decode u_id
 	.id_redirect_pc    (id_redirect_pc),
 
 	.id_valid        (id_valid),
+	.dec_holding     (dec_holding),
+	.dec_hold_pc     (dec_hold_pc),
 	.id_pc           (id_pc),
 	.id_next_pc      (id_next_pc),
 	.id_dest_reg     (id_dest_reg),
@@ -879,6 +943,7 @@ ap040_decode u_id
 	.id_is_movec     (id_is_movec),
 	.id_is_rts       (id_is_rts),
 	.id_is_nop       (id_is_nop),
+	.id_cinv         (id_cinv),
 	.id_bnt          (id_bnt),
 	.id_is_rtr       (id_is_rtr),
 	.id_is_reset     (id_is_reset),
@@ -969,6 +1034,7 @@ ap040_ea_calc u_eac
 	.id_is_movec      (id_is_movec),
 	.id_is_rts        (id_is_rts),
 	.id_is_nop        (id_is_nop),
+	.id_cinv          (id_cinv),
 	.id_bnt           (id_bnt),
 	.id_is_rtr        (id_is_rtr),
 	.id_is_reset      (id_is_reset),
@@ -1052,6 +1118,7 @@ ap040_ea_calc u_eac
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_cinv         (eac_cinv),
 	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
@@ -1149,6 +1216,7 @@ ap040_ea_fetch #(
 	.eaf_is_trace     (eaf_is_trace),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_is_stop      (eaf_is_stop),
+	.eaf_refetch      (eaf_refetch),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
 	.wb_busy          (exe_valid),
@@ -1174,6 +1242,8 @@ ap040_ea_fetch #(
 	.eac_is_movec     (eac_is_movec),
 	.eac_is_rts       (eac_is_rts),
 	.eac_is_nop       (eac_is_nop),
+	.eac_cinv         (eac_cinv),
+	.smc_hit          (smc_hit),
 	.eac_bnt          (eac_bnt),
 	.eac_is_rtr       (eac_is_rtr),
 	.eac_is_reset     (eac_is_reset),
@@ -1181,6 +1251,8 @@ ap040_ea_fetch #(
 	.eac_cond         (eac_cond),
 
 	.sr_in            (sr_resolved_ea),
+	.ccr_nofwd        (sr_resolved[4:0]),
+	.ccr_fwd_busy     (ex_ccr_fwd_valid),
 	.irq_pend         (irq_pend),
 	.irq_take_lvl     (irq_take_lvl),
 	.irq_ack          (irq_ack),
@@ -1343,6 +1415,8 @@ ap040_execute u_ex
 	.eaf_is_trace     (eaf_is_trace),
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_is_stop      (eaf_is_stop),
+	.eaf_refetch      (eaf_refetch),
+	.st_smc           (st_smc),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),
 	.eaf_div_signed   (eaf_div_signed),
@@ -1363,6 +1437,7 @@ ap040_execute u_ex
 	.ex_fwd2_dest     (ex_fwd2_dest),
 	.ex_fwd2_data     (ex_fwd2_data),
 	.ex_fwd2_slow     (ex_fwd2_slow),
+	.ex_pf_inval      (ex_pf_inval),
 	.ex_fwd_dest      (ex_fwd_dest),
 	.ex_fwd_data      (ex_fwd_data),
 

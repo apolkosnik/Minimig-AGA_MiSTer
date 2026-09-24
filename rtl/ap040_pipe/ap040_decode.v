@@ -283,6 +283,11 @@ module ap040_decode
 	output     [31:0] id_redirect_pc,
 
 	output reg        id_valid,
+	// The words decode holds and has not emitted (2026-09-24): a gather in
+	// progress starts at dec_hold_pc. ap040_pipe_cpu.v snoops stores against
+	// them, as the prefetch stream is snooped in ap040_pipe_membus.v.
+	output            dec_holding,
+	output     [31:0] dec_hold_pc,
 	output reg [31:0] id_pc,
 	output reg [31:0] id_next_pc,
 	output reg  [3:0] id_dest_reg,
@@ -366,6 +371,7 @@ module ap040_decode
 	output reg        id_is_movec,
 	output reg        id_is_rts,
 	output reg        id_is_nop,       // T0 trace treats NOP as a change of flow (milestone 79)
+	output reg  [2:0] id_cinv,         // CINV/CPUSH: {valid, IC, DC}
 	output reg        id_bnt,          // a conditional branch predicted NOT taken (2026-09-24)
 	output reg        id_is_reset,     // RESET: privileged, nothing else (milestone 117)
 	output reg        id_is_rte,
@@ -2325,8 +2331,13 @@ function [2:0] fp_after_cmd;
 endfunction
 
 wire is_aline = (if_opcode[15:12] == 4'hA);
-wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16 && !is_fp;
-wire is_illegal = !is_nop && !is_xm && !is_trapv && !is_move_usp && !is_reset && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
+// CINV/CPUSH (2026-09-24): F4xx with a scope; scope 00 stays an F-line
+// exception, classified ahead of privilege as ap040_core.v does. This core
+// has no caches of its own, so both are a refetch of what follows -- and an
+// emptied prefetch stream -- behind a privilege check.
+wire is_cinv  = (if_opcode[15:8] == 8'hF4) && (if_opcode[4:3] != 2'b00);
+wire is_fline = (if_opcode[15:12] == 4'hF) && !is_m16 && !is_fp && !is_cinv;
+wire is_illegal = !is_nop && !is_cinv && !is_xm && !is_trapv && !is_move_usp && !is_reset && !is_moveq && !is_move_rr && !is_alu_rr && !is_alu_mem && !is_an_src && !is_adda && !is_eor_rr && !is_alu_dst && !is_unary_mem && !is_chk && !is_chk_imm && !is_trapcc && !is_unlk && !is_link && !is_movem && !is_mul && !is_div && !is_muldiv_imm && !is_alu_dst_disp && !is_alu_dst_idx && !is_unary_gather && !is_move_idx && !is_alu_idx && !is_lea_idx &&
                    !is_move_pcrel && !is_alu_pcrel && !is_lea_pcrel && !is_abs_alu && !is_muldiv_abs && !is_movea_abs && !is_mul_gather && !is_div_gather && !is_movea_gather && !is_adda_abs && !is_chk_gather && !is_quick_gx && !is_pea_an && !is_pea_gather && !is_eaonly_abs && !is_unary_rr && !is_extswap_rr && !is_x_rr && !shift_shape && !bitop_shape && !is_bcd1_rr && !is_bcd2_rr && !is_imm_alu && !is_alu_immsrc && !is_immmem && !is_move_imm && !is_move_abs && !is_move_ax && !is_move_st && !is_move_st_disp && !is_movea_rr && !is_movea_imm && !is_st_abs && !quick_shape && !quick_an_shape && !quick_mem_shape &&
                    !is_branch_byte && !is_scc_rr && !is_scc_mem_direct && !is_stop && !is_move_mem_l &&
                    !is_jmp_an && !is_bsr_byte && !is_jsr_an && !is_trap &&
@@ -2490,6 +2501,7 @@ reg         held_movec_dir;
 reg  [2:0]  held_reg;
 reg  [2:0]  held_dest_reg;
 reg  [31:0] held_pc;
+assign dec_hold_pc = held_pc;
 reg  [3:0]  held_cond;
 reg  [31:0] disp_acc;
 reg  [15:0] disp_acc3;      // the word before disp_acc's two (milestone 117)
@@ -2518,6 +2530,7 @@ wire       fp_extend = held_fp && held_fp_gen && held_fp_first && (fp_more != 3'
 // ap040_core.v's S_EA_EXTW2 has them; so are two full-format EAs in one
 // MOVE.
 reg         held_fx_seen, held_fx_dst, held_fx_bad, held_fx_tail;
+assign dec_holding = (ext_pending != 3'd0) || held_fx_tail;
 reg  [15:0] held_fx_ext;
 reg   [2:0] held_fx_left, held_fx_more;
 reg   [1:0] held_fx_bdw, held_fx_odw;
@@ -2774,6 +2787,7 @@ always @(posedge clk) begin
 		id_is_movec     <= 1'b0;
 		id_is_rts       <= 1'b0;
 		id_is_nop       <= 1'b0;
+		id_cinv         <= 3'd0;
 		id_bnt          <= 1'b0;
 		id_is_reset     <= 1'b0;
 		id_is_rte       <= 1'b0;
@@ -3314,6 +3328,7 @@ always @(posedge clk) begin
 					id_is_movec     <= held_is_movec;
 					id_is_rts       <= held_is_rtd;
 					id_is_nop       <= 1'b0;
+					id_cinv         <= 3'd0;
 					id_bnt          <= bnt_gather;
 					id_is_reset     <= 1'b0;
 					id_is_rte       <= 1'b0;
@@ -3383,6 +3398,7 @@ always @(posedge clk) begin
 						id_is_movec <= 1'd0;
 						id_is_rts <= 1'd0;
 						id_is_nop <= 1'd0;
+						id_cinv         <= 3'd0;
 						id_is_reset <= 1'd0;
 						id_is_rte <= 1'd0;
 						id_is_rtr <= 1'd0;
@@ -3902,6 +3918,7 @@ always @(posedge clk) begin
 				id_is_movec     <= if_valid && is_move_usp;
 				id_is_rts       <= if_valid && is_rts;
 				id_is_nop       <= if_valid && is_nop;
+				id_cinv         <= {if_valid && is_cinv, if_opcode[7:6]};
 				id_bnt          <= if_valid && bnt_byte;
 				id_is_reset     <= if_valid && is_reset;
 				id_is_rte       <= if_valid && is_rte;
