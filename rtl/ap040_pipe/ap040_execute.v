@@ -140,6 +140,9 @@ module ap040_execute
 	// This instruction's read-modify-write store, accepted this cycle, landed
 	// on an instruction fetched behind it (ap040_pipe_cpu.v's store snoop).
 	input             st_smc,
+	// ...or the store EA-fetch made as this instruction left it, judged a
+	// cycle late: this instruction is that store, and owes the refetch.
+	input             st_smc_late,
 	input             eaf_immsr_to_sr,
 	input             eaf_is_pea,
 	input             eaf_is_link,
@@ -325,7 +328,7 @@ assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait;
 // ...and the refetch it then owes, raised only in a cycle this stage moves
 // on in: the flush that goes with a redirect clears EA-fetch's output
 // registers, which are this stage's input, stalled or not.
-wire   ex_smc    = ex_st_req && st_smc && !ex_stall;
+wire   ex_smc    = ((ex_st_req && st_smc) || (eaf_valid && st_smc_late)) && !ex_stall;
 
 // ------------------------------------------------------------- divide
 // A 32/16 divide cannot be combinational the way the 16x16 multiply can, so

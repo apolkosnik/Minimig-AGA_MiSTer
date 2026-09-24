@@ -356,8 +356,10 @@ module ap040_ea_fetch
 	input             eac_is_rte,
 	input             eac_is_nop,
 	input       [2:0] eac_cinv,        // CINV/CPUSH {valid, IC, DC}, see ap040_decode.v
-	// A store accepted this cycle overlaps an instruction fetched behind
-	// this one (ap040_pipe_cpu.v's snoop). Self-modifying code: t_integer's
+	// A store this instruction made, accepted last cycle, overlaps an
+	// instruction fetched behind it (ap040_pipe_cpu.v's snoop, registered:
+	// it is judged a cycle late, on the store's registered address, to keep
+	// the compare off the port-B address path). Self-modifying code: t_integer's
 	// test 192 rewrites the very next instruction while a divide keeps the
 	// fetch running ahead, and the 68040 program expects the new one to run.
 	input             smc_hit,
@@ -409,6 +411,14 @@ module ap040_ea_fetch
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
 	output            l1_sup_b,
+	// MOVES's space (2026-09-24): SFC for its read, DFC for its write, on
+	// the bus in place of the one the S bit selects. It only ever carried
+	// the S bit, so MOVES with DFC=1 went out as supervisor data -- a
+	// kernel copying to user memory wrote its own space.
+	output            l1_fc_ovr,
+	output      [2:0] l1_fc_val,
+	input       [2:0] sfc_in3,
+	input       [2:0] dfc_in3,
 	output     [31:0] l1_addr_b,
 	input        [31:0] l1_q_b,
 	input               l1_rvalid_b,   // l1_q_b is the return for the last l1_rd_b (milestone 80)
@@ -487,6 +497,8 @@ module ap040_ea_fetch
 	// Retire, then refetch what follows (CINV/CPUSH): EX redirects to
 	// eaf_next_pc, flushing everything fetched behind this instruction.
 	output reg        eaf_refetch,
+	// This instruction leaves the stage this cycle (for the store snoop).
+	output            eaf_departs,
 	output reg        eaf_immsr_to_sr,
 	output reg        eaf_is_pea,
 	output reg        eaf_is_link,
@@ -1594,7 +1606,8 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // port B).
 // The store snoop, kept until the instruction departs: MOVEM's beats span
 // cycles, and the refetch belongs to the whole instruction.
-wire smc_now = smc_hit && !exc_writing;
+wire smc_now = smc_hit;
+assign eaf_departs = eac_valid && !eaf_stall && !flush;
 reg  smc_seen;
 always @(posedge clk)
 	if (!nreset) smc_seen <= 1'b0;
@@ -1638,7 +1651,8 @@ wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_ha
                       (live && fx_hold_go) ||                      // a full-format pointer read
                       (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
                       addr_hz ||                                   // an address from a long forward
-                      trapcc_hz;                                   // TRAPcc behind a flag producer
+                      trapcc_hz ||                                 // TRAPcc behind a flag producer
+                      (live && eac_moves[2] && creg_busy);         // MOVES behind a MOVEC to SFC/DFC
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages
 // BEHIND this one to wait; on its own it left this instruction retiring,
@@ -2303,6 +2317,8 @@ assign l1_wren_b = !stall_self &&
 // they are happening -- so it cannot be read off the status register at the
 // far end of the bridge.
 assign l1_sup_b = sr_in[13] || exc_writing || exc_vec_issue || exc_vec_pending;
+assign l1_fc_ovr = eac_moves[2] && !exc_writing && !exc_vec_issue && !exc_vec_pending;
+assign l1_fc_val = eac_is_store ? dfc_in3 : sfc_in3;
 // The size of whatever access l1_addr_word above selected, in the same
 // priority order (milestone 86). Everything that is not a sized store or a
 // sized load -- pushes, exception frame beats, the vector fetch, RTE's pops

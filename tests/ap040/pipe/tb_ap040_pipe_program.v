@@ -271,9 +271,15 @@ end
 // +storetrace: every store EA-fetch posts, with what the snoop compared.
 always @(posedge clk)
 	if ($test$plusargs("storetrace") && nreset && dut.u_cpu.eaf_l1_wren_b && !dut.u_cpu.l1_wr_busy)
-		$display("ST %0t pc=%h a=%h id=%b %h-%h dec=%b %h if=%b %h hit=%b", $time, dut.u_cpu.u_eaf.eac_pc,
-		         dut.u_cpu.snp_a, dut.u_cpu.id_valid, dut.u_cpu.id_pc, dut.u_cpu.id_next_pc,
-		         dut.u_cpu.dec_holding, dut.u_cpu.dec_hold_pc, dut.u_cpu.if_valid_id, dut.u_cpu.if_pc, dut.u_cpu.smc_hit);
+		$display("ST %0t pc=%h a=%h departs=%b", $time, dut.u_cpu.u_eaf.eac_pc,
+		         dut.u_cpu.eaf_l1_addr_b, dut.u_cpu.eaf_departs);
+always @(posedge clk)
+	if ($test$plusargs("storetrace") && nreset && dut.u_cpu.sq_v)
+		$display("SQ %0t a=%h dep=%b eac=%b %h-%h id=%b %h-%h dec=%b %h if=%b %h hit=%b late=%b", $time,
+		         dut.u_cpu.sq_a, dut.u_cpu.sq_dep, dut.u_cpu.eac_valid, dut.u_cpu.eac_pc, dut.u_cpu.eac_next_pc,
+		         dut.u_cpu.id_valid, dut.u_cpu.id_pc, dut.u_cpu.id_next_pc,
+		         dut.u_cpu.dec_holding, dut.u_cpu.dec_hold_pc, dut.u_cpu.if_valid_id, dut.u_cpu.if_pc,
+		         dut.u_cpu.smc_hit, dut.u_cpu.st_smc_late);
 
 always @(posedge clk)
 	if ($test$plusargs("storetrace") && nreset && dut.u_cpu.ex_st_req && !dut.u_cpu.l1_wr_busy)

@@ -78,6 +78,9 @@ module ap040_pipe_membus
 	// CINV/CPUSH: empty the window. The refetch that follows arrives in the
 	// same cycle and must go to memory, not to what the window held.
 	input             pf_inval,
+	// MOVES: the function code of this port-B access, in place of sup_b's.
+	input             fc_ovr,
+	input       [2:0] fc_ovr_val,
 
 	// ---- bus side: ap040_core.v's external memory port ----
 	output reg        mem_req,
@@ -122,7 +125,8 @@ reg  [1:0] w_size;
 // Captured WITH each request, not read when the transaction is finally
 // sent: a posted write can sit here across the very commit that changes the
 // privilege, and would then go out under the wrong one.
-reg        a_sup, b_sup, w_sup;
+reg        a_sup;
+reg  [2:0] b_fc, w_fc;
 
 // The requester must hold its write until this drops -- as with the array's
 // one-entry buffer, the write is accepted the cycle wr_busy is low.
@@ -142,7 +146,14 @@ endfunction
 // This cycle's view of the window, with a prefetch that returns now already
 // in it -- a request in the same cycle must see it.
 wire        pf_ack     = busy && mem_ack && (who == WHO_A);
-wire        pf_app     = pf_ack && !pf_kill;
+// ...and not a longword a write accepted this same cycle touches: the
+// write-snoop's kill only catches a read still on the bus, so a fill landing
+// in the write's own cycle was appended and handed to the fetch waiting for
+// it -- the old instruction, behind a store that rewrote it
+// (tb_ap040_pipe_smcdual.v). Dropped instead; the fetch it was for is still
+// pending, and goes out again after the write. (w_* are declared below.)
+wire        pf_wr      = w_accept && ((w_lo == pf_next) || (w_hi == pf_next));
+wire        pf_app     = pf_ack && !pf_kill && !pf_wr;
 wire [29:0] pf_next    = pf_base + {27'd0, pf_cnt};
 wire  [2:0] pf_cnt1    = pf_cnt + {2'd0, pf_app};
 function [31:0] pf_word1;   // entry i, including the longword arriving now
@@ -201,7 +212,7 @@ always @(posedge clk) begin
 		pf_q[0] <= 32'd0; pf_q[1] <= 32'd0; pf_q[2] <= 32'd0; pf_q[3] <= 32'd0;
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
-		a_sup <= 1'b1; b_sup <= 1'b1; w_sup <= 1'b1;
+		a_sup <= 1'b1; b_fc <= `AP040_FC_SUPER_DATA; w_fc <= `AP040_FC_SUPER_DATA;
 		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
 		rvalid_a <= 1'b0; rvalid_b <= 1'b0;
 		q_a <= 16'd0; q_b <= 32'd0;
@@ -255,7 +266,7 @@ always @(posedge clk) begin
 		if (rd_b) begin
 			b_addr   <= address_b;
 			b_size   <= size_b;
-			b_sup    <= sup_b;
+			b_fc     <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
 		end
@@ -263,7 +274,7 @@ always @(posedge clk) begin
 			w_addr <= address_b;
 			w_data <= data_b;
 			w_size <= size_b;
-			w_sup  <= sup_b;
+			w_fc   <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
 			w_pend <= 1'b1;
 		end
 
@@ -286,12 +297,12 @@ always @(posedge clk) begin
 			busy      <= 1'b1;  who <= WHO_BW;
 			mem_req   <= 1'b1;  mem_write <= 1'b1;  mem_instr <= 1'b0;
 			mem_size  <= w_size; mem_addr <= w_addr; mem_wdata <= w_data;
-			mem_fc    <= fc_of(1'b0, w_sup);
+			mem_fc    <= w_fc;
 		end else if (b_pend) begin
 			busy      <= 1'b1;  who <= WHO_BR;
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
 			mem_size  <= b_size; mem_addr <= b_addr;
-			mem_fc    <= fc_of(1'b0, b_sup);
+			mem_fc    <= b_fc;
 		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf && !pf_inval) begin
 			// The next longword of the stream, as the window stands after
 			// this cycle's request. Not before the first request (review 15):

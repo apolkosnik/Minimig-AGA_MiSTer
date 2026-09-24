@@ -180,6 +180,8 @@ module ap040_pipe_cpu
 	// The privilege of the port-B access (milestone 92), and of the
 	// instruction fetch (milestone 93).
 	output        l1_sup_b,
+	output        l1_fc_ovr,    // MOVES: l1_fc_val is the function code of this access
+	output  [2:0] l1_fc_val,
 	output        l1_sup_a,
 	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
@@ -768,6 +770,10 @@ wire eaf_l1_rd_b;
 wire eaf_l1_sup_b;
 // Whoever owns port B this cycle owns its privilege too (milestone 93).
 assign l1_sup_b  = rv_active ? 1'b1 : ex_st_req ? ex_st_sup : eaf_l1_sup_b;
+wire        eaf_l1_fc_ovr;
+wire  [2:0] eaf_l1_fc_val;
+assign l1_fc_ovr = !rv_active && !ex_st_req && eaf_l1_fc_ovr;
+assign l1_fc_val = eaf_l1_fc_val;
 // The fetch's privilege is the mode the fetched instruction will RUN in,
 // which for the first instruction of a handler is supervisor -- and the
 // exception's own SR write has not committed when that fetch goes out.
@@ -776,21 +782,40 @@ assign l1_sup_a  = sr_resolved[13];
 assign l1_rd_b   = ce && (rv_active ? rv_issue : eaf_l1_rd_b);
 assign l1_inval_a = ce && ex_pf_inval;
 
-// The store snoop (2026-09-24). A store EA-fetch posts can land on an
-// instruction already fetched behind it -- in EA-calc, in decode's gather,
-// or the word the fetch is presenting -- where ap040_pipe_membus.v's
-// stream snoop can no longer reach it. The storing instruction then
-// retires with a refetch of what follows (ap040_ea_fetch.v's smc_hit), so
-// the rewritten instruction is fetched again after the write. Ranges are
-// half-open byte ranges; a gather in progress owns everything from its
-// first word up to the fetch word.
-wire [31:0] snp_a   = eaf_l1_addr_b;
-wire [31:0] snp_e   = eaf_l1_addr_b + ((eaf_l1_size_b == `AP040_SZ_L) ? 32'd4 :
-                                       (eaf_l1_size_b == `AP040_SZ_W) ? 32'd2 : 32'd1);
+// The store snoop (2026-09-24). A store can land on an instruction already
+// fetched behind it -- in EA-calc, in decode's gather, or the word the
+// fetch is presenting -- where ap040_pipe_membus.v's stream snoop can no
+// longer reach it; the storing instruction then owes a refetch of what
+// follows. Ranges are half-open byte ranges; a gather in progress owns
+// everything from its first word up to the fetch word.
+//
+// A store from EA-fetch is judged a cycle LATE, on its registered address:
+// judged live, the compare hung off the port-B address, and was 817ba673's
+// worst path (-0.249 ns). Nothing younger can pass the store in that cycle,
+// so the ranges then are a superset of the ranges when it went out. If the
+// storing instruction left EA-fetch as it stored, it is in EX now and EX
+// raises the refetch (st_smc_late); if not -- a MOVEM mid-list -- EA-fetch
+// keeps it for the departure (smc_hit).
+reg  [31:0] sq_a;
+reg   [1:0] sq_sz;
+reg         sq_v, sq_dep;
+wire        eaf_departs;
+wire        sq_acc  = ce && !rv_active && !ex_st_req && eaf_l1_wren_b && !l1_wr_busy;
+wire [31:0] snp_e   = sq_a + ((sq_sz == `AP040_SZ_L) ? 32'd4 : (sq_sz == `AP040_SZ_W) ? 32'd2 : 32'd1);
 wire [31:0] snp_dlo = dec_holding ? dec_hold_pc : if_pc;
-wire        snp_dec = (dec_holding || if_valid_id) && (snp_a < if_pc + 32'd2) && (snp_e > snp_dlo);
-wire        snp_id  = id_valid && (snp_a < id_next_pc) && (snp_e > id_pc);
-assign smc_hit = ce && !rv_active && !ex_st_req && eaf_l1_wren_b && !l1_wr_busy && (snp_dec || snp_id);
+wire        snp_dec = (dec_holding || if_valid_id) && (sq_a < if_pc + 32'd2) && (snp_e > snp_dlo);
+wire        snp_id  = id_valid  && (sq_a < id_next_pc)  && (snp_e > id_pc);
+wire        snp_eac = eac_valid && (sq_a < eac_next_pc) && (snp_e > eac_pc);
+wire        snp_hit = sq_v && (snp_dec || snp_id || (sq_dep && snp_eac));
+assign smc_hit      = snp_hit && !sq_dep;
+wire   st_smc_late  = snp_hit && sq_dep;
+always @(posedge clk)
+	if (!nreset) begin sq_v <= 1'b0; sq_dep <= 1'b0; sq_a <= 32'd0; sq_sz <= 2'd0; end
+	else if (ce) begin
+		if (sq_acc) begin
+			sq_v <= 1'b1; sq_a <= eaf_l1_addr_b; sq_sz <= eaf_l1_size_b; sq_dep <= eaf_departs;
+		end else if (!sq_dep || !ex_stall) sq_v <= 1'b0;   // judged: held while EX holds it
+	end
 // EX's read-modify-write store (and MOVE #imm to memory, which goes the
 // same way): one instruction more is younger than it, the one in EA-fetch.
 wire [31:0] snx_a   = ex_st_addr;
@@ -1217,6 +1242,7 @@ ap040_ea_fetch #(
 	.eaf_is_immsr     (eaf_is_immsr),
 	.eaf_is_stop      (eaf_is_stop),
 	.eaf_refetch      (eaf_refetch),
+	.eaf_departs      (eaf_departs),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.port_taken       (ex_st_req),
 	.wb_busy          (exe_valid),
@@ -1281,6 +1307,10 @@ ap040_ea_fetch #(
 	.l1_rvalid_b      (l1_rvalid_b),
 	.l1_rd_b          (eaf_l1_rd_b),
 	.l1_sup_b         (eaf_l1_sup_b),
+	.l1_fc_ovr        (eaf_l1_fc_ovr),
+	.l1_fc_val        (eaf_l1_fc_val),
+	.sfc_in3          (sfc),
+	.dfc_in3          (dfc),
 	.l1_wren_b        (eaf_l1_wren_b),
 	.l1_size_b          (eaf_l1_size_b),
 	.l1_data_b        (eaf_l1_data_b),
@@ -1417,6 +1447,7 @@ ap040_execute u_ex
 	.eaf_is_stop      (eaf_is_stop),
 	.eaf_refetch      (eaf_refetch),
 	.st_smc           (st_smc),
+	.st_smc_late      (st_smc_late),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),
 	.eaf_div_signed   (eaf_div_signed),
