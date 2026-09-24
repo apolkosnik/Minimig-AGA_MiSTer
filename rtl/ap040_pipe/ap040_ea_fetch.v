@@ -316,6 +316,7 @@ module ap040_ea_fetch
 	input             eac_ea_pcrel,
 	input             eac_is_rmw,
 	input             eac_immrmw,
+	input             eac_st_only,   // CLR/Scc to memory: EX stores it, nothing is read first
 	input             eac_st_disp,
 	input             eac_is_div,
 	input             eac_div_signed,
@@ -1467,7 +1468,10 @@ wire chk_c = chk_long ? (((chk_value_l < 32'sd0) && (chk_bound_l >= 32'sd0)) ||
 // the cycle after. CHK straight behind its value's producer is the only
 // cost. CHK2 needs none: its compare is latched in ck_c and traps from
 // registers.
-wire chk_ex_writes  = eaf_valid && ((eaf_dest_reg == eac_dest_reg) ||
+// ...where EX really writes it: CHK names a destination and writes no
+// register, so a CHK behind a CHK of the same register waited for nothing
+// (restructuring plan, phase 1: repeated passing CHKs took two cycles).
+wire chk_ex_writes  = eaf_valid && ((eaf_writes_reg && (eaf_dest_reg == eac_dest_reg)) ||
                                     (eaf_writes_an && (eaf_an_reg == eac_dest_reg)) ||
                                     (eaf_ml[6] && ({1'b0, eaf_ml[2:0]} == eac_dest_reg)));
 wire chk_fwd_hazard = eac_valid && eac_is_chk && chk_ex_writes;
@@ -1774,7 +1778,27 @@ wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw ||
 // bench for that reason). The views still keep the forward off the address
 // path; the hold term only cost a bubble whenever a stale index field
 // happened to name EX's destination. The check below holds the invariant.
-wire addr_hz      = live && (eac_uses_ea || eac_is_chk || eac_is_div) && (lf_a || lf_b);
+//
+// ...and only for a port whose ADDRESS view is used (restructuring plan,
+// phase 1). Holding for either port whenever the instruction had an EA
+// stalled MOVE.L (A0),D1 behind the MOVE.L (A0),D1 before it -- D1 is the
+// destination, read through port B, and no address is made of it -- and a
+// store behind the ALU op that produced its DATA. The address views are
+// used exactly here:
+//   port A  every EA base (an_base for a load, ea_base, RTE's pop) and the
+//           CHK/DIV verdicts -- all of it but a plain store's, whose base
+//           is port B and whose data takes the full forward (l1_data_b);
+//   port B  a plain store's base (an_base), a push (push_addr: BSR, JSR,
+//           PEA, LINK), a memory-to-memory MOVE's destination (mm_base) and
+//           the CHK2/CAS/CHK verdicts (ck_rn, cas_fl, chk_value).
+// Everywhere else a port-B operand is ALU data and takes the full forward
+// as a register-only instruction's does.
+wire st_base_b    = eac_is_store && !eac_st_disp;
+wire addr_use_a   = (eac_uses_ea || eac_is_chk || eac_is_div) && !st_base_b;
+wire addr_use_b   = (eac_uses_ea || eac_is_chk) &&
+                    (st_base_b || eac_is_bsr || eac_is_jsr || eac_is_pea || eac_is_link ||
+                     mm || ck || cas || eac_is_chk);
+wire addr_hz      = live && ((addr_use_a && lf_a) || (addr_use_b && lf_b));
 // MOVES reads SFC/DFC here, and needs no wait behind the MOVEC that sets
 // them: both carry an extension word, and the gathers keep MOVES back until
 // the MOVEC has committed (the hold this used to have survived its
@@ -3373,15 +3397,20 @@ always @(posedge clk) begin
 				if (!bf_active) begin
 					bf_active <= 1'b1;
 					bf_ea     <= ea_target;      // port C is still the index here
-					bf_ph     <= BF_OFF;
+					// An immediate offset or width is in the extension word:
+					// taken now, and the phase that would read it through port C
+					// is skipped (restructuring plan, phase 3) -- BFEXTU
+					// D2{0:8},D1 spent two cycles latching two constants.
+					if (!bfx[11]) bf_off <= {27'd0, bfx[10:6]};
+					if (!bfx[5])  bf_w   <= (bfx[4:0] == 5'd0) ? 6'd32 : {1'b0, bfx[4:0]};
+					bf_ph     <= bfx[11] ? BF_OFF : bfx[5] ? BF_WID : BF_SRC;
 				end else case (bf_ph)
 				BF_OFF: begin
-					bf_off <= bfx[11] ? operand_c : {27'd0, bfx[10:6]};
-					bf_ph  <= BF_WID;
+					bf_off <= operand_c;
+					bf_ph  <= bfx[5] ? BF_WID : BF_SRC;
 				end
 				BF_WID: begin
-					bf_w   <= bfx[5] ? ((operand_c[4:0] == 5'd0) ? 6'd32 : {1'b0, operand_c[4:0]})
-					                 : ((bfx[4:0] == 5'd0)       ? 6'd32 : {1'b0, bfx[4:0]});
+					bf_w   <= (operand_c[4:0] == 5'd0) ? 6'd32 : {1'b0, operand_c[4:0]};
 					bf_ph  <= BF_SRC;
 				end
 				BF_SRC: begin
@@ -3389,11 +3418,13 @@ always @(posedge clk) begin
 					// one had decode point port B at it.
 					bf_du <= bf_reg ? operand_c : operand_b;
 					if (bf_reg) begin
-						bf_w1  <= (bf_off[4:0] == 5'd0) ? operand_a
-						          : ((operand_a << bf_off[4:0]) | (operand_a >> (6'd32 - {1'b0, bf_off[4:0]})));
-						bf_w2  <= 8'd0;
+						// A register's field is aligned by this rotation alone:
+						// S1's shift by the in-byte offset is a shift by zero, a
+						// copy, so its register is loaded here and S1 skipped.
+						bf_t40 <= {((bf_off[4:0] == 5'd0) ? operand_a
+						            : ((operand_a << bf_off[4:0]) | (operand_a >> (6'd32 - {1'b0, bf_off[4:0]})))), 8'd0};
 						bf_bib <= 3'd0;
-						bf_ph  <= BF_S1;
+						bf_ph  <= BF_S2;
 					end else begin
 						bf_addr <= bf_ea + {{3{bf_off[31]}}, bf_off[31:3]};
 						bf_bib  <= bf_off[2:0];
@@ -3918,7 +3949,11 @@ always @(posedge clk) begin
 				eaf_is_scc     <= eac_is_scc;
 				eaf_is_dbcc    <= eac_is_dbcc;
 				eaf_is_jmp     <= eac_is_jmp || (fp && fp_redirect);
-				eaf_is_rmw     <= mm;
+				// CLR and Scc to memory leave here with no read done, and EX
+				// stores them exactly as it stores a read-modify-write, to the
+				// address the read would have gone to (restructuring plan,
+				// phase 2).
+				eaf_is_rmw     <= mm || eac_st_only;
 				eaf_is_mm      <= mm;
 				eaf_is_xm      <= m16_pp || (fp && fp_w1_en);   // the FPU's result rides eaf_ea_target
 				eaf_bnt        <= eac_is_branch && eac_bnt;
@@ -3929,6 +3964,7 @@ always @(posedge clk) begin
 				if (!cas) eaf_casf <= cas2 ? {1'b1, c2_fl} : 5'd0;
 				eaf_rtr_ccr    <= 6'd0;
 				if (mm) eaf_ea_target <= mm_daddr;
+				if (eac_st_only) eaf_ea_target <= ea_target;
 				if (m16) eaf_ea_target <= operand_b + 32'd16;   // (Ax)+,(Ay)+: Ay's step
 				if (fp) eaf_ea_target <= fp_w1_val;
 				eaf_is_div     <= eac_is_div;

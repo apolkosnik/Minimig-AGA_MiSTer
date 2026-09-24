@@ -340,6 +340,11 @@ module ap040_decode
 	// The RMW's second operand is the gathered immediate, not a register,
 	// and eac_imm is therefore NOT a displacement (milestone 89).
 	output reg        id_immrmw,
+	// A memory destination written without being read (restructuring plan,
+	// phase 2): CLR and Scc. The M68000PRM (CLR p. 4-74, Scc p. 4-173)
+	// gives their preliminary read as MC68000/MC68008 behaviour; here they
+	// were read-modify-writes, a whole read for a value neither uses.
+	output reg        id_st_only,
 	// A store whose address carries a displacement (milestone 91).
 	output reg        id_st_disp,
 	output reg        id_is_trapcc,
@@ -2435,6 +2440,7 @@ reg         held_is_alu_disp;
 // held_cond and the EA register already rides held_reg, so the family adds
 // only "this is an Scc" and "its destination was absolute".
 reg         held_is_scc_mem;
+reg         held_st_only;       // CLR or Scc: written, not read (see id_st_only)
 reg         held_is_stop;
 reg         held_scc_abs;
 reg         held_is_lea;        // the ninth kind: LEA (d16,An),Am
@@ -2776,6 +2782,7 @@ always @(posedge clk) begin
 		id_ea_pcrel     <= 1'b0;
 		id_is_rmw       <= 1'b0;
 		id_immrmw       <= 1'b0;
+		id_st_only      <= 1'b0;
 		id_st_disp      <= 1'b0;
 		id_is_trapcc    <= 1'b0;
 		id_is_chk       <= 1'b0;
@@ -2862,6 +2869,7 @@ always @(posedge clk) begin
 		held_is_move_disp <= 1'b0;
 		held_is_alu_disp  <= 1'b0;
 		held_is_scc_mem   <= 1'b0;
+		held_st_only      <= 1'b0;
 		held_is_stop      <= 1'b0;
 		held_scc_abs      <= 1'b0;
 		held_alu_op       <= `AP040_ALU_MOVE;
@@ -3303,6 +3311,7 @@ always @(posedge clk) begin
 					id_is_rmw       <= (held_is_alu_disp && held_alu_rmw) || held_abs_rmw ||
 					                    (held_imm_mem && !held_imm_nowrite) || held_is_scc_mem || held_mvf;
 					id_immrmw       <= held_imm_mem;
+					id_st_only      <= held_st_only;
 					id_ea_indexed   <= held_ea_indexed;
 					id_ea_pcrel     <= held_ea_pcrel;
 					id_is_pea       <= (held_is_lea && held_lea_push) || (held_is_abs && held_abs_push);
@@ -3406,6 +3415,7 @@ always @(posedge clk) begin
 						id_is_lea <= 1'd0;
 						id_is_rmw <= 1'd0;
 						id_immrmw <= 1'd0;
+						id_st_only <= 1'b0;
 						id_st_disp <= 1'd0;
 						id_is_trapcc <= 1'd0;
 						id_is_chk <= 1'd0;
@@ -3593,6 +3603,8 @@ always @(posedge clk) begin
 				                       is_adda_disp || is_chk_gather) && ea_pcrel_mode) ||
 				                     (fp_has_ea && ea_is_pcrel);
 				held_is_scc_mem   <= is_scc_mem_gather;
+				held_st_only      <= is_scc_mem_gather ||
+				                     ((is_unary_gather || is_unary_abs) && (if_opcode[11:8] == 4'b0010));   // CLR
 				held_scc_abs      <= is_scc_mem_gather && ea_is_abs;
 				held_is_alu_disp  <= is_alu_disp || is_adda_disp || is_alu_dst_disp || is_alu_idx || is_bit_d_gx ||
 				                     is_ux_g ||
@@ -3916,6 +3928,7 @@ always @(posedge clk) begin
 				id_is_rmw       <= if_valid && (is_alu_dst || is_bit_d_mem || is_ux_d || is_unary_rmw || quick_mem_shape || is_scc_mem_direct ||
 				                               is_mvf_memd);
 				id_immrmw       <= if_valid && quick_mem_shape;
+				id_st_only      <= if_valid && (is_clr_mem || is_scc_mem_direct);
 				id_ea_ext       <= 32'h0;
 				id_mm           <= is_xm ? {if_valid, if_valid, 1'b0, is_cmpm, !is_cmpm, 2'b00}
 				                         : {1'b0, is_move_mm_d && if_valid, 1'b0, mvd_pi, mvd_pd, 2'b00};

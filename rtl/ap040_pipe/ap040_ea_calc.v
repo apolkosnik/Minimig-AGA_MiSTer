@@ -118,6 +118,7 @@ module ap040_ea_calc
 	input             id_ea_pcrel,
 	input             id_is_rmw,
 	input             id_immrmw,
+	input             id_st_only,
 	input             id_st_disp,
 	input             id_is_div,
 	input             id_div_signed,
@@ -208,6 +209,7 @@ module ap040_ea_calc
 	output reg        eac_ea_pcrel,
 	output reg        eac_is_rmw,
 	output reg        eac_immrmw,
+	output reg        eac_st_only,   // written, not read: no load, and an EX store all the same
 	output reg        eac_st_disp,
 	output reg        eac_is_div,
 	output reg        eac_div_signed,
@@ -297,6 +299,7 @@ always @(posedge clk) begin
 		eac_ea_pcrel     <= 1'b0;
 		eac_is_rmw       <= 1'b0;
 		eac_immrmw       <= 1'b0;
+		eac_st_only      <= 1'b0;
 		eac_st_disp      <= 1'b0;
 		eac_is_div       <= 1'b0;
 		eac_div_signed   <= 1'b0;
@@ -372,7 +375,7 @@ always @(posedge clk) begin
 			eac_is_branch    <= id_is_branch;
 			eac_is_scc       <= id_is_scc;
 			eac_is_dbcc      <= id_is_dbcc;
-			eac_is_mem_src   <= id_is_mem_src;
+			eac_is_mem_src   <= id_is_mem_src && !id_st_only;   // CLR/Scc: nothing to read
 			eac_is_abs       <= id_is_abs;
 			eac_is_store     <= id_is_store;
 			eac_is_postinc   <= id_is_postinc;
@@ -384,6 +387,7 @@ always @(posedge clk) begin
 			eac_ea_pcrel     <= id_ea_pcrel;
 			eac_is_rmw       <= id_is_rmw;
 			eac_immrmw       <= id_immrmw;
+			eac_st_only      <= id_st_only;
 			eac_st_disp      <= id_st_disp;
 			eac_is_div       <= id_is_div;
 			eac_div_signed   <= id_div_signed;

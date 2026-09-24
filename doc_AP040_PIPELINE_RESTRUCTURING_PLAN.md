@@ -71,23 +71,29 @@ but do not remove gather spacing until its hidden hazard assumptions are gone.
 
 ## Phase 0 — Make the baseline reproducible
 
-- [ ] Record HEAD, working diff and RTL hashes; preserve existing user changes.
-- [ ] Turn the temporary performance probes into a maintained runner, assembly
+- [x] Record HEAD, working diff and RTL hashes; preserve existing user changes.
+  Done: `run_pipe_perf.py` records HEAD and whether `rtl/` is dirty in every result; the restructuring review's own tree was preserved as bundle 10's WIP commits.
+- [x] Turn the temporary performance probes into a maintained runner, assembly
   cases and machine-readable results under `tests/ap040/`. Include dependencies,
   bus transaction counts and architectural checks alongside timing. Reject
   missing images, missing measurements and unexpected exceptions.
+  Done: `tests/ap040/run_pipe_perf.py` + `perf/tb_ap040_pipe_perf.v`, 77 cases (the review's 60, its probes, the write-only shapes); retirement, port-B read/write and bus-transaction counts; a missing image, missing measurement, exception or wrong retirement count fails the case; `perf/baseline.json` with `--check`.
 - [ ] Measure instruction latency, initiation interval, instruction words,
   accepted reads/writes and stall reasons separately. Treat paired sequences as
   blocks and normalize their CPI explicitly.
-- [ ] Reproduce the review-16 write acceptance loss during `ce=0` and FPU operand
+  Partly: initiation interval, instruction words, reads/writes and the stall holds are recorded; dependent latency is measured only by the paired probes (`data_to_store`, `address_to_load`, `mul_four_alu`, ...), not as its own column.
+- [x] Reproduce the review-16 write acceptance loss during `ce=0` and FPU operand
   fault/exception-port ownership defects. Add focused regressions and fix them
   before changing the affected handshake or adding concurrency. Temporary
   experiments in `/tmp/ap040-review16/` are evidence, not qualified fixes.
-- [ ] Record current `t_mmu` and `t_bitfield_mmu` failures by case/phase. The
+  Done: both fixed in bundle 10 (86f69b53): the write receipt and the FPU sequencer stopped by an access fault; `tb_ap040_pipe_wrreceipt_bus16.v` and `_fpufault_bus16.v` fail without them.
+- [x] Record current `t_mmu` and `t_bitfield_mmu` failures by case/phase. The
   program runner's overall PASS currently excludes failures in its OPEN list.
   Keep these visible and require resolution before final integration sign-off;
   unrelated gaps need not block phase 1's local improvements.
-- [ ] Capture a fresh standalone fit with the existing 25 ns constraints.
+  Done: none remain: bundle 10 made all fifteen programs required, passing all three phases on both suites.
+- [x] Capture a fresh standalone fit with the existing 25 ns constraints.
+  Done: 476cc5d3: 17,595 ALMs, 40.41 MHz, +0.251 ns at 25 ns.
 
 Exit: repeatable results for the actual working sources, explicit known gaps,
 and durable regressions for acceptance/fault ownership. No performance claim
@@ -102,15 +108,20 @@ Primary files: `ap040_decode.v`, `ap040_ea_calc.v`, `ap040_ea_fetch.v`,
   store data, CCR, early trap operand and auxiliary result destinations.
   Implement the minimum explicit metadata needed; do not introduce another
   broad instruction-family approximation.
+  Partly: the address views' consumers are enumerated in `ap040_ea_fetch.v` (`addr_use_a`/`addr_use_b`); no general operand-role metadata yet.
 - [ ] Qualify forwarding/hazard producer matches with actual write enables,
   including conditional, second-port and banked-stack writes.
-- [ ] Restrict `addr_hz` to inputs consumed by address/early-verdict logic.
+  Partly: CHK's match is qualified by `eaf_writes_reg`; the other producer matches are not yet reviewed.
+- [x] Restrict `addr_hz` to inputs consumed by address/early-verdict logic.
   An overwritten load destination is not an address input. Handle store-data
   forwarding independently from base/index readiness.
-- [ ] Correct CHK's destination match so a preceding CHK that writes no GPR
+  Done: `addr_hz` holds only a port whose address view feeds an address or a verdict: a load's destination (port B) and a plain store's data (port A) no longer wait. Repeated MOVE.L (A0),D1: 3 -> 2 local cycles.
+- [x] Correct CHK's destination match so a preceding CHK that writes no GPR
   cannot create a false GPR dependency.
-- [ ] Preserve real change/use stalls where a long EX result would otherwise
+  Done: repeated passing CHK: 2 -> 1 local cycle.
+- [x] Preserve real change/use stalls where a long EX result would otherwise
   enter the AGU or exception decision in the same cycle.
+  Done: the base, index, push, memory-to-memory destination and every verdict operand still hold on a long forward (`address_to_load` unchanged at 4).
 
 Validation: repeated and alternating load destinations; ALU-to-store-data
 versus ALU-to-address; passing and trapping CHK; EX/WB forwarding; dual writes;
@@ -125,13 +136,17 @@ at 1 local CPI. These are implementation targets, not completed improvements.
 
 Primary files: decode, EA-fetch, execute and CPU memory-port arbitration.
 
-- [ ] Decode CLR memory as a sized zero store with CLR's CCR result.
-- [ ] Decode Scc memory as a sized predicate store using the correct CCR
+- [x] Decode CLR memory as a sized zero store with CLR's CCR result.
+  Done: `id_st_only`: CLR leaves EA-fetch with no read and EX stores it as it stores a read-modify-write; flags from EX's CLR.
+- [x] Decode Scc memory as a sized predicate store using the correct CCR
   producer; preserve CCR itself.
-- [ ] Remove destination reads in direct and extension-word addressing forms.
+  Done: same path; EX's condition reads the forwarded CCR as before.
+- [x] Remove destination reads in direct and extension-word addressing forms.
   Preserve the genuine read-modify-write paths used by other instructions.
-- [ ] Carry the store address, privilege/function code, An update and fault
+  Done: direct, displacement, indexed and absolute forms (decode's `held_st_only` for the gathered ones); 0 reads in every write-only case of the perf runner.
+- [x] Carry the store address, privilege/function code, An update and fault
   context explicitly. Do not commit flags/address changes too early on faults.
+  Done: the EX store's address, size, An step and fault path (EX abandons and refetches, EA-fetch takes the owed fault) are the read-modify-write's; `t_fault_edges.s` 30-37 refuses and restarts CLR and ST (A0)+ on both cores; `tb_ap040_pipe_wronly_bus16.v` checks zero reads, one store per operation, every byte of a read-sensitive window, flags, A7's byte step and a wrong-path CLR.
 
 The Motorola programmer's reference manual identifies preliminary reads for
 CLR and Scc as MC68000/MC68008 behavior (CLR p. 4-74; Scc p. 4-173). The
@@ -153,11 +168,13 @@ in real bus transactions as well as CPI.
 
 Primary files: decode and EA-fetch; use existing `bitfield` and `bitmem` benches.
 
-- [ ] Supply immediate offset/width together, retaining width-zero-as-32 rules.
+- [x] Supply immediate offset/width together, retaining width-zero-as-32 rules.
+  Done: both are taken at the sequencer's start and the port-C phases are skipped; width 0 still means 32.
 - [ ] Gather dynamic operands according to actual register-port availability;
   preserve overlaps among field operand, offset, width and BFINS source.
-- [ ] Rotate register operands directly into the aligned window, bypassing the
+- [x] Rotate register operands directly into the aligned window, bypassing the
   register form's zero-shift `BF_S1` copy.
+  Done: the rotation loads the S2 input directly; register forms 9/10 -> 6/7 local cycles.
 - [ ] Separate read-only result generation from modifying merge/writeback work.
   Retain timing stages around variable rotate/shift/mask/leading-zero logic.
 - [ ] Reuse preparation for memory forms without widening their access spans.
