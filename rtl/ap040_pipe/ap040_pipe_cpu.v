@@ -306,7 +306,7 @@ wire        eaf_is_bsr, eaf_is_jsr, eaf_is_trap, eaf_is_illegal;
 wire        eaf_is_priv, eaf_is_movesr, eaf_is_movec;
 wire        eaf_is_addrerr;
 wire        eaf_movec_dir;
-wire  [2:0] eaf_movec_sel;
+wire  [3:0] eaf_movec_sel;
 wire [15:0] eaf_sr_snapshot;
 wire        eaf_is_rts, eaf_is_rte;
 wire [15:0] eaf_rte_sr_data;
@@ -320,7 +320,7 @@ wire  [4:0] exe_result_flags;
 wire        exe_writes_sr;
 wire [15:0] exe_sr_data;
 wire        exe_writes_creg;
-wire  [2:0] exe_creg_sel;
+wire  [3:0] exe_creg_sel;
 wire [31:0] exe_creg_data;
 
 wire        wb_valid;  wire [31:0] wb_pc;
@@ -517,6 +517,10 @@ wire [15:0] sr_resolved_ea = ex_sr_fwd_valid  ? ex_sr_fwd_data :
 reg [31:0] vbr;
 reg  [2:0] sfc, dfc;
 reg [31:0] cacr;
+// The MMU registers (milestone 113): what MOVEC wrote, through
+// ap040_core.v's write masks (ap040_core.v:3850-3870), and nothing else --
+// there is no MMU here for them to configure.
+reg [31:0] tc, itt0, itt1, dtt0, dtt1, mmusr, urp, srp;
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -524,12 +528,28 @@ always @(posedge clk) begin
 		sfc  <= 3'h0;
 		dfc  <= 3'h0;
 		cacr <= 32'h0;
+		tc   <= 32'h0;
+		itt0 <= 32'h0;
+		itt1 <= 32'h0;
+		dtt0 <= 32'h0;
+		dtt1 <= 32'h0;
+		mmusr <= 32'h0;
+		urp  <= 32'h0;
+		srp  <= 32'h0;
 	end else if (ce && commit_creg) begin
 		case (exe_creg_sel)
 			`AP040_CREG_SFC:  sfc  <= exe_creg_data[2:0];
 			`AP040_CREG_DFC:  dfc  <= exe_creg_data[2:0];
 			`AP040_CREG_CACR: cacr <= exe_creg_data & 32'h8000_8000;
 			`AP040_CREG_VBR:  vbr  <= exe_creg_data;
+			`AP040_CREG_TC:    tc    <= exe_creg_data & 32'h0000_C000;
+			`AP040_CREG_ITT0:  itt0  <= exe_creg_data & 32'hFFFF_E364;
+			`AP040_CREG_ITT1:  itt1  <= exe_creg_data & 32'hFFFF_E364;
+			`AP040_CREG_DTT0:  dtt0  <= exe_creg_data & 32'hFFFF_E364;
+			`AP040_CREG_DTT1:  dtt1  <= exe_creg_data & 32'hFFFF_E364;
+			`AP040_CREG_MMUSR: mmusr <= exe_creg_data;
+			`AP040_CREG_URP:   urp   <= exe_creg_data & 32'hFFFF_FE00;
+			`AP040_CREG_SRP:   srp   <= exe_creg_data & 32'hFFFF_FE00;
 			default: ;   // USP/ISP/MSP route through the regfile's aux port instead
 		endcase
 	end
@@ -1120,6 +1140,14 @@ ap040_execute u_ex
 	.usp_in           (usp_q),
 	.isp_in           (isp_q),
 	.msp_in           (msp_q),
+	.tc_in            (tc),
+	.itt0_in          (itt0),
+	.itt1_in          (itt1),
+	.dtt0_in          (dtt0),
+	.dtt1_in          (dtt1),
+	.mmusr_in         (mmusr),
+	.urp_in           (urp),
+	.srp_in           (srp),
 
 	.eaf_is_rmw       (eaf_is_rmw),
 	.eaf_is_link      (eaf_is_link),

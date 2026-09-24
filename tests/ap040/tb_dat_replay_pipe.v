@@ -193,6 +193,15 @@ always @(posedge clk) begin
 			$display("  MEMRQ addr=%08x write=%b instr=%b ack=%b",
 			         dut.mem_addr, dut.mem_write, dut.mem_instr, dut.mem_ack);
 	end
+	// +extrace: what EX computed, each cycle it holds a valid instruction.
+	// A flag defect shows up here as the ALU's inputs, which the final-state
+	// compare cannot show.
+	if (nreset && round_active && trace_ex && ce && dut.u_cpu.u_ex.eaf_valid)
+		$display("  EX    pc=%08x op=%0d sz=%0d a=%08x b=%08x ccr_in=%02x -> res=%08x flags=%02x wccr=%b sr=%04x",
+		         dut.u_cpu.u_ex.eaf_pc, dut.u_cpu.u_ex.eaf_alu_op, dut.u_cpu.u_ex.eaf_size,
+		         dut.u_cpu.u_ex.eaf_operand_a, dut.u_cpu.u_ex.eaf_operand_b,
+		         dut.u_cpu.u_ex.ccr_in, dut.u_cpu.u_ex.alu_result, dut.u_cpu.u_ex.alu_flags,
+		         dut.u_cpu.u_ex.eaf_writes_ccr, dut.u_cpu.sr);
 	if (nreset && mem_ready && busstate == 2'b11 && trace_bus)
 		$display("BUSWR addr=%08x data=%04x uds=%b lds=%b in_low=%b in_test=%b",
 		         addr_out, data_write, !nuds, !nlds, in_low, in_test);
@@ -416,6 +425,12 @@ reg saw_illegal;
 // +buswr follows one store from the CPU port through the membus to the bus.
 // Sampled once: $test$plusargs on every edge is not free.
 reg trace_bus;
+reg trace_ex;
+reg        next_known;
+reg [31:0] next_pc;
+reg        seq_known;
+reg [31:0] seq_next;    // the tested instruction's fall-through address
+integer    multi_rounds;
 // its own index: ci belongs to the capture block, which runs every cycle
 reg [31:0] uo;
 reg [31:0] commits_at_start;
@@ -445,11 +460,15 @@ integer    ci;
 
 always @(posedge clk) begin
 	if (!nreset || !round_active) begin
-		p_exc_go <= 0; cap_pend <= 0;
+		p_exc_go <= 0; cap_pend <= 0; seq_known <= 0;
 	end else if (ce) begin
 		if (dbg_eac_valid && dbg_eac_pc == i_pc &&
 		    dut.u_cpu.u_eaf.eac_is_illegal)
 			saw_illegal <= 1'b1;
+		if (dut.u_cpu.u_ex.eaf_valid && dut.u_cpu.u_ex.eaf_pc == i_pc && !seq_known) begin
+			seq_known <= 1'b1;
+			seq_next  <= dut.u_cpu.u_ex.eaf_next_pc;
+		end
 		p_exc_go <= dut.u_cpu.u_eaf.exc_go;
 		if (dut.u_cpu.u_eaf.exc_go && !p_exc_go && !cap_done)
 			cap_pend <= 1;
@@ -566,6 +585,14 @@ task check_final;
 					         i_ssp, i_regs[15]);
 				mismatch("memory", em_v[fi], read_value(em_a[fi], em_sz[fi]));
 			end
+		// ...and put back what the round changed, as tb_dat_replay.v does
+		// after the same compare. The oracle starts every round from the
+		// slice's memory, not from the previous round's result: without this
+		// a NEGX that wrote $FF in one round read $FF as its operand in the
+		// next, where the oracle read 0, and every round that changes memory
+		// judged its successor against the wrong input (milestone 113).
+		for (fi = 0; fi < em_cnt; fi = fi + 1)
+			apply_value(em_a[fi], em_sz[fi], em_old[fi]);
 		if (mism > mism_at_round) begin
 			if (saw_illegal) begin
 				undec_rounds = undec_rounds + 1;
@@ -596,6 +623,10 @@ task run_round;
 		nreset = 1;
 		@(posedge clk);
 		inject_state;
+		if (trace_ex)
+			$display("ROUND j%0d t%0d r%0d pc=%08x op=%02x%02x %02x%02x end_pc=%08x exc=%0d",
+			         jr, test_idx, round_idx, i_pc, rd8(i_pc), rd8(i_pc+1), rd8(i_pc+2), rd8(i_pc+3),
+			         e_pc, e_exc);
 		commits_at_start = dbg_commits;
 		@(posedge clk);
 		ce = 1;
@@ -629,6 +660,38 @@ task run_round;
 		while (timeout < EXEC_TIMEOUT &&
 		       !(dbg_wb_valid && dbg_wb_pc == i_pc && ce)) begin
 			@(posedge clk); timeout = timeout + 1;
+		end
+		// A round can be a PROGRAM (milestone 113): MOVEC2's reads a
+		// control register and then runs 20 more bytes of code before the
+		// ILLEGAL at the end PC. Stopping when the first instruction retired
+		// judged every one of them against state the rest of the program had
+		// not yet made. So when a round that completes normally retires its
+		// first instruction, look at the next one in program order -- the
+		// oldest valid stage, wrong-path work having been flushed by the time
+		// anything older retires -- and if it is the tested instruction's own
+		// SEQUENTIAL successor and that is not the end PC, run on until the
+		// marker's own exception entry retires, which is where the sequential
+		// driver stops too. Everything else is judged exactly where it always
+		// was. The successor test is what keeps branches out: a Bcc round's
+		// end PC is not a fall-through marker, and the first version of this
+		// rule, which asked only "is the next instruction at the end PC",
+		// sent 305,432 branch rounds on to a marker they never reach.
+		if (timeout < EXEC_TIMEOUT && e_exc == 4 && !cap_pend && !cap_done) begin
+			next_known = 0;
+			while (timeout < EXEC_TIMEOUT && !next_known && !cap_pend && !cap_done) begin
+				if (dbg_ex_valid)       begin next_known = 1; next_pc = dbg_ex_pc;  end
+				else if (dbg_eaf_valid) begin next_known = 1; next_pc = dbg_eaf_pc; end
+				else if (dbg_eac_valid) begin next_known = 1; next_pc = dbg_eac_pc; end
+				else if (dbg_id_valid)  begin next_known = 1; next_pc = dbg_id_pc;  end
+				else begin @(posedge clk); timeout = timeout + 1; end
+			end
+			if (next_known && seq_known && next_pc == seq_next && next_pc != e_pc) begin
+				multi_rounds = multi_rounds + 1;
+				while (timeout < EXEC_TIMEOUT &&
+				       !(dbg_wb_valid && dbg_wb_pc == e_pc && ce)) begin
+					@(posedge clk); timeout = timeout + 1;
+				end
+			end
 		end
 		// Freeze the CPU first so no younger instruction runs, then drain the
 		// store.  A store leaves the pipeline long before its bytes reach
@@ -664,8 +727,9 @@ initial begin
 	hold_fetch = 0; round_active = 0; cur_pc = 0; boot_pc = 0; boot_msp = 0;
 	nreset = 0; errors = 0; ran = 0; mism = 0;
 	skipped = 0; unreached = 0; report_lim = 40; trace_round = -1;
-	undec_rounds = 0; wrong_rounds = 0;
+	undec_rounds = 0; wrong_rounds = 0; multi_rounds = 0;
 	trace_bus = $test$plusargs("buswr");
+	trace_ex  = $test$plusargs("extrace");
 	for (uo = 0; uo < 65536; uo = uo + 1) begin
 		undec_cnt[uo] = 0; wrong_cnt[uo] = 0;
 	end
@@ -762,6 +826,8 @@ initial begin
 
 	$display("pipe replay: %0d judged, %0d mismatches, %0d unreached, %0d skipped (exception/trace/irq/fpu)",
 	         ran, mism, unreached, skipped);
+	if (multi_rounds != 0)
+		$display("pipe multi: %0d rounds ran on to an end marker past their first instruction", multi_rounds);
 	// A slice where NOTHING was judged is not a slice that passed. cputest
 	// rounds end in an exception by construction -- the generator closes
 	// every test with a terminal ILLEGAL -- so the scope this driver starts

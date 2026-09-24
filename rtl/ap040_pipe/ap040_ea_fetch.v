@@ -413,7 +413,7 @@ module ap040_ea_fetch
 	output reg        eaf_is_movesr,
 	output reg        eaf_is_movec,
 	output reg        eaf_movec_dir,
-	output reg  [2:0] eaf_movec_sel,
+	output reg  [3:0] eaf_movec_sel,
 	// The live SR AS OF THIS STAGE'S OWN cycle (already correctly EX-
 	// forwarded/write-through resolved via sr_in) -- threaded straight
 	// down to ap040_execute.v for its exception-entry SR-masking
@@ -1110,11 +1110,20 @@ wire stop_t0_change = {eac_imm[15:12], eac_imm[10:8]} != {sr_in[15:12], sr_in[10
 // Named once so both retire sites share it -- and so a mutation can reach
 // it, which two identical copies did not allow.
 wire stop_takes_hold = eac_is_stop && !traced_now;
+// PACK/UNPK Dx,Dy,#adj (milestone 113) are computed HERE, where Dx
+// (operand_a) and the adjustment (eac_ea_ext) are both at hand, and leave as
+// an ALU_MOVE of the finished byte or word. Operand B has to stay Dy: EX's
+// alu_sized takes a Byte/Word result's upper bits from it.
+wire eac_is_packop   = (eac_alu_op == `AP040_ALU_PACK) || (eac_alu_op == `AP040_ALU_UNPK);
+wire [15:0] pack_sum = operand_a[15:0] + eac_ea_ext[15:0];
+wire [15:0] unpk_sum = {4'd0, operand_a[7:4], 4'd0, operand_a[3:0]} + eac_ea_ext[15:0];
+wire [31:0] pack_value = (eac_alu_op == `AP040_ALU_PACK) ? {24'd0, pack_sum[11:8], pack_sum[3:0]}
+                                                         : {16'd0, unpk_sum};
 wire t0_flow_static = eac_is_bsr || eac_is_jmp || eac_is_jsr || eac_is_rts || eac_is_rte ||
                       eac_is_movesr ||
                       (eac_is_immsr && eac_immsr_to_sr && !eac_is_stop) ||
                       (eac_is_stop && stop_t0_change) ||
-                      (eac_is_movec && eac_imm[3]) || eac_is_nop;
+                      (eac_is_movec && eac_imm[4]) || eac_is_nop;
 wire t0_flow_cond   = eac_is_branch || eac_is_dbcc;
 wire traced_now     = sr_in[15] || (sr_in[14] && (t0_flow_static || t0_flow_cond));
 wire traced_cond    = !sr_in[15] && sr_in[14] && t0_flow_cond && !t0_flow_static;
@@ -1431,10 +1440,13 @@ wire  [7:0] exc_vec_num    = eac_is_trace ? 8'd9 :
                               // like every other vector in this mux, because
                               // AP040_VEC_* lives in rtl/ap040's defs and the
                               // bench build does not include that directory.
+                              // Privilege outranks illegal: a user-mode MOVEC with
+                              // an invalid selector is both, and the 68040 raises
+                              // vector 8 (milestone 113). Nothing else is both.
+                              eac_is_priv ? 8'd8 :
                               eac_is_illegal ? (eac_illegal_kind == 2'd1 ? 8'd10 :
                                                 eac_illegal_kind == 2'd2 ? 8'd11 :
                                                                            8'd4) :
-                              eac_is_priv ? 8'd8 :
                               eac_is_divzero ? 8'd5 :
                               eac_is_chk_trap ? 8'd6 :
                               eac_is_trapcc_trap ? 8'd7 :
@@ -1586,7 +1598,7 @@ always @(posedge clk) begin
 		eaf_is_movesr  <= 1'b0;
 		eaf_is_movec   <= 1'b0;
 		eaf_movec_dir  <= 1'b0;
-		eaf_movec_sel  <= 3'h0;
+		eaf_movec_sel  <= 4'h0;
 		eaf_sr_snapshot<= 16'h0;
 		eaf_is_rmw     <= 1'b0;
 		eaf_is_div     <= 1'b0;
@@ -1702,8 +1714,18 @@ always @(posedge clk) begin
 
 		// Cleared where exc_pend_addrerr is, because that is when the entry
 		// this window exists for has finished reading its vector.
-		if (exc_vec_done && !stall_in) ae_susp <= 1'b0;
-		else if (rte_odd_now)          ae_susp <= 1'b1;
+		// An odd exception VECTOR opens the same window (milestone 113): the
+		// handler's first instruction carries the secondary address error
+		// exactly as the instruction behind an odd RTE carries its deferred
+		// one, and without the gates its store, load, push or MOVEM ran --
+		// a store to $800 redirected all three secondary frame beats there.
+		// It is armed on the vector read that turns out odd, which is also
+		// an exc_vec_done, so it outranks the clear; the window then lasts
+		// to the SECONDARY entry's own vector read. vecodd_pend is too short
+		// for this: it drops when that entry starts, before its frame is out.
+		if (exc_vec_odd_now && !exc_vec_dbl && !stall_in) ae_susp <= 1'b1;
+		else if (exc_vec_done && !stall_in)               ae_susp <= 1'b0;
+		else if (rte_odd_now)                             ae_susp <= 1'b1;
 
 		// The odd-vector re-entry. Set when the vector arrives odd and is
 		// not a double fault; cleared when the entry it asks for actually
@@ -1821,11 +1843,13 @@ always @(posedge clk) begin
 				eaf_is_link    <= eac_is_link;
 				eaf_is_pea     <= eac_is_pea;
 				eaf_is_trapcc  <= 1'b0;
-				eaf_movec_dir  <= eac_imm[3];
-				eaf_movec_sel  <= eac_imm[2:0];
+				eaf_movec_dir  <= eac_imm[4];
+				eaf_movec_sel  <= eac_imm[3:0];
 				// The store half needs the address again a stage later, and
 				// eac_* will have moved on by then.
-				eaf_is_rmw     <= eac_is_rmw;
+				// BTST to memory is marked RMW for the operand crossover only
+				// and writes nothing back (milestone 113).
+				eaf_is_rmw     <= eac_is_rmw && (eac_alu_op != `AP040_ALU_BTST);
 				eaf_is_div     <= eac_is_div;
 				eaf_div_signed <= eac_div_signed;
 				eaf_ea_target  <= ea_target;
@@ -1836,7 +1860,9 @@ always @(posedge clk) begin
 				// what a plain MOVE.L (An),Dn would put in eaf_operand_b
 				// (that instruction's operand_b is simply unused). See
 				// header.
-				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4) :
+				// RTD adds its displacement to the same sum (milestone 113); it
+				// rides eac_ea_ext, which is zero for a plain RTS.
+				eaf_operand_b  <= eac_is_rts ? (operand_a + 32'd4 + eac_ea_ext) :
 				                  (eac_is_rmw || eac_immrmw) ? mem_lane : operand_b;
 				eaf_alu_op     <= eac_alu_op;
 				eaf_size       <= eac_size;
@@ -2032,7 +2058,13 @@ always @(posedge clk) begin
 				// (a traced TRAP is traced on its handler's first
 				// instruction), except the trace entry itself: the SR it
 				// stacks still has T1, but the handler starts with it clear.
-				trace_arm      <= (sr_in[15] || sr_in[14]) && !eac_is_trace;   // an entry is a change of flow
+				// ...except an entry whose vector came back ODD (milestone 113):
+				// the secondary address error supersedes the pending trace, as
+				// ap040_core.v's S_EXC_JMP cancels texc_pend before raising it.
+				// Armed here, the trace outranked the address error in
+				// exc_vec_num and the vector-3 entry was never made.
+				trace_arm      <= (sr_in[15] || sr_in[14]) && !eac_is_trace &&   // an entry is a change of flow
+				                  !exc_vec_odd_now;
 				trace_arm_cond <= 1'b0;
 				trace_pc       <= eac_pc;
 				eaf_alu_op     <= eac_alu_op;
@@ -2245,6 +2277,7 @@ always @(posedge clk) begin
 				// sets N and Z from -- is on port B. A registered
 				// assignment, not the address path.
 				eaf_operand_a  <= (eac_is_jmp || eac_is_jsr || eac_is_lea) ? ea_target :
+				                  eac_is_packop                            ? pack_value :
 				                  eac_st_disp                              ? operand_b :
 				                  eac_sxt_w                                ? sxt_w_of(operand_a) :
 				                                                             operand_a;
@@ -2262,7 +2295,7 @@ always @(posedge clk) begin
 				eaf_chk_ok     <= eac_is_chk;
 				eaf_is_trapcc     <= 1'b0;
 				eaf_immsr_to_sr<= eac_immsr_to_sr;
-				eaf_alu_op     <= eac_alu_op;
+				eaf_alu_op     <= eac_is_packop ? `AP040_ALU_MOVE : eac_alu_op;
 				eaf_size       <= eac_size;
 				eaf_shcnt      <= shcnt_now;
 				eaf_writes_an  <= an_wr_any;
@@ -2298,8 +2331,8 @@ always @(posedge clk) begin
 				eaf_is_divzero <= 1'b0;
 				eaf_is_movesr  <= eac_is_movesr;
 				eaf_is_movec   <= eac_is_movec;
-				eaf_movec_dir  <= eac_imm[3];
-				eaf_movec_sel  <= eac_imm[2:0];
+				eaf_movec_dir  <= eac_imm[4];
+				eaf_movec_sel  <= eac_imm[3:0];
 				// RTS/RTE never reach this branch (RTS routes through
 				// mem_issue/mem_complete above, RTE through its own ret_ph
 				// sequencer or the exception path) -- zeroed here purely for

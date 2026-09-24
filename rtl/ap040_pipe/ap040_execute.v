@@ -149,7 +149,7 @@ module ap040_execute
 	input             eaf_is_movesr,
 	input             eaf_is_movec,
 	input             eaf_movec_dir,
-	input       [2:0] eaf_movec_sel,
+	input       [3:0] eaf_movec_sel,
 	input             eaf_is_rts,
 	input             eaf_is_rte,
 	input      [15:0] eaf_rte_sr_data,
@@ -179,6 +179,14 @@ module ap040_execute
 	input      [31:0] usp_in,
 	input      [31:0] isp_in,
 	input      [31:0] msp_in,
+	input      [31:0] tc_in,
+	input      [31:0] itt0_in,
+	input      [31:0] itt1_in,
+	input      [31:0] dtt0_in,
+	input      [31:0] dtt1_in,
+	input      [31:0] mmusr_in,
+	input      [31:0] urp_in,
+	input      [31:0] srp_in,
 
 	// Read-modify-write store half (milestone 48). This stage is the first
 	// in the pipeline to touch memory, and it has to be: an RMW's store data
@@ -283,7 +291,7 @@ module ap040_execute
 	// supervisor, so a user-mode read-modify-write posted as supervisor.
 	output            ex_st_sup,
 	output reg        exe_writes_creg,
-	output reg  [2:0] exe_creg_sel,
+	output reg  [3:0] exe_creg_sel,
 	output reg [31:0] exe_creg_data
 );
 
@@ -384,12 +392,20 @@ end
 wire [31:0] alu_result;
 wire [4:0]  alu_flags;
 
+// A bit operation on a memory byte numbers its bit modulo 8 (milestone
+// 113). The shared ALU takes a[4:0], as ap040_alu.v does, so the modulus is
+// applied here rather than there.
+wire        alu_bitop = (eaf_alu_op == `AP040_ALU_BTST) || (eaf_alu_op == `AP040_ALU_BCHG) ||
+                        (eaf_alu_op == `AP040_ALU_BCLR) || (eaf_alu_op == `AP040_ALU_BSET);
+wire [31:0] alu_a     = (alu_bitop && eaf_size == `AP040_SZ_B) ? {29'd0, eaf_operand_a[2:0]}
+                                                                : eaf_operand_a;
+
 ap040_pipe_alu alu
 (
 	.op        (eaf_alu_op),
 	.size      (eaf_size),
 	.shcnt     (eaf_shcnt),
-	.a         (eaf_operand_a),
+	.a         (alu_a),
 	.b         (eaf_operand_b),
 	.flags_in  (ccr_in),
 	.result    (alu_result),
@@ -528,6 +544,14 @@ wire [31:0] creg_read_value = (eaf_movec_sel == `AP040_CREG_SFC)  ? sfc_in  :
                                (eaf_movec_sel == `AP040_CREG_VBR)  ? vbr_in  :
                                (eaf_movec_sel == `AP040_CREG_USP)  ? usp_in  :
                                (eaf_movec_sel == `AP040_CREG_ISP)  ? isp_in  :
+                               (eaf_movec_sel == `AP040_CREG_TC)    ? tc_in    :
+                               (eaf_movec_sel == `AP040_CREG_ITT0)  ? itt0_in  :
+                               (eaf_movec_sel == `AP040_CREG_ITT1)  ? itt1_in  :
+                               (eaf_movec_sel == `AP040_CREG_DTT0)  ? dtt0_in  :
+                               (eaf_movec_sel == `AP040_CREG_DTT1)  ? dtt1_in  :
+                               (eaf_movec_sel == `AP040_CREG_MMUSR) ? mmusr_in :
+                               (eaf_movec_sel == `AP040_CREG_URP)   ? urp_in   :
+                               (eaf_movec_sel == `AP040_CREG_SRP)   ? srp_in   :
                                                                       msp_in;  // AP040_CREG_MSP
 
 // BSR/JSR/TRAP/illegal/priv/RTS/RTE: eaf_operand_b already IS the result --
@@ -667,7 +691,7 @@ assign ex_creg_sp = exe_writes_creg_c &&
                     (exe_creg_sel_c == `AP040_CREG_USP ||
                      exe_creg_sel_c == `AP040_CREG_ISP ||
                      exe_creg_sel_c == `AP040_CREG_MSP);
-wire  [2:0] exe_creg_sel_c  = eaf_is_rte ? (eaf_sr_snapshot[12] ? `AP040_CREG_MSP : `AP040_CREG_ISP)
+wire  [3:0] exe_creg_sel_c  = eaf_is_rte ? (eaf_sr_snapshot[12] ? `AP040_CREG_MSP : `AP040_CREG_ISP)
                                           : eaf_movec_sel;
 wire [31:0] exe_creg_data_c = eaf_is_rte ? eaf_operand_b : eaf_operand_a;
 
@@ -715,7 +739,7 @@ always @(posedge clk) begin
 		exe_writes_sr    <= 1'b0;
 		exe_sr_data      <= 16'h0;
 		exe_writes_creg  <= 1'b0;
-		exe_creg_sel     <= 3'h0;
+		exe_creg_sel     <= 4'h0;
 		exe_creg_data    <= 32'h0;
 	end else if (ce && !ex_stall) begin
 		exe_valid        <= eaf_valid;
