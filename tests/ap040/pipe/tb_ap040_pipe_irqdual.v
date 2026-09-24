@@ -117,7 +117,7 @@ endfunction
 
 // Counted as generated, so a run that never reached a case says so.
 integer n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp;
-integer n_trace, n_trace_ev, fill_n, c1, t_new, n_chain, hl, n_trapfill, tf;
+integer n_trace, n_trace_ev, fill_n, c1, t_new, n_chain, hl, n_trapfill, n_trap8, tf;
 
 integer k, r1, r2, r3, ev, lvl, msk, s, m, m0, fmt, v, irq_on, tgt_at;
 reg [15:0] sr;
@@ -173,7 +173,9 @@ task chain;
 endtask
 
 // An instruction that always traps, as the one the interrupt holds: CHK.W
-// D2,D2 (D2 = -1) or DIVU.W D3,D4 (D3 = 0). The interrupt goes first and
+// D2,D2 (D2 = -1) or DIVU.W D3,D4 (D3 = 0), format $2, or ILLEGAL or TRAP
+// #2, format $0 -- a verdict known from decode, which the hold cycle behind
+// the SR write must not latch either. The interrupt goes first and
 // must stack the SR as it is, not with the trap's own flag effects; the
 // trap follows when the handler returns, and the generic handler resumes
 // past it. trap_resume goes BEFORE the instruction that lowers the mask
@@ -187,8 +189,12 @@ task trap_resume;
 endtask
 task trap_insn;
 	begin
-		emit(rbits(1) ? 16'h4582 : 16'h88C3);
-		n_trapfill = n_trapfill + 1;
+		case (rbits(2))
+		0: begin emit(16'h4582); n_trapfill = n_trapfill + 1; end   // CHK.W D2,D2
+		1: begin emit(16'h88C3); n_trapfill = n_trapfill + 1; end   // DIVU.W D3,D4
+		2: begin emit(16'h4AFC); n_trap8 = n_trap8 + 1; end         // ILLEGAL
+		default: begin emit(16'h4E42); n_trap8 = n_trap8 + 1; end   // TRAP #2
+		endcase
 	end
 endtask
 
@@ -517,6 +523,7 @@ ap040_pipe_bus16 #(
 (
 	.clk (clk), .nreset (nreset), .ce (1'b1), .clkena_in (p_clkena),
 	.irq_lvl (p_lvl),
+	.berr (1'b0),   // no bus errors in this bench
 	.data_in (p_din), .addr_out(p_addr), .data_write(p_dwrite),
 	.nwr (p_nwr), .nuds(p_nuds), .nlds(p_nlds),
 	.busstate(p_busstate), .longword(p_longword), .fc(p_fc),
@@ -660,7 +667,7 @@ endtask
 initial begin
 	n_irq = 0; n_irq_m1 = 0; n_irq_user = 0; n_stop = 0; n_nmi = 0; n_rte = 0;
 	n_f1 = 0; n_f1_msp = 0; n_f1_isp = 0; n_f1_usp = 0; logged = 0;
-	n_trace = 0; n_trace_ev = 0; n_chain = 0; n_trapfill = 0;
+	n_trace = 0; n_trace_ev = 0; n_chain = 0; n_trapfill = 0; n_trap8 = 0;
 	for (round = 0; round < NROUND; round = round + 1) begin
 		seed = 32'h1A2B_3C4D + round * 32'h9E37_79B9;
 		nreset = 0;
@@ -714,15 +721,16 @@ initial begin
 		         round, seed, pw, cyc, rd32f(LOGPTR) - LOG_BASE, mism);
 	end
 	$display("generated: %0d interrupts (%0d with M set, %0d from user mode, %0d woke a STOP, %0d level 7), %0d RTEs from built frames, %0d through a throwaway (%0d master, %0d same stack, %0d user), %0d traces in %0d traced events, %0d nested, %0d held a trapping instruction",
-	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev, n_chain, n_trapfill);
+	         n_irq, n_irq_m1, n_irq_user, n_stop, n_nmi, n_rte, n_f1, n_f1_msp, n_f1_isp, n_f1_usp, n_trace, n_trace_ev, n_chain, n_trapfill + n_trap8);
 	// Every interrupt logs 22 bytes, every trace 12 and every CHK/zero-divide
 	// trap (format $2 through the generic handler) 12; nothing else writes
 	// the log here.
-	if (logged != 22 * n_irq + 12 * n_trace + 12 * n_trapfill) begin
+	if (logged != 22 * n_irq + 12 * n_trace + 12 * n_trapfill + 8 * n_trap8) begin
 		errors = errors + 1;
-		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each), %0d traces and %0d traps (12 each)", logged, n_irq, n_trace, n_trapfill);
+		$display("FAIL: %0d bytes logged for %0d generated interrupts (22 each), %0d traces and %0d format-$2 traps (12 each), %0d format-$0 traps (8)",
+		         logged, n_irq, n_trace, n_trapfill, n_trap8);
 	end
-	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0 || n_chain == 0 || n_trapfill == 0) begin
+	if (n_irq_m1 == 0 || n_irq_user == 0 || n_nmi == 0 || n_f1_msp == 0 || n_f1_isp == 0 || n_f1_usp == 0 || n_trace_ev == 0 || n_chain == 0 || n_trapfill == 0 || n_trap8 == 0) begin
 		errors = errors + 1;
 		$display("FAIL: a case went ungenerated");
 	end

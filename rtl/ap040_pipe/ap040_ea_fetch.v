@@ -1583,7 +1583,21 @@ wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw ||
 // reach exc_active and so every port-B strobe: CHK's bound and value and
 // DIV's divisor read the same views (CHK2's register and CAS's compare
 // operand are covered by eac_uses_ea already).
-wire addr_hz      = live && (eac_uses_ea || eac_is_chk || eac_is_div) && (lf_a || lf_b || lf_c);
+//
+// Port C is not in it. Everything that reads port C for an address -- an
+// index, a MOVE destination's index, a bitfield offset, CAS's compare
+// operands -- carries an extension word, and decode's gather puts a bubble
+// ahead of every gathered instruction, so none is ever straight behind its
+// producer in EX (the mutation dropping lf_c here survived every program
+// bench for that reason). The views still keep the forward off the address
+// path; the hold term only cost a bubble whenever a stale index field
+// happened to name EX's destination. The check below holds the invariant.
+wire addr_hz      = live && (eac_uses_ea || eac_is_chk || eac_is_div) && (lf_a || lf_b);
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live && eac_ea_indexed && lf_c)
+		$error("ap040_ea_fetch: %h's index is on EX's long forward: a gathered instruction straight behind its producer (see addr_hz)", eac_pc);
+`endif
 `ifdef VERILATOR
 always @(posedge clk)
 	if (nreset && ce && live && !eac_uses_ea && !exc_active && !fp_active && (l1_rd_b || l1_wren_b))

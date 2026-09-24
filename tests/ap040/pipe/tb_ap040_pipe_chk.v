@@ -38,6 +38,7 @@
 //   ADDQ.L #1,D0     / CHK D4,D0    5, straight behind: must NOT trap      //
 //   DIVU.W #1,D0     / CHK D4,D0    $9000, straight behind: traps, N SET   //
 //   MOVE.L (A1),D0   / CHK (A2),D0  7 loaded, bound 6: traps, N CLEAR      //
+//   ADD.L D4,D4      / CHK D4,D0    bound 12 straight behind: no trap     //
 //   ORI #$1F,CCR     / CHK #30,D0   in bounds: CCR must become $16         //
 // The four behind their value's producer are the perf-1b timing fix: CHK //
 // no longer judges EX's forward, and waits a bubble for the commit.      //
@@ -169,21 +170,28 @@ initial begin
 	dut.u_l1.mem[33] = 16'h4184;   // CHK D4,D0    -- word negative: trap 4, N set, C set
 	dut.u_l1.mem[34] = 16'h4E71;   // NOP
 	dut.u_l1.mem[35] = 16'h4E71;   // NOP
-	dut.u_l1.mem[36] = 16'h227C;   // MOVEA.L #$00000580,A1
-	dut.u_l1.mem[37] = 16'h0000;
-	dut.u_l1.mem[38] = 16'h0580;
-	dut.u_l1.mem[39] = 16'h247C;   // MOVEA.L #$00000590,A2
-	dut.u_l1.mem[40] = 16'h0000;
-	dut.u_l1.mem[41] = 16'h0590;
-	dut.u_l1.mem[42] = 16'h2011;   // MOVE.L (A1),D0 -- D0 = 7, loaded straight ahead
-	dut.u_l1.mem[43] = 16'h4192;   // CHK (A2),D0  -- bound 6 in memory: trap 5, N clear, C set
-	dut.u_l1.mem[44] = 16'h203C;   // MOVE.L #$00000014,D0   (20 again)
-	dut.u_l1.mem[45] = 16'h0000;
-	dut.u_l1.mem[46] = 16'h0014;
-	dut.u_l1.mem[47] = 16'h003C;   // ORI #$1F,CCR  -- every flag set
-	dut.u_l1.mem[48] = 16'h001F;
-	dut.u_l1.mem[49] = 16'h41BC;   // CHK #30,D0   -- 20 is in bounds: CCR := $16
-	dut.u_l1.mem[50] = 16'h001E;
+	// The BOUND produced straight ahead (2026-09-24): CHK reads it through
+	// the address view, and waits a cycle rather than judge EX's forward.
+	// Read from D4's old value, 6, the in-range value 10 would trap.
+	dut.u_l1.mem[36] = 16'h700A;   // MOVEQ #10,D0
+	dut.u_l1.mem[37] = 16'h7806;   // MOVEQ #6,D4
+	dut.u_l1.mem[38] = 16'hD884;   // ADD.L D4,D4  -- the bound, 12, from the ALU straight ahead
+	dut.u_l1.mem[39] = 16'h4184;   // CHK D4,D0    -- 10 in 0..12: must NOT trap
+	dut.u_l1.mem[40] = 16'h227C;   // MOVEA.L #$00000580,A1
+	dut.u_l1.mem[41] = 16'h0000;
+	dut.u_l1.mem[42] = 16'h0580;
+	dut.u_l1.mem[43] = 16'h247C;   // MOVEA.L #$00000590,A2
+	dut.u_l1.mem[44] = 16'h0000;
+	dut.u_l1.mem[45] = 16'h0590;
+	dut.u_l1.mem[46] = 16'h2011;   // MOVE.L (A1),D0 -- D0 = 7, loaded straight ahead
+	dut.u_l1.mem[47] = 16'h4192;   // CHK (A2),D0  -- bound 6 in memory: trap 5, N clear, C set
+	dut.u_l1.mem[48] = 16'h203C;   // MOVE.L #$00000014,D0   (20 again)
+	dut.u_l1.mem[49] = 16'h0000;
+	dut.u_l1.mem[50] = 16'h0014;
+	dut.u_l1.mem[51] = 16'h003C;   // ORI #$1F,CCR  -- every flag set
+	dut.u_l1.mem[52] = 16'h001F;
+	dut.u_l1.mem[53] = 16'h41BC;   // CHK #30,D0   -- 20 is in bounds: CCR := $16
+	dut.u_l1.mem[54] = 16'h001E;
 	dut.u_l1.mem[192] = 16'h0000;  // $580: the loaded value, 7
 	dut.u_l1.mem[193] = 16'h0007;
 	dut.u_l1.mem[200] = 16'h0006;  // $590: the bound, 6
