@@ -1,6 +1,6 @@
 {
  "wait": 0,
- "rtl": "3b93d2c9c3171b39687e40fcd7fac9ee6a99cd58",
+ "rtl": "7f10c2477f2d6c2cad5f05bfec4429d29fb5f437",
  "dirty": false,
  "cases": [
   {
@@ -945,8 +945,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 3.0,
-    "cpi": 3.0,
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -963,7 +963,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    },
@@ -986,7 +986,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    }
@@ -1101,8 +1101,8 @@
    "instructions": 2,
    "words": 3,
    "local": {
-    "cycles_per_block": 4.0,
-    "cpi": 2.0,
+    "cycles_per_block": 3.0,
+    "cpi": 1.5,
     "counts": {
      "retired": 192,
      "rd": 0,
@@ -1119,7 +1119,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    },
@@ -1142,7 +1142,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    }
@@ -3389,8 +3389,8 @@
    "instructions": 5,
    "words": 6,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 1.4,
+    "cycles_per_block": 6.0,
+    "cpi": 1.2,
     "counts": {
      "retired": 480,
      "rd": 0,
@@ -3407,7 +3407,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    },
@@ -3430,7 +3430,7 @@
      "bf": 0,
      "movem": 0,
      "fp": 0,
-     "mul": 96,
+     "mul": 0,
      "div": 0
     }
    }
