@@ -1,6 +1,6 @@
 {
  "wait": 0,
- "rtl": "3bdc2de9b6e97df50087cbf3675430e4f4c8067a",
+ "rtl": "a093729b57ce22211b7cf6b54e67dd5ae5fad4e4",
  "dirty": false,
  "cases": [
   {
@@ -1881,8 +1881,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1898,14 +1898,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 672,
+     "fp": 480,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1921,7 +1921,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 672,
+     "fp": 480,
      "mul": 0,
      "div": 0
     }
@@ -1933,8 +1933,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1950,14 +1950,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 864,
+     "fp": 672,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 9.0,
+    "cpi": 9.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1973,7 +1973,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 864,
+     "fp": 672,
      "mul": 0,
      "div": 0
     }
@@ -1985,8 +1985,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 16.0,
-    "cpi": 16.0,
+    "cycles_per_block": 15.0,
+    "cpi": 15.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2002,14 +2002,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 1344,
+     "fp": 1248,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 19.0,
-    "cpi": 19.0,
+    "cycles_per_block": 18.0,
+    "cpi": 18.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2025,7 +2025,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 1632,
+     "fp": 1536,
      "mul": 0,
      "div": 0
     }
@@ -2037,8 +2037,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 14.0,
-    "cpi": 14.0,
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2054,14 +2054,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 1152,
+     "fp": 1056,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 14.0,
-    "cpi": 14.0,
+    "cycles_per_block": 13.0,
+    "cpi": 13.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2077,7 +2077,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 1152,
+     "fp": 1056,
      "mul": 0,
      "div": 0
     }
@@ -2089,8 +2089,8 @@
    "instructions": 2,
    "words": 3,
    "local": {
-    "cycles_per_block": 10.0,
-    "cpi": 5.0,
+    "cycles_per_block": 8.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 192,
      "rd": 0,
@@ -2106,14 +2106,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 672,
+     "fp": 480,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 10.0,
-    "cpi": 5.0,
+    "cycles_per_block": 8.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 192,
      "rd": 0,
@@ -2129,7 +2129,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 672,
+     "fp": 480,
      "mul": 0,
      "div": 0
     }
@@ -2141,8 +2141,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 36.0,
-    "cpi": 36.0,
+    "cycles_per_block": 35.0,
+    "cpi": 35.0,
     "counts": {
      "retired": 96,
      "rd": 576,
@@ -2158,14 +2158,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 3264,
+     "fp": 3168,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 54.0,
-    "cpi": 54.0,
+    "cycles_per_block": 53.0,
+    "cpi": 53.0,
     "counts": {
      "retired": 96,
      "rd": 576,
@@ -2181,7 +2181,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 4992,
+     "fp": 4896,
      "mul": 0,
      "div": 0
     }
@@ -2193,8 +2193,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 30.0,
-    "cpi": 30.0,
+    "cycles_per_block": 29.0,
+    "cpi": 29.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2210,14 +2210,14 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 2688,
+     "fp": 2592,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 34.0,
-    "cpi": 34.0,
+    "cycles_per_block": 33.0,
+    "cpi": 33.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2233,7 +2233,7 @@
      "port": 0,
      "bf": 0,
      "movem": 0,
-     "fp": 3072,
+     "fp": 2976,
      "mul": 0,
      "div": 0
     }
@@ -3999,6 +3999,110 @@
      "mem": 0,
      "addr": 0,
      "port": 96,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "load_index",
+   "block": "move.l 4(a0,d4.l),d1",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0,
+     "agu": 96
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
+    "counts": {
+     "retired": 96,
+     "rd": 96,
+     "wr": 0,
+     "bus_fetch": 96,
+     "bus_read": 96,
+     "bus_write": 0,
+     "agu": 96
+    },
+    "stalls": {
+     "mem": 96,
+     "addr": 0,
+     "port": 384,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   }
+  },
+  {
+   "name": "store_index",
+   "block": "move.l d1,4(a0,d4.l)",
+   "instructions": 1,
+   "words": 2,
+   "local": {
+    "cycles_per_block": 2.0,
+    "cpi": 2.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 0,
+     "bus_read": 0,
+     "bus_write": 0,
+     "agu": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
+     "bf": 0,
+     "movem": 0,
+     "fp": 0,
+     "mul": 0,
+     "div": 0
+    }
+   },
+   "bus": {
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
+    "counts": {
+     "retired": 96,
+     "rd": 0,
+     "wr": 96,
+     "bus_fetch": 96,
+     "bus_read": 0,
+     "bus_write": 96,
+     "agu": 96
+    },
+    "stalls": {
+     "mem": 0,
+     "addr": 0,
+     "port": 0,
      "bf": 0,
      "movem": 0,
      "fp": 0,
