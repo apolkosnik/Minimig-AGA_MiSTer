@@ -43,7 +43,7 @@ module ap040_pipe_core
 );
 
 wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
-wire [15:0] l1_rdata_a;
+wire [15:0] l1_rdata_a, l1_rdata_a2;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        pt_req, pf_req;
@@ -57,7 +57,7 @@ ap040_pipe_cpu #(
 	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
 
 	.l1_addr_a (l1_addr_a), .l1_req_a (l1_req_a),
-	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
+	.l1_rdata_a(l1_rdata_a), .l1_rdata_a2(l1_rdata_a2), .l1_rvalid_a(l1_rvalid_a),
 
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
 	.l1_sup_b  (), .l1_sup_a (),   // the array has no function codes
@@ -110,6 +110,7 @@ ap040_pipe_l1 #(
 	.wren_a    (1'b0),
 	.en_a      (l1_req_a),
 	.q_a       (l1_rdata_a),
+	.q_a2      (l1_rdata_a2),
 	.rvalid_a  (l1_rvalid_a),
 
 	.address_b (l1_addr_b),

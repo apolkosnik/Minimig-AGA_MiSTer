@@ -171,6 +171,7 @@ module ap040_pipe_cpu
 	output [31:0] l1_addr_a,
 	output        l1_req_a,
 	input  [15:0] l1_rdata_a,
+	input  [15:0] l1_rdata_a2,     // the word after it (phase 8)
 	input         l1_rvalid_a,
 
 	// data port: 32-bit reads, sized writes
@@ -235,6 +236,8 @@ module ap040_pipe_cpu
 );
 
 wire        if_valid;  wire [31:0] if_pc;  wire [15:0] if_opcode;
+wire        if_valid2; wire [15:0] if_word2; wire if_flt, if_flt_bus, if_flt2, id_take2;
+wire [31:0] if_end;
 
 wire        id_valid;  wire [31:0] id_pc;  wire [31:0] id_next_pc;
 wire  [3:0] id_dest_reg, id_src_reg;
@@ -917,6 +920,9 @@ assign l1_inval_a = ce && ex_pf_inval;
 // longer reach it; the storing instruction then owes a refetch of what
 // follows. Ranges are half-open byte ranges; a gather in progress owns
 // everything from its first word up to the fetch word.
+// Since phase 8 the fetch keeps a queue, so its range is every word fetched
+// and not yet taken -- if_pc up to if_end, the fetch in flight included --
+// and it is judged only when that range is not empty.
 //
 // A store from EA-fetch is judged a cycle LATE, on its registered address:
 // judged live, the compare hung off the port-B address, and was 817ba673's
@@ -932,7 +938,8 @@ wire        eaf_departs;
 wire        sq_acc  = ce && !rv_active && !ex_st_req && eaf_wr_out && !l1_wr_busy;
 wire [31:0] snp_e   = sq_a + ((sq_sz == `AP040_SZ_L) ? 32'd4 : (sq_sz == `AP040_SZ_W) ? 32'd2 : 32'd1);
 wire [31:0] snp_dlo = dec_holding ? dec_hold_pc : if_pc;
-wire        snp_dec = (dec_holding || if_valid_id) && (sq_a < if_pc + 32'd2) && (snp_e > snp_dlo);
+wire        if_owns = dec_holding || (if_end != if_pc);
+wire        snp_dec = if_owns && (sq_a < if_end) && (snp_e > snp_dlo);
 wire        snp_id  = id_valid  && (sq_a < id_next_pc)  && (snp_e > id_pc);
 wire        snp_eac = eac_valid && (sq_a < eac_next_pc) && (snp_e > eac_pc);
 wire        snp_hit = sq_v && (snp_dec || snp_id || (sq_dep && snp_eac));
@@ -950,7 +957,7 @@ always @(posedge clk)
 wire [31:0] snx_a   = ex_st_addr;
 wire [31:0] snx_e   = ex_st_addr + ((ex_st_size == `AP040_SZ_L) ? 32'd4 :
                                     (ex_st_size == `AP040_SZ_W) ? 32'd2 : 32'd1);
-wire        snx_dec = (dec_holding || if_valid_id) && (snx_a < if_pc + 32'd2) && (snx_e > snp_dlo);
+wire        snx_dec = if_owns && (snx_a < if_end) && (snx_e > snp_dlo);
 wire        snx_id  = id_valid  && (snx_a < id_next_pc)  && (snx_e > id_pc);
 wire        snx_eac = eac_valid && (snx_a < eac_next_pc) && (snx_e > eac_pc);
 wire        st_smc  = ex_st_req && !l1_wr_busy && (snx_dec || snx_id || snx_eac);
@@ -975,6 +982,8 @@ ap040_inst_fetch #(
 	.nreset    (nreset),
 	.ce        (ce),
 	.stall_in  (id_stall || stopped || rv_active),
+	.take2     (id_take2),
+	.hold      (stopped || rv_active),
 
 	.flush          (flush),
 	.redirect_valid (final_redirect_valid),
@@ -983,11 +992,20 @@ ap040_inst_fetch #(
 	.l1_addr_a  (l1_addr_a),
 	.l1_req_a   (l1_req_a),
 	.l1_rdata_a (l1_rdata_a),
+	.l1_rdata_a2(l1_rdata_a2),
 	.l1_rvalid_a(l1_rvalid_a),
+	.l1_rflt_a  (l1_rflt_a),
+	.l1_rflt_a_bus(l1_rflt_a_bus),
 
 	.if_valid  (if_valid),
 	.if_pc     (if_pc),
-	.if_opcode (if_opcode)
+	.if_opcode (if_opcode),
+	.if_flt    (if_flt),
+	.if_flt_bus(if_flt_bus),
+	.if_valid2 (if_valid2),
+	.if_word2  (if_word2),
+	.if_flt2   (if_flt2),
+	.if_end    (if_end)
 );
 
 // A stopped machine must present decode with NOTHING, not merely stop
@@ -1015,9 +1033,13 @@ ap040_decode u_id
 	.if_valid        (if_valid_id),
 	.if_pc           (if_pc),
 	.if_opcode       (if_opcode),
-	// The fetch fault travels with its word: l1_rdata_a is if_opcode itself.
-	.if_flt          (l1_rflt_a),
-	.if_flt_bus      (l1_rflt_a_bus),
+	// The fetch fault travels with its word, through the fetch's queue.
+	.if_flt          (if_flt),
+	.if_flt_bus      (if_flt_bus),
+	.if_valid2       (if_valid2 && !stopped),
+	.if_word2        (if_word2),
+	.if_flt2         (if_flt2),
+	.take2           (id_take2),
 
 	.id_stall        (id_stall),
 
@@ -1517,6 +1539,7 @@ ap040_ea_fetch #(
 	.eaf_an_sel       (eaf_an_sel),
 	.ex_creg_sp       (ex_creg_sp),
 	.ex_creg_any      (ex_creg_any),
+	.ex_wr_a7         (eaf_valid && ex_wr_mask[15]),
 	.a7_busy          (a7_busy),
 	.vbr_in           (vbr),
 	.creg_busy        (ex_creg_any || commit_creg),

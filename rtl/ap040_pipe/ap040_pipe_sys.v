@@ -58,7 +58,7 @@ module ap040_pipe_sys
 );
 
 wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
-wire [15:0] l1_rdata_a;
+wire [15:0] l1_rdata_a, l1_rdata_a2;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
 wire        l1_wr_busy_w;   // the CPU's: see ap040_pipe_membus.v
@@ -78,7 +78,7 @@ ap040_pipe_cpu #(
 	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
 
 	.l1_addr_a (l1_addr_a), .l1_req_a (l1_req_a),
-	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
+	.l1_rdata_a(l1_rdata_a), .l1_rdata_a2(l1_rdata_a2), .l1_rvalid_a(l1_rvalid_a),
 
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
 	.l1_sup_b  (l1_sup_b), .l1_sup_a (l1_sup_a),
@@ -109,7 +109,7 @@ ap040_pipe_membus u_bus
 	.clk (clk), .nreset (nreset),
 
 	.address_a(l1_addr_a), .en_a (l1_req_a),
-	.q_a      (l1_rdata_a), .rvalid_a(l1_rvalid_a),
+	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 
 	.address_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
 	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),

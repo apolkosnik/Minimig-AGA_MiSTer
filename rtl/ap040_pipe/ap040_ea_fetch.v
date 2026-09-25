@@ -254,6 +254,7 @@ module ap040_ea_fetch
 	// through the register file's auxiliary port, which no forward reaches.
 	input             ex_creg_sp,
 	input             ex_creg_any,
+	input             ex_wr_a7,         // the instruction in EX may write A7 (its write set)
 	// An OLDER instruction's write to A7 has not reached the register file
 	// yet (milestone 93). The exception sequencer reads the stack pointer
 	// straight out of the file, so its frame base is stale until this
@@ -1741,14 +1742,19 @@ wire sp_read_a    = (raddr_a == 4'd15) || (raddr_b == 4'd15);
 // the registered copy (creg_read_value), and a MOVEC or an RTE's stack
 // restore one instruction ahead commits it in WB, the cycle that reader
 // spends in EX: MOVE A0,USP; MOVE USP,A1 read the old USP.
-// An A7 write ahead of a USP/ISP/MSP read would be the same hazard, and is
-// not listed because it cannot happen. Only MOVE USP,An is one word; it
-// reads USP, runs in supervisor mode, and no supervisor A7 write lands in
-// USP. MOVEC gathers, and decode's gather freezes with every stall, so it
-// arrives at least two stages behind anything -- tried behind MOVEA, UNLK
-// and a load held up by a store, and never closer.
+// An A7 write ahead of a USP/ISP/MSP read is the same hazard: the stack
+// pointer banks are what creg_read_value reads. It was left out while
+// decode's gather kept every MOVEC two stages behind anything; phase 8's
+// decode completes a MOVEC in its opcode's cycle, so it now waits while
+// the instruction in EX may write A7, and reads in EX after the commit.
+// MOVES reads SFC/DFC here, and waits the same way for a control-register
+// write still in flight (creg_busy) -- the MOVEC that sets them was kept
+// back by the gather too.
 wire movec_rd       = eac_is_movec && !eac_imm[4];
-wire creg_rd_hazard = movec_rd && ex_creg_any;
+wire movec_rd_sp    = movec_rd && ((eac_imm[3:0] == `AP040_CREG_USP) || (eac_imm[3:0] == `AP040_CREG_ISP) ||
+                                   (eac_imm[3:0] == `AP040_CREG_MSP));
+wire creg_rd_hazard = (movec_rd && ex_creg_any) || (movec_rd_sp && ex_wr_a7) ||
+                      (eac_moves[2] && creg_busy);
 wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // Everything that computes an address from a register or touches memory,
 // broadly: a register-form instruction named here only waits a cycle it
@@ -1891,14 +1897,10 @@ wire eac_uses_ea = eac_is_mem_src || eac_is_store || eac_is_rmw || eac_immrmw ||
 // DIV's divisor read the same views (CHK2's register and CAS's compare
 // operand are covered by eac_uses_ea already).
 //
-// Port C is not in it. Everything that reads port C for an address -- an
-// index, a MOVE destination's index, a bitfield offset, CAS's compare
-// operands -- carries an extension word, and decode's gather puts a bubble
-// ahead of every gathered instruction, so none is ever straight behind its
-// producer in EX (the mutation dropping lf_c here survived every program
-// bench for that reason). The views still keep the forward off the address
-// path; the hold term only cost a bubble whenever a stale index field
-// happened to name EX's destination. The check below holds the invariant.
+// Port C's address uses -- an index, a MOVE destination's index -- are
+// addr_use_c below. Until phase 8 they needed no hold: every one carries an
+// extension word, and decode's gather put a bubble ahead of every gathered
+// instruction, so none was ever straight behind its producer in EX.
 //
 // ...and only for a port whose ADDRESS view is used (restructuring plan,
 // phase 1). Holding for either port whenever the instruction had an EA
@@ -1925,40 +1927,44 @@ wire addr_hz_v    = live && ((addr_use_a && lf_a) || (addr_use_b && lf_b));
 // has formed the address from (phase 4). A load's port A is only its base;
 // a plain store's port B is only its base. CHK's port B is its verdict and
 // still waits.
+// Port C makes an address in two places, both through operand_c_ea: an
+// index (idx_raw), while the port still names the index -- it changes
+// meaning mid-instruction for bitfields, CAS, CAS2 and a long divide -- and
+// a memory-to-memory MOVE's destination index (mm_c). Its hold was left out
+// while decode's gather kept every indexed instruction a cycle behind its
+// producer; phase 8's decode completes a two-word instruction in one cycle,
+// and dhry's LEA (0,A3,D0.L),A2 straight behind the LSL making D0 took the
+// stale index (tb_ap040_pipe_program_local). EA-calculate's own index
+// hazard covers the addresses it forms.
+wire c_names_idx  = !(fx_hold && fx_dst) && !c2_use_c && !mm_dphase && !bf_use_c && !(cas && mem_pending) &&
+                    !(ml_rd_dr && (!eac_is_mem_src || mem_pending));
+wire addr_use_c   = (eac_ea_indexed && c_names_idx && !agu_use) ||
+                    ((mm_dphase || (fx_hold && fx_dst)) && eac_mm[0]);
 wire addr_hz      = live && ((addr_use_a && lf_a && !agu_use) ||
-                             (addr_use_b && lf_b && !(eac_agu_ok && st_base_b)));
-// Three holds the lists above leave out on purpose, each covered some other
-// way; the mutations dropping them survived every bench, so the reasons are
-// checked here instead of trusted. CHK2/CMP2's and CAS's verdict operands
-// and a displacement store's base all come with an extension word, and
-// decode's gather keeps every gathered instruction a cycle behind its
-// producer, so none of them meets a long forward here; CHK's checked
-// register (port B) is held by chk_fwd_hazard whenever EX writes it.
+                             (addr_use_b && lf_b && !(eac_agu_ok && st_base_b)) ||
+                             (addr_use_c && lf_c));
+// The holds decode's gather made unnecessary until phase 8, each checked
+// where it is used: an address or a control register read from a view that
+// is not yet the register's value, with the stage NOT held, is the defect.
+// CHK's checked register (port B) is held by chk_fwd_hazard whenever EX
+// writes it, and has been since before phase 8.
 `ifdef VERILATOR
 always @(posedge clk)
-	if (nreset && ce && live) begin
+	if (nreset && ce && live && !hold_hazard) begin
 		if ((ck || cas) && lf_b)
-			$error("ap040_ea_fetch: CHK2/CAS at %h meets a long forward on its verdict operand", eac_pc);
-		if (eac_is_store && eac_st_disp && lf_a)
-			$error("ap040_ea_fetch: displacement store at %h meets a long forward on its base", eac_pc);
-		if (eac_is_chk && lf_b && !chk_fwd_hazard)
-			$error("ap040_ea_fetch: CHK at %h meets a long forward on port B that chk_fwd_hazard missed", eac_pc);
+			$error("ap040_ea_fetch: CHK2/CAS at %h uses a verdict operand on a long forward", eac_pc);
+		if (eac_is_store && eac_st_disp && !agu_use && lf_a)
+			$error("ap040_ea_fetch: displacement store at %h uses a base on a long forward", eac_pc);
+		if (addr_use_c && lf_c)
+			$error("ap040_ea_fetch: %h makes an address from port C with the register on EX's long forward", eac_pc);
+		if (eac_moves[2] && creg_busy)
+			$error("ap040_ea_fetch: MOVES at %h reads SFC/DFC with a control-register write still in flight", eac_pc);
+		if (movec_rd_sp && ex_wr_a7)
+			$error("ap040_ea_fetch: MOVEC at %h reads a stack pointer the instruction in EX may write", eac_pc);
 	end
-`endif
-// MOVES reads SFC/DFC here, and needs no wait behind the MOVEC that sets
-// them: both carry an extension word, and the gathers keep MOVES back until
-// the MOVEC has committed (the hold this used to have survived its
-// mutation against t_cinv_moves.s, which puts the two straight together).
-// The check below holds the invariant.
-`ifdef VERILATOR
 always @(posedge clk)
-	if (nreset && ce && live && eac_moves[2] && creg_busy)
-		$error("ap040_ea_fetch: MOVES at %h reads SFC/DFC with a control-register write still in flight", eac_pc);
-`endif
-`ifdef VERILATOR
-always @(posedge clk)
-	if (nreset && ce && live && eac_ea_indexed && lf_c)
-		$error("ap040_ea_fetch: %h's index is on EX's long forward: a gathered instruction straight behind its producer (see addr_hz)", eac_pc);
+	if (nreset && ce && live && eac_is_chk && lf_b && !chk_fwd_hazard)
+		$error("ap040_ea_fetch: CHK at %h meets a long forward on port B that chk_fwd_hazard missed", eac_pc);
 `endif
 `ifdef VERILATOR
 always @(posedge clk)

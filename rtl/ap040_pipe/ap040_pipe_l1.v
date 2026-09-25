@@ -198,6 +198,7 @@ module ap040_pipe_l1
 	input                wren_a,
 	input                en_a,      // request; the requester holds address_a until rvalid_a
 	output reg [DW-1:0]  q_a,
+	output reg [DW-1:0]  q_a2,      // the word after q_a (phase 8)
 	output reg           rvalid_a,
 	// port B: sized data accesses at any alignment (milestone 86)
 	input      [31:0]    address_b,
@@ -318,6 +319,7 @@ wire          a_wait_new = (wbuf_valid && covers(wbuf_addr, wbuf_odd, wbuf_size,
 wire          a_wait_old = (wbuf_valid && covers(wbuf_addr, wbuf_odd, wbuf_size, a_addr)) ||
                            (wr_acc && covers(ib, ob, size_b, a_addr));
 
+
 always @(posedge clock) begin
 `ifdef AP040_PIPE_L1_SLOW
 	if (!nreset) lfsr <= 16'hACE1;
@@ -335,6 +337,7 @@ always @(posedge clock) begin
 		if (a_cnt == 2'd0) begin
 			if (!a_wait_old) begin
 				q_a      <= mem[a_addr];
+				q_a2     <= mem[a_addr + {{(AW-1){1'b0}}, 1'b1}];
 				rvalid_a <= 1'b1;
 				a_busy   <= 1'b0;
 			end
@@ -343,6 +346,7 @@ always @(posedge clock) begin
 	end
 	if (en_a && extra_a == 2'd0 && !a_wait_new) begin
 		q_a      <= mem[ia];
+		q_a2     <= mem[ia + {{(AW-1){1'b0}}, 1'b1}];
 		rvalid_a <= 1'b1;
 		a_busy   <= 1'b0;
 	end

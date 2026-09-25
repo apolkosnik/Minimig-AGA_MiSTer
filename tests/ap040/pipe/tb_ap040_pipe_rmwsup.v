@@ -54,6 +54,7 @@ always #5 clk = ~clk;
 wire [31:0] l1_addr_a;
 wire        l1_req_a;
 reg  [15:0] l1_rdata_a = 16'h4E71;
+reg  [15:0] l1_rdata_a2 = 16'h4E71;   // the word after it (phase 8)
 reg         l1_rvalid_a = 1'b0;
 
 wire [31:0] l1_addr_b, l1_data_b;
@@ -79,7 +80,7 @@ ap040_pipe_cpu #(
 	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.clk(clk), .nreset(nreset), .ce(1'b1),
 	.l1_addr_a(l1_addr_a), .l1_req_a(l1_req_a),
-	.l1_rdata_a(l1_rdata_a), .l1_rvalid_a(l1_rvalid_a),
+	.l1_rdata_a(l1_rdata_a), .l1_rdata_a2(l1_rdata_a2), .l1_rvalid_a(l1_rvalid_a),
 	.l1_addr_b(l1_addr_b), .l1_rd_b(l1_rd_b), .l1_wren_b(l1_wren_b),
 	.l1_sup_b(l1_sup_b), .l1_sup_a(l1_sup_a),
 	.l1_size_b(l1_size_b), .l1_data_b(l1_data_b),
@@ -131,7 +132,11 @@ always @(posedge clk) begin
 		// only while decode never happened to stall on a returning word; the
 		// interrupt arm's bubble behind MOVE to SR (2026-09-24) moved a stall
 		// onto exactly that cycle, and TRAP #0's opcode was dropped.
-		if (l1_req_a) begin l1_rvalid_a <= 1'b1; l1_rdata_a <= mem[ia[11:0]]; end
+		// Since phase 8 the answer carries the word after it as well, which
+		// the fetch uses when the address is a longword's first half.
+		if (l1_req_a) begin
+			l1_rvalid_a <= 1'b1; l1_rdata_a <= mem[ia[11:0]]; l1_rdata_a2 <= mem[ia[11:0] + 12'd1];
+		end
 
 		// ---- port B reads, Long only in this program; held the same way
 		if (l1_rd_b) begin l1_rvalid_b <= 1'b1; l1_q_b <= {mem[ib[11:0]], mem[ib[11:0] + 1]}; end

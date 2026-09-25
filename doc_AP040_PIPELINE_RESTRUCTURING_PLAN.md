@@ -294,8 +294,9 @@ Primary files: CPU, decode, EA-calculate, EA-fetch, execute and register file.
 - [ ] Give faults and completions a single instruction owner. Track partial
   progress for operations such as MOVEM; do not assume every instruction can
   delay all architectural effects until its final beat.
-- [ ] Replace hazards that currently rely on gather bubbles, including port C
-  and control-register dependencies, with explicit checks.
+- [x] Replace hazards that currently rely on gather bubbles, including port C
+  and control-register dependencies, with explicit checks (phase 8's first
+  step: port C's address uses, MOVES and MOVEC).
 
 Exit: architectural and bus-event equivalence for the migrated paths, except
 the intentional removed CLR/Scc reads; no new combinational
@@ -531,12 +532,137 @@ Do not assume fully pipelining/unrolling the divider is the best area tradeoff.
 
 ## Phase 8 — Improve instruction assembly and qualify integration
 
+Phase 8, first step (2026-09-25): two words a cycle into decode.
+
+- Port A answers with the word asked for and, when the address is a
+  longword's first half, the word after it (l1_rdata_a2: the L1 array's
+  next word, membus's longword low half). ap040_inst_fetch.v keeps what
+  decode has not taken in a four-word queue and shows decode the first two
+  words of the stream -- the queue, then the fetch returning now, so a
+  redirect's target reaches decode as soon as before.
+  The queue fills behind an ordinary stall; `hold` stops it for the
+  reset-vector read and STOP. Every word keeps its own fetch-fault flags.
+- When the fetch asks decides the bus tops' schedule. Asking whenever the
+  queue had room for two more words (judged before decode's take) kept the
+  queue full and asked for the next longword just as decode took an
+  instruction -- in front of that instruction's own first data access, in
+  every iteration of a memory-bound loop: ten bus cases a cycle slower at
+  two wait states (movem_load2 17 -> 18), with the same transactions. A
+  hint that held membus's prefetch back for a coming read changed nothing:
+  the fetch's own request then went out as a demand in the same place. The
+  fetch now asks when at most one word will be left after the take -- the
+  one-word fetch's timing, and still two words a cycle into decode on the
+  core top.
+- membus kept a read on the bus that a request wanted only when it
+  answered the request at once; one held over a write's accept cycle
+  (a_dfr) killed it and fetched the longword again. The fetch's queue asks
+  in such cycles often: behind a read-modify-write every instruction
+  longword was fetched twice (rmw_add 13.5 -> 15 cycles at two wait
+  states). The held request keeps it too now.
+- PROG_WORDS counts the words decode takes. Counting fetches charged a
+  bench's budget with every word a redirect discards from the queue, up to
+  six a time where it used to be one, and cut chkmem, dbcc and exctrace
+  short. The first fit summed issued + (words taken) and added the result
+  into the fetch address: the words taken come from the pipeline's stall,
+  the latest signal the core has, and all 40 worst paths ran through that
+  sum (core -4.497 ns, bus16 -3.432). Every wide value is now formed from
+  registers for none, one and two words taken, and the count only picks;
+  the queue's next contents are chosen the same way.
+- A bus error on a speculative fetch still never surfaces (X2.2,
+  t_exceptions 139): the old fetch asked only for the word decode needed
+  next, so membus saw every request as a demand; the queue asks ahead. A
+  fetch that faults is dropped unseen if it was fetched ahead of need and
+  fetched again once the stream is empty, so a lasting fault is taken where
+  decode needs the word and a one-shot one is gone.
+- Decode completes a gathered instruction whose first extension word is in
+  the second slot in the opcode's cycle (`fast`), and a longer one a cycle
+  sooner. The gather start's loads are wires g_* (a task, start_gather,
+  runs them), and the completing logic reads h_* = fast ? g_* : held_*, the
+  extension word from xw = fast ? if_word2 : if_opcode; the rewrite was done
+  by a script that checks declaration order, and the completion's reads
+  were substituted, never its targets.
+- The branch redirect reaches port A's address, and in the fast case the
+  gather-start classification ran into it (the core top's worst path once
+  the budget was fixed: queue -> gstart -> h_* -> the negative list -> the
+  L1's read). Of the kinds that can complete in the opcode's cycle only
+  Bcc.W, BSR.W and DBcc redirect, so the fast redirect decodes those three
+  from the opcode and the held one reads the held registers; a Verilator
+  check holds the split to the one whole expression.
+- The CPU's store snoop covers every word fetched and not yet taken,
+  if_pc up to if_end, the fetch in flight included.
+
+What the gather's bubble had been doing, now explicit (phase 4's last item):
+- Port C's address uses -- an index while the port names it, a
+  memory-to-memory MOVE's destination index -- hold for a long forward
+  (addr_use_c). dhry's LEA (0,A3,D0.L),A2 straight behind the LSL making D0
+  took the stale index.
+- MOVES waits for a control-register write in flight (SFC/DFC), and MOVEC
+  reading USP/ISP/MSP waits while the instruction in EX may write A7.
+- The "never happens" checks for CHK2/CAS verdicts, displacement-store
+  bases, the index, MOVES and MOVEC now say "never used without its hold".
+
+New benches: tb_ap040_pipe_program_local.v runs t_integer, t_fastpaths,
+t_agu, t_fpu_frames, t_fpu_resume, dhry, bench_alu and bench_loop on the
+core top, whose one-cycle array feeds two words a cycle; the bus16 program
+bench's 16-bit bus rarely does. It found the dhry index at once, and one
+defect that was there before phase 8: the L1 array let a fetch overtake a
+buffered write, so a store into the next instruction refetched the old one
+(t_integer 192); port A now waits for a write that covers its words
+(a3e99024, committed ahead of this step).
+t_agu.s 105-115 put each pair the gather kept apart straight together.
+
+Fits: core 41.97 MHz, +1.173 ns at 25 ns, 19,389 ALMs (6C: 42.07 MHz,
++1.228, 19,045); bus16 42.04 MHz, +1.212 (6C: 43.08, +1.790, 19,823 ->
+20,169) -- about 345 ALMs for the queue, the second port-A word and the
+fast path, and neither worst path is in them.
+
+Measured (cycles, before -> after; the programs as tb_ap040_pipe_program_local
+and tb_ap040_pipe_program run them): on the core top dhry 247,018 ->
+225,966 (-8.5%), t_integer -16.5%, t_fastpaths -14.3%, t_fpu_frames
+-13.5%, bench_loop -24.2%; every gathered perf case a cycle a block
+faster on the core top (466 -> 428 cycles over all 79). On bus16, whose
+16-bit bus supplies under a word a cycle, the programs are level --
+dhry +0.1%, t_bitfield_cache -11.8%, t_mmu -1.7%, the rest within 1%.
+The perf harness's zero-wait bus top is 769.3 -> 751.9 over all cases,
+and at two wait states 1,042 -> 1,039 with no case slower; at zero wait
+five store loops are a third to a half cycle a block slower (movem_store2
+and 8, movep_store, clr_disp, scc_disp) with the same transactions, fetch
+by fetch -- where a fetch falls in a bus the loop keeps full.
+
+Its mutations: the fetch ignoring take2, a redirect keeping the queue, the
+queue filling past four words, the budget counting fetched words again,
+the fetch running through the reset-vector read, a speculative fetch fault
+surfacing, every fetch counted a demand, and a dropped speculative fault
+never fetched again are caught (the branch benches, chkmem, dbcc,
+exctrace, gxlen, the programs); asking before the take again is caught as
+a slowdown at two wait states. membus killing the wanted read in a
+deferred request survives the perf check: under the final fetch timing
+none of its loops meets that case. The programs do -- 387 times on the
+bus16 program bench, 49 in smcdual -- and without the fix t_bitfield_cache
+takes 2.1% longer (0.05% over all the programs); measured, not caught.
+Decode taking a faulted second word survives, and is equivalent: the
+fetch presents a faulted word only at the head of an empty stream -- a
+speculative fetch's fault is dropped, a demand fetch goes out only when
+the stream will be empty, and one fetch is ever outstanding -- so the word
+after it is the same fetch's, with the same flag, and !if_flt already
+refuses it. !if_flt2 stays, for any later fetch that asks further ahead.
+Turning the fast path off is caught as a slowdown on the core top. Also
+caught: the fast path reading the opcode as its extension word, the fast
+redirect taking a forward Bcc or leaving DBcc out (the branch benches and
+the split's check), the store snoop covering only the word presented
+(t_agu.s 115, smcdual), a longword fetch at an odd word taking both
+halves and membus handing the high half as the second word (prefetch,
+the programs), dropping the port C hold (jmpmodes, dhry, t_agu.s 105-108),
+the MOVES hold (t_agu.s 113) and the MOVEC one (t_agu.s 114), and either
+L1 fetch overtaking a write (t_integer 192) -- 21 of 23.
+
 - [ ] Add wider word delivery/buffering, length/predecode information and
   assembled instruction packets. Start with common two-word forms, then long
   immediates and full-format/FPU extensions. A queue alone cannot exceed its
   sustained input-word bandwidth.
-- [ ] Test producer/consumer adjacency previously hidden by gather cycles:
-  indexed EAs, dynamic bitfields, MOVES function codes, MOVEC and stack banks.
+- [x] Test producer/consumer adjacency previously hidden by gather cycles:
+  indexed EAs, dynamic bitfields, MOVES function codes, MOVEC and stack banks
+  (t_agu.s 105-115, on both tops and the sequential core).
 - [ ] Preserve instruction-fetch faults, PC-relative bases, branch prediction,
   discarded extensions, page boundaries and self-modifying-code invalidation.
 - [ ] Profile calls/returns and CAS2 before later target/return prediction or

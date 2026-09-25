@@ -57,6 +57,15 @@
 ;        both registers -- for BFEXTU, BFEXTS, BFINS and BFFFO: a register
 ;        field with both immediate is rotated in its first cycle (phase 6A),
 ;        and the other kinds must not be.
+;105-115 Pairs decode's gather kept a cycle apart until phase 8 completed
+;        a two-word instruction in one decode cycle, each consumer straight
+;        behind its producer: an indexed LEA, PEA and JMP behind the index's
+;        producer (dhry's LEA (0,A3,D0.L)); a memory-to-memory MOVE's
+;        destination index; CHK2 and CMP2 whose stale register would be out
+;        of range; CAS's compare operand; a bitfield's register offset;
+;        MOVES straight behind MOVEC to SFC; MOVEC ISP straight behind an
+;        A7 write; and a store into an instruction four words ahead, in the
+;        fetch queue.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -530,6 +539,85 @@ ok95:	move.l	#9,(SCR+$170).l
 	move.l	#$00100000,d7
 	bfffo	d7{d2:16},d0		; first one at bit 11
 	check	d0,11,104
+
+;------------- 105-115: pairs decode's gather kept a cycle apart (phase 8)
+	lea	(TABLE).l,a3
+	moveq	#3,d0
+	lsl.l	#2,d0			; 12: the index, at once
+	lea	(0,a3,d0.l),a2		; TABLE+12
+	move.l	(a2),d1
+	check	d1,$10000003,105
+	moveq	#5,d2
+	add.l	d2,d2			; 10
+	pea	(4,a3,d2.l)		; TABLE+14, pushed
+	move.l	(a7)+,d3
+	check	d3,TABLE+14,106
+	moveq	#1,d5
+	add.l	d5,d5			; 2: the second entry
+	jmp	jt(pc,d5.l)
+jt:	bra.s	jbad
+	bra.s	jgood
+jbad:	moveq	#0,d4
+	bra.s	jdone
+jgood:	moveq	#1,d4
+jdone:	check	d4,1,107
+	move.l	#$CAFEBABE,(SCR+$170).l
+	lea	(SCR+$170).l,a5
+	lea	(SCR+$180).l,a4
+	moveq	#4,d6
+	add.l	d6,d6			; 8: a MOVE destination's index, at once
+	move.l	(a5),(0,a4,d6.l)	; SCR+$188
+	move.l	(SCR+$188).l,d7
+	check	d7,$CAFEBABE,108
+	lea	(SCR+$1A0).l,a0
+	move.l	#10,(a0)
+	move.l	#20,4(a0)		; bounds 10..20
+	moveq	#5,d1			; out of range...
+	addq.l	#8,d1			; ...13, in range, at once
+	chk2.l	(a0),d1			; a stale 5 would trap
+	check	d1,13,109
+	moveq	#5,d1
+	addq.l	#8,d1
+	cmp2.l	(a0),d1			; in range: C clear
+	bcs	cmp2bad
+	moveq	#1,d2
+	bra.s	cmp2done
+cmp2bad:
+	moveq	#0,d2
+cmp2done:
+	check	d2,1,110
+	lea	(SCR+$1B0).l,a1
+	move.l	#$1234,(a1)
+	move.l	#$1233,d2
+	addq.l	#1,d2			; $1234: the compare operand, at once
+	move.l	#$5678,d3
+	cas.l	d2,d3,(a1)		; equal: (a1) := $5678
+	move.l	(a1),d4
+	check	d4,$5678,111
+	move.l	#$00F00000,d5
+	moveq	#4,d6
+	addq.l	#4,d6			; 8: the offset, at once
+	bfextu	d5{d6:8},d7		; bits 8..15: $F0 (a stale 4 gives $0F)
+	check	d7,$F0,112
+	lea	(SCR+$1C0).l,a2
+	move.l	#$0BADCAFE,(a2)
+	moveq	#5,d0
+	movec	d0,sfc
+	moves.l	(a2),d1			; SFC read at once
+	check	d1,$0BADCAFE,113
+	move.l	#STACK-$40,d0
+	movea.l	d0,a7			; A7 is ISP here
+	movec	isp,d2			; at once
+	check	d2,STACK-$40,114
+	lea	(STACK).l,a7
+	lea	smq_t(pc),a0
+	moveq	#0,d7
+	move.w	#$5247,(a0)		; nop -> addq.w #1,d7, four words ahead
+	nop
+	nop
+	nop
+smq_t:	nop
+	check	d7,1,115
 
 ;------------------------------------------ 69-70: MOVEC to ISP, then (A7)
 	move.l	#$600DF00D,(SCR+$100).l

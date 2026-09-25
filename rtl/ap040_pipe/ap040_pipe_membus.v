@@ -58,6 +58,7 @@ module ap040_pipe_membus
 	input      [31:0] address_a,
 	input             en_a,
 	output reg [15:0] q_a,
+	output reg [15:0] q_a2,     // the word after q_a, when address_a[1] was 0 (phase 8)
 	output reg        rvalid_a,
 
 	input      [31:0] address_b,
@@ -307,6 +308,7 @@ wire [29:0] a_lw       = a_addr[31:2];
 wire [29:0] dfr_k      = a_lw - pf_base;
 wire        dfr_hit    = !pf_inval && !w_hits_pf && (dfr_k < {27'd0, pf_cnt1}) && (a_sup == pf_sup);
 wire [31:0] dfr_long   = pf_word1(a_lw[1:0]);
+wire        dfr_onbus  = pf_out && !pf_ack && !pf_kill && (a_lw == pf_next) && (a_sup == pf_sup);
 // The write accepted last cycle, snooped now from its registered address.
 // Its bytes lie in its own longword and at most the next, and it is taken
 // to touch both, whatever its size and alignment (restructuring plan, phase
@@ -349,7 +351,7 @@ always @(posedge clk) begin
 		a_sup <= 1'b1; b_fc <= `AP040_FC_SUPER_DATA; w_fc <= `AP040_FC_SUPER_DATA;
 		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
 		rvalid_a <= 1'b0; rvalid_b <= 1'b0;
-		q_a <= 16'd0; q_b <= 32'd0;
+		q_a <= 16'd0; q_a2 <= 16'd0; q_b <= 32'd0;
 		mem_req <= 1'b0; mem_write <= 1'b0; mem_instr <= 1'b0;
 		mem_size <= `AP040_SZ_L; mem_addr <= 32'd0; mem_wdata <= 32'd0;
 		mem_fc <= `AP040_FC_SUPER_PROG;
@@ -383,6 +385,7 @@ always @(posedge clk) begin
 			end else if (req_hit) begin
 				// Buffered: answered next cycle, and the window starts here.
 				q_a      <= address_a[1] ? req_long[15:0] : req_long[31:16];
+				q_a2     <= req_long[15:0];
 				rvalid_a <= 1'b1;
 				rflt_a   <= 1'b0;
 				a_pend   <= 1'b0;
@@ -403,6 +406,7 @@ always @(posedge clk) begin
 			a_dfr <= 1'b0;
 			if (dfr_hit) begin
 				q_a      <= a_addr[1] ? dfr_long[15:0] : dfr_long[31:16];
+				q_a2     <= dfr_long[15:0];
 				rvalid_a <= 1'b1;
 				rflt_a   <= 1'b0;
 				a_pend   <= 1'b0;
@@ -412,7 +416,12 @@ always @(posedge clk) begin
 				pf_base  <= a_lw;
 				pf_cnt   <= 3'd0;
 				pf_sup   <= a_sup;
-				if (pf_out && !pf_ack) pf_kill <= 1'b1;
+				// As for a request answered at once: the read on the bus is
+				// kept when it is the longword asked for (phase 8 -- the
+				// fetch's queue asks in a write's accept cycle often, and
+				// killing it here fetched every instruction longword twice
+				// behind a read-modify-write).
+				if (pf_out && !pf_ack && !dfr_onbus) pf_kill <= 1'b1;
 			end
 		end else if (a_pend && pf_app && w_accept) begin
 			// A pending fetch's fill in a write's accept cycle: it joins the
@@ -420,6 +429,7 @@ always @(posedge clk) begin
 			a_dfr <= 1'b1;
 		end else if (pend_fill) begin
 			q_a      <= a_addr[1] ? mem_rdata[15:0] : mem_rdata[31:16];
+			q_a2     <= mem_rdata[15:0];
 			rvalid_a <= 1'b1;
 			rflt_a   <= 1'b0;
 			a_pend   <= 1'b0;
@@ -478,6 +488,7 @@ always @(posedge clk) begin
 				if (!pf_kill && !en_a) begin
 					if (a_pend && pf_dem) begin
 						q_a        <= 16'h4AFC;
+						q_a2       <= 16'h4AFC;
 						rvalid_a   <= 1'b1;
 						rflt_a     <= 1'b1;
 						rflt_a_bus <= mem_flt_bus;
