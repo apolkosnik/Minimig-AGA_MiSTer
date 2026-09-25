@@ -328,6 +328,28 @@ wrote the status register from a stale operand (MV2SR.B/.W in Basic,
 Default and IRQ). They wait for their data in EA-fetch as before, and
 t_agu.s 76-80 now have them.
 
+The surviving mutations of the pipelined load, each equivalent:
+
+- "the port is not held for the load" survives, and is equivalent: while EX
+  waits for its load (ld_hold) it stalls EA-fetch, and every EA-fetch request
+  is gated by that stall (stall_self / !stall_in); in the cycle a faulted read
+  arrives the flush takes EA-fetch's instruction (live) and nothing of it has
+  started. The term, and the CPU's port gates, stay as the port's own
+  guarantee.
+- "EA-fetch also takes the pipelined load's fault" (rd_out set for it)
+  survives, and is equivalent: the read's fault is EX's ex_aerr, whose
+  flush drops EA-fetch's live in the same cycle, so aerr_rd (live-gated
+  through aerr_now) never fires for it; the flush clears rd_out too.
+- "the load data is not kept while EX is held" survived: the latch was
+  unreachable (no instruction sent on this way holds EX after its data), so
+  it was taken out and an assertion holds the reason.
+- "a load becoming an exception is sent on" survives, and is equivalent:
+  every entry an ordinary load can meet -- an owed trace, an interrupt --
+  raises trc_hold/irq_hold before and while it is taken, and mem_issue
+  requires !trace_hold; an access error's owe raises ae_busy. The traced
+  run of loads (t_fault_edges.s 55-60) was added to be sure, and passes
+  with and without the term.
+
 Primary files: EA-fetch, `ap040_pipe_membus.v`, `ap040_pipe_l1.v`, bus16 and CPU;
 include the FPU wrapper when moving its memory operations.
 
