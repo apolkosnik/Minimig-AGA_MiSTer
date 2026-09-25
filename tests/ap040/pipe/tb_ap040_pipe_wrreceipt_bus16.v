@@ -4,11 +4,12 @@
 // tb_ap040_pipe_wrreceipt_bus16.v - every store once, whatever ce does     //
 //                                                                          //
 // With translation able to refuse a data write (TC.E, or a data TTR        //
-// enabled), ap040_pipe_membus.v takes a write TENTATIVELY: the storing     //
-// instruction waits on wr_busy until the MMU forwards the write, and       //
-// wr_busy is low for the one clock that happens. membus runs every clock;  //
-// the CPU runs under ce. A forward in a cycle with ce low was an           //
-// acceptance nobody saw: the instruction went on waiting, the write        //
+// enabled), the write is taken TENTATIVELY -- by ap040_pipe_membus.v until //
+// 2026-09-25, by the DMU (ap040_pipe_dmu.v) on the 16-bit top since: the   //
+// storing instruction waits on wr_busy until the write's translation       //
+// passes, and wr_busy is low for the one clock it is accepted. Those units //
+// run every clock; the CPU runs under ce. A forward in a cycle with ce low //
+// was an acceptance nobody saw: the instruction went on waiting, the write //
 // drained, and the strobe it still held was taken as a new write. One      //
 // MOVE.L D0,(A0) became four bus sub-cycles on the 16-bit top, and two     //
 // longword writes on the 32-bit one. RAM ends up right, so neither the     //
@@ -16,10 +17,11 @@
 // operation twice. This bench counts the writes.                           //
 //                                                                          //
 // Both tops run the same program side by side -- ap040_pipe_bus16.v, with  //
-// the real MMU and the 16-bit adapter, and ap040_pipe_sys.v's 32-bit       //
-// port, whose forward is its own request -- under four clock-enable        //
-// schedules: always on; pseudo-random; held low for three cycles from each //
-// forward of a write; and held low for one to five cycles from each one.   //
+// the real MMU and the 16-bit adapter, whose forward is the DMU's          //
+// acceptance, and ap040_pipe_sys.v's 32-bit port, whose forward is its own //
+// request -- under four clock-enable schedules: always on; pseudo-random;  //
+// held low for three cycles from each forward of a write; and held low for //
+// one to five cycles from each one.                                        //
 // DTT0 is made transparent first, by the program itself, so every data    //
 // write is tentative. The program stores by every route the pipeline has:  //
 //                                                                          //
@@ -138,7 +140,8 @@ ap040_pipe_bus16 #(.PC_RESET(32'h400), .PROG_WORDS(32'h7FFF_FFFF), .RESET_VECTOR
 	.dbg_d0 (), .dbg_d1 (), .dbg_d2 (), .dbg_d3 (), .dbg_d4 (), .dbg_d5 (), .dbg_d6 (), .dbg_d7 (d7_16),
 	.dbg_ccr (), .dbg_sr (), .dbg_commits ()
 );
-assign fwd16 = u16.mm_req && u16.mm_write;
+// The acceptance: wr_busy low for the tentative write, its translation passed.
+assign fwd16 = u16.u_dmu.w_acc;
 
 integer w16, stray16;
 reg [1:0] dly16;

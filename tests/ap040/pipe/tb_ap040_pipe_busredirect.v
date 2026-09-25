@@ -107,7 +107,10 @@ ap040_pipe_membus dut (
 	.pf_inval(1'b0), .fc_ovr(1'b0), .fc_ovr_val(3'd0),
 	.mem_flt(1'b0), .mem_flt_bus(1'b0), .mem_pass(mem_req), .wr_sync(1'b0), .quiesce(1'b0), .wr_drop(!wren_b),
 	.rflt_a(), .rflt_a_bus(), .rflt_b(), .wflt(), .idle(), .flt_bus(),
-	.xlat_e(1'b0), .xlat_p(1'b0), .pb_req(), .pb_addr(), .pb_fc(), .pb_done(1'b0), .pb_mmusr(32'd0), .flt_ma()
+	.xlat_e(1'b0), .xlat_p(1'b0), .pb_req(), .pb_addr(), .pb_fc(), .pb_done(1'b0), .pb_mmusr(32'd0), .flt_ma(),
+	.pf_xlat(1'b0), .x_req(), .x_addr(), .x_sup(), .x_pass(1'b0), .x_flt(1'b0), .x_pa(32'd0),
+	.pk_addr(), .pk_sup(), .pk_hit(1'b0), .pk_pa(32'd0),
+	.rx(1'b0), .rx_addr(32'd0), .rx_size(2'd0), .rx_fc(3'd0)
 );
 
 integer errors = 0;

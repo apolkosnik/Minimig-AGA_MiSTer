@@ -24,10 +24,12 @@ set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_fpu.
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_irq.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040/ap040_fpu.v
 # The bus16 top (run.sh <work> ap040_pipe_bus16): the 16-bit adapter, the
-# MMU and its ATC rows (bram.vhd's dpram). Unused by the ap040_pipe_core fit.
+# data memory unit, the MMU and its ATC rows (bram.vhd's dpram). Unused by
+# the ap040_pipe_core fit.
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_bus16.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040/ap040_bus16_adapter.v
-set_global_assignment -name VERILOG_FILE ../../../rtl/ap040/ap040_mmu.v
+set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_dmu.v
+set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_mmu.v
 set_global_assignment -name VHDL_FILE ../../../rtl/bram.vhd
 # The memory units' arrays (doc_AP040_PIPELINE_CACHES.md), and the stage-0
 # fit of them alone (run.sh <work> ap040_pipe_cache_fit).

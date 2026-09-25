@@ -1,6 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review. Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stage A built
+(below, "Stage A as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -16,9 +17,13 @@ PA9-PA4; the ATC's PA31-PA12 and the untranslated PA11-PA10 are compared
 with the four 22-bit tags. Misses, write-through writes and pushes go to the
 bus controller below both units.
 
-Today the pipelined core has no cache and translates below its bus
-controller: CPU -> ap040_pipe_membus.v -> ap040_mmu.v -> bus16 adapter. The
-target:
+Until stage A the pipelined core translated below its bus controller:
+CPU -> ap040_pipe_membus.v -> ap040_mmu.v -> bus16 adapter. Since stage A
+the operand port translates in the DMU (ap040_pipe_dmu.v) and the fetch
+stream is translated by the bus controller before each of its reads, both
+through ap040_pipe_mmu.v; nothing below the bus controller translates. The
+IMU arrives with the instruction cache (stage B), the data cache joins the
+DMU in stage C. The target:
 
     port A (IF)  -> IMU: I-ATC lookup + I-cache  \
                                                    > membus (bus controller, physical) -> adapter
@@ -206,7 +211,19 @@ exists.
 A. Translation at the ports: I and D lookup ports on the one ATC RAM, the
    walker behind them; membus physical, reporting only bus errors; faults,
    page-crossing accesses, MOVES spaces, PTEST and PFLUSH at the ports.
-   Behaviour-neutral: every suite, the corpus, every MMU program.
+   Behaviour-neutral: every suite, the corpus, every MMU program -- built in
+   two steps: A1, the translation moved (done, "Stage A as built": the DMU
+   at port B; the fetch stream translated by membus until the IMU comes in
+   B), and A2, alternate-space MOVES ($0/$3/$4/$7) untranslated and $2/$6
+   on the bus as data, with its own test, the one intended change of
+   behaviour. (The sequential core translates them too; A2 makes the
+   pipelined core the one that follows 3.2.) A2 waits on a decision:
+   t_mmu.s tests 55-56, which both cores run, write with MOVES to FC 0 on
+   a write-protected page and expect the MMU's access fault (TT=10, TM=0 in
+   the SSW, after WinUAE's mmu_bus_error); under 3.2 that write is
+   untranslated and lands. Following the manual on the pipelined core means
+   changing those tests, and then either the sequential core's MMU as well
+   or the two cores' expectations apart.
 B. The instruction cache: half-line fills and reads, the four-word fetch
    queue, CACR IE, CINV/CPUSH on IC, snoop invalidation.
 C. The data cache, write-through only: fills with the read buffer, write-hit
@@ -221,6 +238,75 @@ D. Copyback: dirty bits, write allocation, the push buffer, CPUSH pushes,
 E. Throughput: the pipelined operand port, back-to-back line transfers.
 F. Integration: the cacheable windows and snoop inputs on the bus16 top,
    a full-system fit.
+
+## Stage A as built (A1)
+
+Units: ap040_pipe_dmu.v between the CPU's port B and ap040_pipe_membus.v,
+which it hands physical addresses; ap040_pipe_mmu.v (rtl/ap040/ap040_mmu.v's
+rules, ATC rows and walker, with an instruction and a data translation port)
+beside it; membus drives the 16-bit adapter directly. The CPU sees the same
+port protocols it saw from membus.
+
+- Translation from registers. The first draft translated each request in
+  its own cycle, at both ports, in front of membus's one-cycle fetch window.
+  It fitted at -5.3 ns (32.98 MHz): both ports' addresses settle about 17 ns
+  into the cycle, from the CPU's stalls, and an ATC compare and a physical
+  address after them do not fit. The old design translated from membus's
+  registered transaction. So every translation now starts from a register:
+  the DMU latches a request as it arrives and translates from the latch;
+  membus translates its stream's next read from its own register. The
+  caches' two-cycle lookups (stages B and C) start from registers anyway.
+- Port B. With translation able to refuse (TC.E or a data TTR), a read is
+  translated the cycle after it is asked for and goes to membus through a
+  translated-read input that puts it on the bus in that cycle -- the old
+  timing, membus having taken a read and put it on the bus the next cycle.
+  A tentative write is accepted the cycle after its translation passes --
+  a cycle after it is taken on the MMU's most recent hit, two after a
+  lookup, as membus accepted it -- so wr_busy is a register. Untranslated,
+  reads and writes pass straight through, as they did.
+- Port A. membus keeps its window, logical as before. With TC.E set, the
+  stream's next read is translated through the MMU's instruction port from
+  membus's register before it takes the bus -- starting at once, whatever
+  the bus is doing -- and never while holding the bus. Holding it would
+  deadlock: the walker may be waiting for a write membus has still to send.
+  A prefetch in the page the instruction port translated last goes out in
+  its own cycle through a peek at that translation (ip_*: combinational from
+  the MMU's registers, no search, no fault); a demand miss to another page
+  takes one cycle more than before. The IMU replaces all of this in stage B.
+- Port ownership. A requester holds its MMU port, at the same address, until
+  the translation passes or faults -- a walk cannot be recalled and its fault
+  belongs to the access it was for. After a fault the port is down for a
+  cycle, which is what the walker's W_DROP waits for; in the DMU, whose slot
+  and read share the data port, that takes an explicit gap.
+- Ordering. A read waits while the DMU's write slot holds anything, and
+  membus sends the writes it holds before reads. The walker's next access
+  waits while any write the DMU has accepted has not reached memory
+  (walk_hold): the sequential MMU's walks ran only at the head of the bus,
+  after every older write, and ap040_tg68k_compat.v holds its walker behind
+  the posted-store drain for the same reason. Reads and fetches run beside
+  a walk.
+- Page crossings (TC.E): the DMU checks a crossing write on both pages (the
+  MMU's access check, no M), then translates both for real (setting M), and
+  only then accepts it and posts its bytes; a refused one has written and
+  marked nothing, MA if its second page refused it. A crossing read
+  translates both pages, then reads its bytes.
+- membus reports only physical bus errors: mem_flt is the bus error alone,
+  wr_sync low, no crossing split, no probes.
+
+Tests changed: tb_ap040_pipe_program.v's "walker and 16-bit bus active
+together" assertion -- true of the old structure, not a requirement -- is
+now the ordering rule itself: the bytes of every write the memory side
+commits to are counted until they land on the 16-bit bus, and the walker may
+start an access only with none outstanding (and every committed byte must
+land, unless a bus error aborted it). New: t_walk_order.s (a descriptor
+stored and at once searched through, read, pointer and write forms; passes
+on both cores), t_fault_edges.s test 68 (a refused crossing write leaves
+the first page's M clear), and tb_ap040_pipe_dmuport.v (the DMU, MMU and
+membus driven at the CPU's ports: a write presented during a read's failing
+search, a read behind a write waiting in the DMU, a refused fetch, a search
+behind a committed write). tb_ap040_pipe_wrreceipt_bus16.v times its
+clock-enable holes from the DMU's acceptance; tb_dat_replay_pipe.v drains
+the DMU's writes.
 
 ## Tests
 

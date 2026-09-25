@@ -130,7 +130,11 @@ ap040_pipe_membus u_bus
 	.idle     (l1_idle), .quiesce (l1_quiet), .wr_drop (l1_wr_drop),
 	// no MMU behind this memory: nothing is translated, nothing crosses
 	.xlat_e   (1'b0), .xlat_p (1'b0),
-	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0), .flt_ma (l1_flt_ma)
+	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0), .flt_ma (l1_flt_ma),
+	// nothing to translate, and the CPU's reads come straight in
+	.pf_xlat  (1'b0), .x_req (), .x_addr (), .x_sup (), .x_pass (1'b0), .x_flt (1'b0), .x_pa (32'd0),
+	.pk_addr (), .pk_sup (), .pk_hit (1'b0), .pk_pa (32'd0),
+	.rx (1'b0), .rx_addr (32'd0), .rx_size (2'd0), .rx_fc (3'd0)
 );
 
 endmodule

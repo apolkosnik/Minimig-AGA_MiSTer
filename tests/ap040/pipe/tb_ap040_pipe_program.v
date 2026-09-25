@@ -228,8 +228,64 @@ always @(posedge clk)
 // The table walker's own 32-bit physical port, tb_ap040_program.v's model:
 // an independent latency profile, and never an acknowledge on the 16-bit
 // bus, so a descriptor leaking onto that bus fails every MMU test.
+//
+// Ordering (2026-09-25). A table search must see every write the core has
+// committed to: a descriptor stored and then searched through is read as
+// stored (t_walk_order.s). The sequential core's bench asserted, and this
+// one did until the MMU moved to the memory units' ports, that the walker
+// and the 16-bit bus are never active together -- which held because a
+// walk only ever ran for the transaction at the head of the bus. With
+// translation beside the pipeline a search runs while fetches and reads
+// are on the bus, as the units are meant to; what must not happen is a
+// search overtaking a WRITE. So the bytes of each write are counted from
+// the cycle the memory side commits to it -- the DMU accepting a write
+// translation could have refused, or passing an untranslated one to the bus
+// controller -- until they land on the 16-bit bus, and the walker may start
+// an access only with none outstanding. A write a bus error aborted never
+// lands: the count is cleared once the memory side holds no write, and at
+// that point it must be zero unless such an abort happened.
 reg        walker_pending, walker_armed, walker_we_latch;
 reg [31:0] walker_addr_latch, walker_wdat_latch;
+integer    wo_pend = 0;         // committed write bytes not yet landed
+reg        wo_lost = 0;         // a write was aborted by a bus error since the last clear
+function integer sz_bytes;
+	input [1:0] sz;
+	begin
+		sz_bytes = (sz == `AP040_SZ_L) ? 4 : (sz == `AP040_SZ_W) ? 2 : 1;
+	end
+endfunction
+// The memory side's commitment: the DMU's acceptance of a tentative write
+// (its wr_busy low: w_acc), or an untranslated write handed to the bus
+// controller as it takes it.
+wire wo_commit_t = dut.u_dmu.w_acc;
+wire wo_commit_u = dut.u_dmu.w_thru && !dut.u_dmu.m_wr_busy_w;
+wire wo_holds    = (dut.u_dmu.ws == 3'd5) || dut.u_bus.w_pend;   // WS_POST, or with membus
+always @(posedge clk) begin
+	if (!nreset) begin
+		wo_pend = 0; wo_lost = 0;
+	end else begin
+		// a walker access starting in the cycle just ended (the model below
+		// takes it at this edge), judged on the count before this edge's
+		if (walker_req && walker_armed && !walker_pending && wo_pend != 0) begin
+			errors = errors + 1;
+			$display("FAIL: table walker access at %h with %0d committed write bytes not yet on the bus (pc=%h)",
+			         walker_addr, wo_pend, dbg_pc);
+			result = 2;
+		end
+		if (wo_commit_t) wo_pend = wo_pend + sz_bytes(dut.u_dmu.w_size);
+		if (wo_commit_u) wo_pend = wo_pend + sz_bytes(dut.l1_size_b);
+		if (mem_ready && busstate == 2'b11) wo_pend = wo_pend - (!nuds ? 1 : 0) - (!nlds ? 1 : 0);
+		if (berr && busstate == 2'b11) wo_lost = 1;
+		if (!wo_commit_t && !wo_commit_u && !wo_holds) begin
+			if (wo_pend != 0 && !wo_lost) begin
+				errors = errors + 1;
+				$display("FAIL: %0d write bytes committed but never written on the bus (pc=%h)", wo_pend, dbg_pc);
+				result = 2;
+			end
+			wo_pend = 0; wo_lost = 0;
+		end
+	end
+end
 reg  [2:0] walker_lat_cnt;
 integer    walker_lat_idx;
 always @(posedge clk) begin
@@ -241,11 +297,6 @@ always @(posedge clk) begin
 		walker_lat_cnt <= latency(phase, 0); walker_lat_idx <= 1;
 	end else begin
 		if (!walker_req) walker_armed <= 1;
-		if (walker_req && (busstate != 2'b01)) begin
-			errors = errors + 1;
-			$display("FAIL: walker and 16-bit CPU bus active together (pc=%h)", dbg_pc);
-			result = 2;
-		end
 		if (walker_req && walker_armed && !walker_pending) begin
 			walker_pending    <= 1;
 			walker_armed      <= 0;

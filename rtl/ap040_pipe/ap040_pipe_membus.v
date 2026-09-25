@@ -45,6 +45,18 @@
 // window or the read in flight empties it, and writes go out before the   //
 // refetch, so a store into the instruction stream is fetched. A change of  //
 // privilege does the same, so every word carries its own function code.   //
+//                                                                          //
+// Translation (2026-09-25, caches stage A). On the 16-bit top the MMU is   //
+// no longer below this unit. Port B's accesses arrive translated, from the //
+// DMU (ap040_pipe_dmu.v); a translated read may take the bus in the cycle  //
+// it arrives (rx_*). Port A keeps its window, logical as it always was,    //
+// and with pages mapped (pf_xlat) each read the stream wants is translated //
+// through the MMU's instruction port (x_*) from this unit's own register   //
+// before it takes the bus -- never while holding it: the table walker may  //
+// be waiting for a write this unit has still to send. The translation of   //
+// a read the window no longer wants is seen through and then discarded.    //
+// The instruction memory unit takes the fetch's translation over with its  //
+// cache (stage B).                                                         //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -151,7 +163,29 @@ module ap040_pipe_membus
 	input             pb_done,
 	input      [31:0] pb_mmusr,
 	output reg        flt_ma,
-	output reg        flt_bus       // ...a physical bus error, not the MMU
+	output reg        flt_bus,      // ...a physical bus error, not the MMU
+
+	// ---- the stream's translation (see the header) ----
+	input             pf_xlat,      // translate each stream read first (TC.E)
+	output            x_req,        // ap040_pipe_mmu.v's instruction port
+	output     [31:0] x_addr,
+	output            x_sup,
+	input             x_pass,
+	input             x_flt,
+	input      [31:0] x_pa,
+	// ...and the MMU's peek (ip_*) at the stream's next longword, so a
+	// prefetch in the page translated last goes on the bus in its own cycle
+	output     [31:0] pk_addr,
+	output            pk_sup,
+	input             pk_hit,
+	input      [31:0] pk_pa,
+
+	// ---- a translated read (the DMU's): on the bus in its own cycle when
+	// the bus is free and no write is waiting, else held as rd_b holds one
+	input             rx,
+	input      [31:0] rx_addr,
+	input       [1:0] rx_size,
+	input       [2:0] rx_fc
 );
 
 localparam [1:0] WHO_A = 2'd0, WHO_BR = 2'd1, WHO_BW = 2'd2;
@@ -195,6 +229,17 @@ reg        pf_stop;     // a speculative prefetch faulted: no more until a new r
 // it re-issued if that prefetch faults, as the 68040 re-runs a faulted
 // prefetch at the point the word is needed (t_exceptions.s tests 138-141).
 reg        pf_dem;
+// The stream's next read, being translated (pf_xlat): pf_out is set, the bus
+// is not taken. It holds the MMU's instruction port at the same address
+// until the translation passes or faults, as the MMU requires. After a
+// fault the port is down for at least the next cycle, which is what the
+// walker waits for (W_DROP): a new translation needs pf_out clear, and that
+// clears only at the fault's own edge.
+reg        xl_on, xl_sp;
+reg [29:0] xl_lw;
+assign     x_req  = xl_on;
+assign     x_addr = {xl_lw, 2'b00};
+assign     x_sup  = xl_sp;
 reg        w_tent;      // the pending write has not passed translation yet
 reg        w_block;     // a tentative write faulted: take no write until the strobe drops
 // A tentative write passed while its requester was not presenting it (review
@@ -335,12 +380,37 @@ wire        w_hits_pf  = w_snoop && ((w_klo < {27'd0, PF_N}) || (w_klo == 30'h3F
 wire [29:0] pf_issue_lw = (en_a && !req_hit) ? req_lw : pf_next;
 wire  [2:0] pf_cnt_aft  = !en_a ? pf_cnt1 : req_hit ? (pf_cnt1 - req_k[2:0]) : 3'd0;
 wire        pf_issue_sp = (en_a && !req_hit) ? sup : pf_sup;
+// The stream's read translated and still wanted: it takes the bus when
+// nothing comes first.
+wire        xl_go       = xl_on && x_pass && !pf_kill;
+// The next longword of the stream, as the window stands after this cycle's
+// request. Not in a cycle a write is accepted: whether that write lands in
+// the window is a thirty-bit compare on an address the CPU has only just
+// formed, and deciding the bus on it was the bus16 top's worst path (-4.913
+// ns at 25 ns); the write goes first next cycle anyway. Not before the first
+// request (review 15): pf_base is zero out of reset, and a read of $0 the
+// fetch unit never asked for went out while ce held the core -- one the
+// reset PC's fetch then queued behind, for ever if $0 never acknowledges.
+// Untranslated it goes on the bus when nothing comes first; translated
+// (pf_xlat) its translation starts at once.
+wire        pf_new      = (pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_accept && !a_dfr &&
+                          !pf_inval && (!pf_stop || en_a) && !quiesce;
+// Translated, a prefetch -- the stream's next longword, not a request that
+// missed -- in the page the MMU's instruction port translated last needs no
+// translation of its own: it goes on the bus now, like an untranslated one.
+assign      pk_addr     = {pf_next, 2'b00};
+assign      pk_sup      = pf_sup;
+wire        pf_direct   = !pf_xlat || (pk_hit && !(en_a && !req_hit));
+// the chain below reaches the stream this cycle
+wire        pf_bus_free = !busy && !(w_pend && w_x && (w_pb != 2'd0)) && !(w_pend && !(wren_b && !w_pend)) &&
+                          !(b_pend || rx) && !xl_go;
 
 always @(posedge clk) begin
 	if (!nreset) begin
 		busy <= 1'b0; who <= WHO_A;
 		pf_base <= 30'd0; pf_cnt <= 3'd0; pf_out <= 1'b0; pf_kill <= 1'b0; pf_sup <= 1'b1;
 		pf_live <= 1'b0; pf_stop <= 1'b0; pf_dem <= 1'b0; w_tent <= 1'b0; w_block <= 1'b0;
+		xl_on <= 1'b0; xl_sp <= 1'b1; xl_lw <= 30'd0;
 		w_receipt <= 1'b0;
 		rflt_a <= 1'b0; rflt_a_bus <= 1'b0; rflt_b <= 1'b0; flt_bus <= 1'b0; flt_ma <= 1'b0;
 		b_x <= 1'b0; w_x <= 1'b0; b_bi <= 2'd0; b_last <= 2'd0; w_bi <= 2'd0; w_last <= 2'd0;
@@ -440,14 +510,14 @@ always @(posedge clk) begin
 			pf_cnt <= 3'd0;
 			if (pf_out && !pf_ack) pf_kill <= 1'b1;
 		end
-		if (rd_b) begin
-			b_addr   <= address_b;
-			b_size   <= size_b;
-			b_x      <= xlat_e && crosses(address_b, size_b, pg_mask);
+		if (rd_b || rx) begin
+			b_addr   <= rx ? rx_addr : address_b;
+			b_size   <= rx ? rx_size : size_b;
+			b_x      <= !rx && xlat_e && crosses(address_b, size_b, pg_mask);
 			b_bi     <= 2'd0;
-			b_last   <= last_of(size_b);
+			b_last   <= last_of(rx ? rx_size : size_b);
 			b_acc    <= 24'd0;
-			b_fc     <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
+			b_fc     <= rx ? rx_fc : fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
 		end
@@ -556,29 +626,62 @@ always @(posedge clk) begin
 			mem_addr  <= w_x ? (w_addr + {30'd0, w_bi}) : w_addr;
 			mem_wdata <= w_x ? {24'd0, w_byte} : w_data;
 			mem_fc    <= w_fc;
-		end else if (b_pend) begin
+		end else if (b_pend || rx) begin
 			busy      <= 1'b1;  who <= WHO_BR;
 			mem_req   <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b0;
-			mem_size  <= b_x ? `AP040_SZ_B : b_size;
-			mem_addr  <= b_x ? (b_addr + {30'd0, b_bi}) : b_addr;
-			mem_fc    <= b_fc;
-		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_accept && !a_dfr && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
-			// The next longword of the stream, as the window stands after
-			// this cycle's request. Not in a cycle a write is accepted: whether
-			// that write lands in the window is a thirty-bit compare on an
-			// address the CPU has only just formed, and deciding the bus on it
-			// was the bus16 top's worst path (-4.913 ns at 25 ns); the write
-			// goes first next cycle anyway. Not before the first request (review 15):
-			// pf_base is zero out of reset, and a read of $0 the fetch unit
-			// never asked for went out while ce held the core -- one the
-			// reset PC's fetch then queued behind, for ever if $0 never
-			// acknowledges.
+			mem_size  <= !b_pend ? rx_size : b_x ? `AP040_SZ_B : b_size;
+			mem_addr  <= !b_pend ? rx_addr : b_x ? (b_addr + {30'd0, b_bi}) : b_addr;
+			mem_fc    <= !b_pend ? rx_fc : b_fc;
+		end else if (xl_go) begin
+			// the stream's read, translated
+			busy       <= 1'b1;  who <= WHO_A;
+			xl_on      <= 1'b0;
+			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;
+			mem_size   <= `AP040_SZ_L; mem_addr <= {x_pa[31:2], 2'b00};
+			mem_fc     <= fc_of(1'b1, xl_sp);
+		end else if (pf_new && pf_direct) begin
 			busy       <= 1'b1;  who <= WHO_A;
 			pf_out     <= 1'b1;
 			pf_dem     <= en_a ? !req_hit : a_pend;
 			mem_req    <= 1'b1;  mem_write <= 1'b0;  mem_instr <= 1'b1;
-			mem_size   <= `AP040_SZ_L; mem_addr <= {pf_issue_lw, 2'b00};
+			mem_size   <= `AP040_SZ_L;
+			mem_addr   <= pf_xlat ? {pk_pa[31:2], 2'b00} : {pf_issue_lw, 2'b00};
 			mem_fc     <= fc_of(1'b1, pf_issue_sp);
+		end
+		// Otherwise translated first, from this register (see the header) --
+		// whatever the bus is doing, so the translation overlaps it.
+		if (pf_new && pf_xlat && !(pf_direct && pf_bus_free)) begin
+			pf_out <= 1'b1;
+			pf_dem <= en_a ? !req_hit : a_pend;
+			xl_on  <= 1'b1;  xl_lw <= pf_issue_lw;  xl_sp <= pf_issue_sp;
+		end
+		// The stream's translation ends. Passed but no longer wanted (the
+		// window moved on while it ran): dropped, nothing having gone out.
+		// Refused: as a fetch the MMU refused on the bus was -- the fetch
+		// unit's demand gets $4AFC and the fault, a speculative read stops
+		// the stream.
+		if (xl_on && x_pass && pf_kill) begin
+			xl_on   <= 1'b0;
+			pf_out  <= 1'b0;
+			pf_kill <= 1'b0;
+		end
+		if (xl_on && x_flt) begin
+			xl_on   <= 1'b0;
+			pf_out  <= 1'b0;
+			pf_kill <= 1'b0;
+			flt_bus <= 1'b0;
+			flt_ma  <= 1'b0;
+			if (!pf_kill && !en_a) begin
+				if (a_pend && pf_dem) begin
+					q_a        <= 16'h4AFC;
+					q_a2       <= 16'h4AFC;
+					rvalid_a   <= 1'b1;
+					rflt_a     <= 1'b1;
+					rflt_a_bus <= 1'b0;
+					a_pend     <= 1'b0;
+					pf_stop    <= 1'b1;
+				end else if (!a_pend) pf_stop <= 1'b1;
+			end
 		end
 	end
 end

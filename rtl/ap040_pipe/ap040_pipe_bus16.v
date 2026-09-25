@@ -4,7 +4,9 @@
 // ap040_pipe_bus16.v - the pipelined core on the 16-bit Minimig bus        //
 //                                                                          //
 // The third pairing of ap040_pipe_cpu.v, and the first that speaks a bus   //
-// something outside this repo already talks: CPU -> ap040_pipe_membus.v -> //
+// something outside this repo already talks: CPU -> ap040_pipe_membus.v   //
+// (port B through the data memory unit, ap040_pipe_dmu.v; both ports       //
+// translated through ap040_pipe_mmu.v) ->                                  //
 // rtl/ap040/ap040_bus16_adapter.v, which is the FSM core's own adapter,    //
 // instantiated here unmodified. It converts one 32-bit transaction into    //
 // the 16-bit sub-cycles cpu_wrapper.v expects -- a Long into two word      //
@@ -77,26 +79,33 @@ module ap040_pipe_bus16
 wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a, l1_rdata_a2;
 wire  [1:0] l1_size_b;
-wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
+wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b;
 wire        l1_wr_busy_w;   // the CPU's: see ap040_pipe_membus.v
 wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
-wire        pb_req;       // membus's write-permission probe, on the MMU's PTEST sideband
-wire [31:0] pb_addr;
-wire  [2:0] pb_fc;
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
-wire        mmu_flt;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
 wire [31:0] pt_addr, pt_mmusr, pf_addr;
 wire  [2:0] pt_fc, pf_fc;
 wire  [1:0] pf_mode;
-wire        mm_req, mm_write, mm_instr, mm_ack;
-wire  [1:0] mm_size;
-wire [31:0] mm_addr, mm_wdata, mm_rdata;
-wire  [2:0] mm_fc;
 wire        l1_fc_ovr;
 wire  [2:0] l1_fc_val;
+
+// the MMU's two translation ports: instruction (the bus controller's
+// stream), data (the DMU)
+wire        i_req, i_sup, i_pass, i_flt, ip_sup, ip_hit;
+wire [31:0] i_addr, i_pa, ip_addr, ip_pa;
+wire        d_req, d_write, d_acc, d_sup, d_pass, d_flt;
+wire [31:0] d_addr, d_pa;
+wire        dmu_wr_pend;
+
+// the bus controller's port B, physical, from the DMU
+wire [31:0] bb_addr, bb_wdata, bb_q, bb_rx_addr;
+wire  [1:0] bb_size, bb_rx_size;
+wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle;
+wire        bb_rx;
+wire  [2:0] bb_fc_val, bb_rx_fc;
 
 wire        mem_req, mem_write, mem_instr, mem_ack;
 wire  [1:0] mem_size;
@@ -139,6 +148,51 @@ ap040_pipe_cpu #(
 	.dbg_ccr(dbg_ccr), .dbg_sr(dbg_sr), .dbg_commits(dbg_commits)
 );
 
+// The data memory unit (doc_AP040_PIPELINE_CACHES.md, stage A): port B's
+// logical addresses translated through the MMU's data port, physical ones
+// handed to the bus controller. Port A's stream is translated by the bus
+// controller itself until the instruction memory unit comes with its cache
+// (stage B): see ap040_pipe_membus.v's header.
+ap040_pipe_dmu u_dmu
+(
+	.clk (clk), .nreset (nreset),
+	.xlat (l1_wr_sync), .tc_e (mmu_tc[15]), .tc_p (mmu_tc[14]),
+	.c_addr (l1_addr_b), .c_rd (l1_rd_b), .c_wr (l1_wren_b), .c_size (l1_size_b), .c_wdata (l1_data_b),
+	.c_sup (l1_sup_b), .c_fc_ovr (l1_fc_ovr), .c_fc_val (l1_fc_val), .c_wr_drop (l1_wr_drop),
+	.c_q (l1_q_b), .c_rvalid (l1_rvalid_b), .c_wr_busy_w (l1_wr_busy_w), .c_rflt (l1_rflt_b),
+	.c_wflt (l1_wflt), .c_flt_bus (l1_flt_bus), .c_flt_ma (l1_flt_ma), .c_idle (l1_idle),
+	.wr_pend (dmu_wr_pend),
+	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa),
+	.m_addr (bb_addr), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
+	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
+	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
+	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
+	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle)
+);
+
+// The MMU (2026-09-25): rtl/ap040/ap040_mmu.v's rules and ATC with a
+// translation port for each memory port (ap040_pipe_mmu.v), no longer below
+// the bus controller. Its walker waits while a write the DMU accepted has
+// still to reach memory.
+ap040_pipe_mmu u_mmu
+(
+	.clk (clk), .nreset (nreset),
+	.tc (mmu_tc), .urp (mmu_urp), .srp (mmu_srp),
+	.itt0 (mmu_itt0), .itt1 (mmu_itt1), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
+	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (),
+	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa),
+	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (),
+	.pt_req (pt_req), .pt_write (pt_write), .pt_access (1'b0), .pt_addr (pt_addr), .pt_fc (pt_fc),
+	.pt_done (pt_done), .pt_mmusr (pt_mmusr),
+	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
+	.walk_hold (dmu_wr_pend),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (walker_berr)
+);
+
 ap040_pipe_membus u_bus
 (
 	.clk (clk), .nreset (nreset),
@@ -146,67 +200,49 @@ ap040_pipe_membus u_bus
 	.address_a(l1_addr_a), .en_a (l1_req_a),
 	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 
-	.address_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
-	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),
-	.wr_busy  (l1_wr_busy), .wr_busy_w(l1_wr_busy_w), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
+	.address_b(bb_addr), .data_b(bb_wdata), .wren_b(bb_wr),
+	.size_b   (bb_size),   .rd_b  (bb_rd),
+	.wr_busy  (), .wr_busy_w(bb_wr_busy_w), .q_b  (bb_q), .rvalid_b(bb_rvalid),
 
 	.sup      (l1_sup_a),
-	.sup_b    (l1_sup_b),
+	.sup_b    (bb_sup),
 	.pf_inval (l1_inval_a),
-	.fc_ovr   (l1_fc_ovr), .fc_ovr_val(l1_fc_val),
+	.fc_ovr   (bb_fc_ovr), .fc_ovr_val(bb_fc_val),
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),
 	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
-	// a physical bus error ends the sub-cycle the adapter is running, on the
-	// enable it aborts on
-	.mem_flt  (mmu_flt || (berr && clkena_in && mem_req)),
-	.mem_flt_bus(!mmu_flt && berr && clkena_in && mem_req),
-	.mem_pass (mm_req),
-	.wr_sync  (l1_wr_sync),
-	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
-	.idle     (l1_idle), .quiesce (l1_quiet), .wr_drop (l1_wr_drop),
-	.xlat_e   (mmu_tc[15]), .xlat_p (mmu_tc[14]),
-	.pb_req   (pb_req), .pb_addr (pb_addr), .pb_fc (pb_fc), .pb_done (pt_done), .pb_mmusr (pt_mmusr),
-	.flt_ma   (l1_flt_ma)
-);
-
-// The MMU (2026-09-24): rtl/ap040/ap040_mmu.v, the sequential core's own,
-// unmodified, on the external memory port membus drives -- which is the
-// port the sequential core drives it from. ce is 1: membus runs every
-// clock, and the MMU's one-cycle fault pulse must be one membus cycle.
-ap040_mmu u_mmu
-(
-	.clk (clk), .nreset (nreset), .ce (1'b1),
-	.tc (mmu_tc), .urp (mmu_urp), .srp (mmu_srp),
-	.itt0 (mmu_itt0), .itt1 (mmu_itt1), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
-	.c_req (mem_req), .c_write (mem_write), .c_instr (mem_instr), .c_size (mem_size),
-	.c_addr (mem_addr), .c_wdata (mem_wdata), .c_fc (mem_fc),
-	.c_ack (mem_ack), .c_rdata (mem_rdata), .c_flt (mmu_flt),
-	// PTEST from the CPU, or membus's probe of a crossing write (never both:
-	// PTEST waits for the memory side to be idle, and a probe is a write
-	// still pending there). Each listens to pt_done only while it asks.
-	.pt_req (pt_req || pb_req), .pt_write (pb_req || pt_write), .pt_access (pb_req),
-	.pt_addr (pb_req ? pb_addr : pt_addr), .pt_fc (pb_req ? pb_fc : pt_fc),
-	.pt_done (pt_done), .pt_mmusr (pt_mmusr),
-	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
-	.m_req (mm_req), .m_write (mm_write), .m_instr (mm_instr), .m_size (mm_size),
-	.m_addr (mm_addr), .m_wdata (mm_wdata), .m_fc (mm_fc),
-	.m_ack (mm_ack), .m_rdata (mm_rdata),
-	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
-	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
-	.walker_berr (walker_berr),
-	.phys_addr (), .cache_inhibit (), .m_nocache ()
+	// Everything arriving here has been translated: the only refusal left
+	// is a physical bus error, which ends the sub-cycle the adapter is
+	// running, on the enable it aborts on. A request has passed as soon as
+	// it is on the port, and no write is tentative any more -- the DMU held
+	// each one until its translation passed.
+	.mem_flt  (berr && clkena_in && mem_req),
+	.mem_flt_bus(berr && clkena_in && mem_req),
+	.mem_pass (mem_req),
+	.wr_sync  (1'b0),
+	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (bb_rflt), .wflt (), .flt_bus (bb_flt_bus),
+	.idle     (bb_idle), .quiesce (l1_quiet), .wr_drop (1'b0),
+	// The DMU splits a transfer that crosses a page and probes nothing here.
+	.xlat_e   (1'b0), .xlat_p (1'b0),
+	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),
+	.flt_ma   (bb_flt_ma),
+	// the stream translated through the MMU's instruction port (TC.E)
+	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
+	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa),
+	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
+	// the DMU's translated reads
+	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)
 );
 
 ap040_bus16_adapter u_bus16
 (
 	.clk (clk), .nreset (nreset), .clkena_in (clkena_in),
 
-	.mem_req  (mm_req),   .mem_berr (berr),     .mem_write(mm_write),
-	.mem_instr(mm_instr),  .mem_size(mm_size),  .mem_addr (mm_addr),
-	.mem_wdata(mm_wdata),  .mem_fc  (mm_fc),
-	.mem_ack  (mm_ack),    .mem_rdata(mm_rdata),
+	.mem_req  (mem_req),   .mem_berr (berr),     .mem_write(mem_write),
+	.mem_instr(mem_instr), .mem_size(mem_size),  .mem_addr (mem_addr),
+	.mem_wdata(mem_wdata), .mem_fc  (mem_fc),
+	.mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
 
 	.data_in   (data_in),   .addr_out(addr_out), .data_write(data_write),
 	.nwr       (nwr),       .nuds    (nuds),     .nlds      (nlds),

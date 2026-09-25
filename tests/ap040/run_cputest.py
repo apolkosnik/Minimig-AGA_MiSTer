@@ -67,8 +67,9 @@ PIPE_SOURCES = [
     PIPE / "ap040_pipe_fpu.v",
     PIPE / "ap040_pipe_irq.v",
     RTL / "ap040_fpu.v",
-    RTL / "ap040_mmu.v",   # ap040_pipe_bus16.v's MMU
-    HERE / "sim_dpram.v",  # its ATC rows
+    PIPE / "ap040_pipe_dmu.v",   # ap040_pipe_bus16.v's data memory unit
+    PIPE / "ap040_pipe_mmu.v",   # ...and its MMU
+    HERE / "sim_dpram.v",        # its ATC rows
 ]
 RTL_SOURCES = [
     RTL / "ap040_tg68k_compat.v",

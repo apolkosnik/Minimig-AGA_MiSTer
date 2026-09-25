@@ -35,7 +35,7 @@ CORE = [RTL / n for n in (
 # exclusions as well (run_verilator.py): this core has no internal caches.
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
-                     "t_movem_restart", "t_fault_edges", "t_agu"]
+                     "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order"]
 PROGRAMS_OPEN = {}
 # tb_ap040_pipe_program_local runs the programs that need no bus devices and
 # no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a
@@ -58,10 +58,11 @@ def program_image(name, work):
     return HERE / "build" / (name + ".hex")
 
 
-# ap040_pipe_bus16.v carries the MMU (rtl/ap040/ap040_mmu.v, whose ATCs are
-# dpram rows: sim_dpram.v here, rtl/cpu_cache_new.v's in synthesis).
+# ap040_pipe_bus16.v carries the data memory unit and the MMU with a port
+# for each memory port (ap040_pipe_mmu.v, whose ATC is dpram rows:
+# sim_dpram.v here, rtl/bram.vhd in synthesis).
 BUS16 = [RTL / "ap040_pipe_bus16.v", ROOT / "rtl/ap040/ap040_bus16_adapter.v",
-         ROOT / "rtl/ap040/ap040_mmu.v", HERE / "sim_dpram.v"]
+         RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", HERE / "sim_dpram.v"]
 # ap040_pipe_fpu.v runs the shared FPU engine, which includes rtl/ap040's
 # ap040_defs.svh, so every build takes that directory too.
 
@@ -116,6 +117,11 @@ def main():
             src = [x for x in CORE if x.name not in
                    ("ap040_pipe_core.v", "ap040_pipe_sys.v",
                     "ap040_pipe_membus.v", "ap040_pipe_l1.v")]
+        elif name.endswith("dmuport"):
+            # the data memory unit, the MMU and the bus controller, driven
+            # at the CPU's ports -- see the bench's header
+            src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_membus.v",
+                   HERE / "sim_dpram.v"]
         elif name.endswith("busredirect"):
             # ap040_pipe_membus.v standalone, same reason as l1_wbuf above:
             # the bench drives the wrapper's ports directly.

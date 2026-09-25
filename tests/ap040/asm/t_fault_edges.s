@@ -61,6 +61,7 @@ pre_wr		equ	$3618		; ($CFFC).l as the access-error handler found it
 h_d2		equ	$361C		; D2-D4 as the access-error handler found them
 h_d3		equ	$3620
 h_d4		equ	$3624
+pre_pd		equ	$3628		; page C's descriptor as the access-error handler found it
 tr_log		equ	$3640		; the trace handler's stacked PCs, eight
 cnt_fl		equ	$3660		; F-line exceptions taken
 fl_pc		equ	$3664		; ...and the last one's stacked PC
@@ -199,6 +200,7 @@ tloop:
 	move.l	#$4434,(fix_addr).l	; page D
 	move.l	#$D003,(fix_val).l
 	move.l	#$D007,($4434).l	; page D write-protected
+	move.l	#$C003,($4430).l	; page C resident, unused, unmodified
 	pflusha
 	move.l	#$11223344,($CFFE).l	; two bytes on page C, two on page D
 	move.l	(pre_wr).l,d0
@@ -215,6 +217,9 @@ tloop:
 	moveq	#0,d0
 	move.w	(last_ssw).l,d0
 	chkl	d0,$0C05,23		; MA + ATC + long write + supervisor data
+	move.l	(pre_pd).l,d0
+	and.l	#$10,d0
+	chkl	d0,0,68			; nor marked page C modified before the fault
 
 ;------------------------------- 24-29: the same, the data from a register
 	move.l	#0,($CFFC).l
@@ -425,6 +430,7 @@ h_aerr:
 	move.l	28(sp),(last_fa).l
 	move.w	20(sp),(last_ssw).l
 	move.l	($CFFC).l,(pre_wr).l
+	move.l	($4430).l,(pre_pd).l
 	move.l	(fix_addr).l,a0
 	move.l	(fix_val).l,(a0)
 	pflusha

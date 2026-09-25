@@ -888,9 +888,12 @@ task run_round;
 		// Waiting for the 16-bit bus to be idle is NOT enough, because it is
 		// already idle while the write sits queued -- that is exactly how BSR
 		// and PEA came to read back as if they had never pushed.  What has to
-		// go quiet is l1_wr_busy, the membus' own "a write is outstanding",
-		// which is the same signal the core stalls on.  clkena_in is not
-		// gated by ce, so this drains with the core held still.
+		// go quiet is every write the memory units hold: the DMU's slot, and
+		// dmu_wr_pend -- a write accepted and not yet on the bus, in the DMU
+		// or the membus (until 2026-09-25 the membus' own l1_wr_busy, from
+		// when writes went to it directly).  clkena_in is not gated by ce,
+		// and the memory units run every clock, so this drains with the core
+		// held still.
 		// A register-destination FPU operation is released to the background
 		// (ap040_pipe_fpu.v's fpu_bg) and may still be computing when the
 		// round's last instruction retires. The engine runs only with ce, so
@@ -909,7 +912,7 @@ task run_round;
 		ce = 0;
 		hold_bus = 0;
 		drain = 0;
-		while (drain < 1024 && (dut.l1_wr_busy || busstate != 2'b01)) begin
+		while (drain < 1024 && (dut.dmu_wr_pend || dut.u_dmu.w_slot || busstate != 2'b01)) begin
 			@(posedge clk); drain = drain + 1;
 		end
 		repeat (2) @(posedge clk);
