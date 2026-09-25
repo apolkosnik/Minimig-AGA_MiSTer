@@ -74,6 +74,10 @@ module ap040_pipe_membus
 	output reg        rvalid_a,
 
 	input      [31:0] address_b,
+	// The address the program wrote to, for the window's snoop: the window
+	// is logical, and with the DMU above this unit address_b is physical
+	// (2026-09-25; tied to address_b where nothing translates).
+	input      [31:0] la_b,
 	input      [31:0] data_b,      // right-aligned by size_b
 	input             wren_b,
 	input       [1:0] size_b,
@@ -195,8 +199,10 @@ reg  [1:0] who;         // whose it is
 
 reg        a_pend;      // a fetch is wanted and has not been returned
 reg [31:0] a_addr;
-// Writes are snooped a cycle after they are accepted, from w_addr, never from
-// the address the CPU is presenting (2026-09-25): that address is EA-fetch's
+// Writes are snooped a cycle after they are accepted, from w_sla -- the
+// write's LOGICAL address, as the window is: la_b, which the DMU supplies
+// beside its physical address_b -- never from the address the CPU is
+// presenting (2026-09-25): that address is EA-fetch's
 // latest signal, and every compare the window made against it ran on into
 // pf_base, q_a and the fill -- the bus16 top's worst path, reached from each
 // of EA-fetch's address sources in turn as the others were taken off it. In
@@ -262,6 +268,7 @@ reg [31:0] b_addr;
 reg  [1:0] b_size;
 reg        w_pend;      // a write has been accepted and has not been sent
 reg [31:0] w_addr, w_data;
+reg [29:0] w_sla;       // the write's logical longword, for the snoop
 reg  [1:0] w_size;
 // Captured WITH each request, not read when the transaction is finally
 // sent: a posted write can sit here across the very commit that changes the
@@ -367,7 +374,7 @@ wire        dfr_onbus  = pf_out && !pf_ack && !pf_kill && (a_lw == pf_next) && (
 // to touch both, whatever its size and alignment (restructuring plan, phase
 // 5): too much only empties the window once more than it had to, and a
 // write next to the instruction stream is rare.
-wire [29:0] w_lo       = w_addr[31:2];
+wire [29:0] w_lo       = w_sla;
 wire        w_accept   = wren_b && !w_pend && !w_block && !w_receipt;
 // Distances into the window, modular like req_k: a window can span the top
 // of the address space, and ordered compares against pf_base + 4 missed
@@ -427,7 +434,7 @@ always @(posedge clk) begin
 		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0; a_dfr <= 1'b0; w_snoop <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
 		a_sup <= 1'b1; b_fc <= `AP040_FC_SUPER_DATA; w_fc <= `AP040_FC_SUPER_DATA;
-		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
+		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L; w_sla <= 30'd0;
 		rvalid_a <= 1'b0; rvalid_b <= 1'b0;
 		q_a <= 16'd0; q_a2 <= 16'd0; q_b <= 32'd0;
 		mem_req <= 1'b0; mem_write <= 1'b0; mem_instr <= 1'b0;
@@ -531,6 +538,7 @@ always @(posedge clk) begin
 		end
 		if (w_accept) begin
 			w_addr <= address_b;
+			w_sla  <= la_b[31:2];
 			w_data <= data_b;
 			w_size <= size_b;
 			w_x    <= xlat_e && crosses(address_b, size_b, pg_mask);

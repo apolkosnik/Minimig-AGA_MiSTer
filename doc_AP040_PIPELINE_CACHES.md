@@ -291,6 +291,14 @@ port protocols it saw from membus.
   translates both pages, then reads its bytes.
 - membus reports only physical bus errors: mem_flt is the bus error alone,
   wr_sync low, no crossing split, no probes.
+- The window's snoop (A3). The window is logical, and with the DMU above
+  it membus receives each write translated; the snoop compared the one with
+  the other, so with code mapped away from its physical address a store into
+  the window left the replaced words there. Programs never showed it -- the
+  CPU's own store snoop refetches what it has already taken, and that
+  refetch empties the window -- but nothing stood in front of the window
+  itself. The DMU now hands membus the write's logical address as well
+  (m_la), and the snoop compares that.
 
 Tests changed: tb_ap040_pipe_program.v's "walker and 16-bit bus active
 together" assertion -- true of the old structure, not a requirement -- is
@@ -305,7 +313,9 @@ membus driven at the CPU's ports: a write presented during a read's failing
 search, a read behind a write waiting in the DMU, a refused fetch, a search
 behind a committed write). tb_ap040_pipe_wrreceipt_bus16.v times its
 clock-enable holes from the DMU's acceptance; tb_dat_replay_pipe.v drains
-the DMU's writes.
+the DMU's writes. A3: t_smc_mmu.s (stores rewriting prefetched code run
+through an alias of it, both cores) and tb_ap040_pipe_dmuport.v test 7 (a
+write into the window through a page mapped elsewhere, no CPU in front).
 
 ## Tests
 

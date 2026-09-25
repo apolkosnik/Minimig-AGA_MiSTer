@@ -119,6 +119,9 @@ module ap040_pipe_dmu
 	output            m_sup,
 	output            m_fc_ovr,
 	output      [2:0] m_fc_val,
+	// the logical address of the write on m_wr: the bus controller's
+	// prefetch window is logical, and snoops writes by it
+	output     [31:0] m_la,
 	// translated reads, from registers
 	output            m_rx,
 	output     [31:0] m_rx_addr,
@@ -302,6 +305,7 @@ wire        r_issue   = (rs == RS_BYTE) && !r_wait && r_go;
 assign m_wr     = s_post || w_thru;
 assign m_rd     = r_thru;
 assign m_addr   = s_post ? (w_x ? w_byte_pa : w_pa1) : c_addr;
+assign m_la     = s_post ? (w_x ? w_byte_la : w_la) : c_addr;
 assign m_size   = s_post ? (w_x ? `AP040_SZ_B : w_size) : c_size;
 assign m_wdata  = s_post ? (w_x ? {24'd0, w_byte} : w_data) : c_wdata;
 assign m_sup    = s_post ? w_sup : c_sup;

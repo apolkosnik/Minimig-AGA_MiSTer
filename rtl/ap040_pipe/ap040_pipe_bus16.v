@@ -101,7 +101,7 @@ wire [31:0] d_addr, d_pa;
 wire        dmu_wr_pend;
 
 // the bus controller's port B, physical, from the DMU
-wire [31:0] bb_addr, bb_wdata, bb_q, bb_rx_addr;
+wire [31:0] bb_addr, bb_la, bb_wdata, bb_q, bb_rx_addr;
 wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle;
 wire        bb_rx;
@@ -164,7 +164,7 @@ ap040_pipe_dmu u_dmu
 	.wr_pend (dmu_wr_pend),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa),
-	.m_addr (bb_addr), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
+	.m_addr (bb_addr), .m_la (bb_la), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
@@ -200,7 +200,7 @@ ap040_pipe_membus u_bus
 	.address_a(l1_addr_a), .en_a (l1_req_a),
 	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 
-	.address_b(bb_addr), .data_b(bb_wdata), .wren_b(bb_wr),
+	.address_b(bb_addr), .la_b(bb_la), .data_b(bb_wdata), .wren_b(bb_wr),
 	.size_b   (bb_size),   .rd_b  (bb_rd),
 	.wr_busy  (), .wr_busy_w(bb_wr_busy_w), .q_b  (bb_q), .rvalid_b(bb_rvalid),
 

@@ -111,7 +111,7 @@ ap040_pipe_membus u_bus
 	.address_a(l1_addr_a), .en_a (l1_req_a),
 	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 
-	.address_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
+	.address_b(l1_addr_b), .la_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
 	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),
 	.wr_busy  (l1_wr_busy), .wr_busy_w(l1_wr_busy_w), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
 

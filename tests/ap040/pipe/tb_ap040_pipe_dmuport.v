@@ -42,6 +42,12 @@
 //      held fetch of page $A is refused, not read from the entry's empty   //
 //      frame. The read it waits behind is through an instruction TTR, so   //
 //      the peek's translation is still page $A's.                          //
+//   7. A write into the prefetch window, with the code mapped elsewhere:   //
+//      page 8 is physical $5000. A fetch of $8100 lets the window read     //
+//      ahead; a write to logical $8108 -- physical $5108 -- must empty it, //
+//      and the fetch of $8108 return the written words. The window is     //
+//      logical; the bus controller sees the write's physical address, and  //
+//      matched that against it the window kept the old words.             //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -104,7 +110,7 @@ wire        d_req, d_write, d_acc, d_sup, d_pass, d_flt;
 wire [31:0] d_addr, d_pa;
 wire        i_req, i_sup, i_pass, i_flt, ip_sup, ip_hit;
 wire [31:0] i_addr, i_pa, ip_addr, ip_pa;
-wire [31:0] bb_addr, bb_wdata, bb_q, bb_rx_addr;
+wire [31:0] bb_addr, bb_la, bb_wdata, bb_q, bb_rx_addr;
 wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle, bb_rx;
 wire  [2:0] bb_fc_val, bb_rx_fc;
@@ -130,7 +136,7 @@ ap040_pipe_dmu u_dmu
 	.wr_pend (wr_pend),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa),
-	.m_addr (bb_addr), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
+	.m_addr (bb_addr), .m_la (bb_la), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
@@ -158,7 +164,7 @@ ap040_pipe_membus u_bus
 (
 	.clk (clk), .nreset (nreset),
 	.address_a (a_addr), .en_a (en_a), .q_a (q_a), .q_a2 (q_a2), .rvalid_a (rvalid_a),
-	.address_b (bb_addr), .data_b (bb_wdata), .wren_b (bb_wr), .size_b (bb_size), .rd_b (bb_rd),
+	.address_b (bb_addr), .la_b (bb_la), .data_b (bb_wdata), .wren_b (bb_wr), .size_b (bb_size), .rd_b (bb_rd),
 	.wr_busy (), .wr_busy_w (bb_wr_busy_w), .q_b (bb_q), .rvalid_b (bb_rvalid),
 	.sup (1'b1), .sup_b (bb_sup), .pf_inval (1'b0), .fc_ovr (bb_fc_ovr), .fc_ovr_val (bb_fc_val),
 	.mem_req (mem_req), .mem_write (mem_write), .mem_instr (mem_instr), .mem_size (mem_size),
@@ -237,6 +243,7 @@ always @(posedge clk) if (nreset) begin
 	if (walker_req && !wk_q && committed != 0)
 		fail("a table-walker access started with a committed write not yet in memory");
 	if (u_dmu.w_acc) committed = committed + sz_bytes(u_dmu.w_size);
+	if (u_dmu.w_thru && !u_dmu.m_wr_busy_w) committed = committed + sz_bytes(c_size);
 	if (mem_ack && mem_write) committed = committed - sz_bytes(mem_size);
 end
 
@@ -329,6 +336,7 @@ initial begin
 	wr32(16'h4200, 32'h0000_4403);
 	for (i = 0; i < 16; i = i + 1) wr32(16'h4400 + i * 4, (i << 12) | 3);
 	wr32(16'h4428, 32'h0000_0000);
+	wr32(16'h4420, 32'h0000_5003);   // page 8 -> physical $5000 (test 7)
 	wr32(16'h5000, 32'h0BAD_0BAD);
 	wr32(16'h5100, 32'h4E71_4E75);   // NOP, RTS: instruction words on page 5
 	repeat (4) step;
@@ -426,6 +434,24 @@ initial begin
 	if (f_q !== 16'h4AFC) fail("6: the held fetch's refusal did not answer $4AFC");
 	itt0 = 32'd0;
 	mem_lat = 1;
+
+	//------------------------------------------------------------- test 7
+	repeat (20) step;
+	wr32(16'h5100, 32'h4E71_4E71);
+	wr32(16'h5104, 32'h4E71_4E71);
+	wr32(16'h5108, 32'h4E71_4E71);
+	wr32(16'h510C, 32'h4E71_4E71);
+	fetch(32'h0000_8100);                // the window reads ahead from here
+	if (f_flt || f_q !== 16'h4E71) fail("7: a fetch of page 8 did not return its word");
+	repeat (30) step;                    // ...through $810C
+	write_hold(32'h0000_8108, 32'h5247_5247);
+	repeat (20) step;
+	if (rd32(16'h5108) !== 32'h5247_5247) fail("7: the write to logical $8108 did not reach physical $5108");
+	fetch(32'h0000_8108);
+	if (f_flt || f_q !== 16'h5247) begin
+		$display("    fetched %h", f_q);
+		fail("7: a fetch returned the words a write had replaced (the window kept them)");
+	end
 
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");

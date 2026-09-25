@@ -95,7 +95,7 @@ reg  [31:0] mem_rdata = 32'd0;
 ap040_pipe_membus dut (
 	.clk(clk), .nreset(nreset),
 	.address_a(address_a), .en_a(en_a), .q_a(q_a), .rvalid_a(rvalid_a),
-	.address_b(address_b), .data_b(data_b), .wren_b(wren_b),
+	.address_b(address_b), .la_b(address_b), .data_b(data_b), .wren_b(wren_b),
 	.size_b(size_b), .rd_b(rd_b), .wr_busy(wr_busy),
 	.q_b(q_b), .rvalid_b(rvalid_b),
 	.sup(1'b1), .sup_b(1'b1),
