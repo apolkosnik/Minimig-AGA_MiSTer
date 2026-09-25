@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review; stages A-D and R
-built (below, "Stage A as built" through "Stage R as built"). Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stages A-E and R
+built (below, "Stage A as built" through "Stage E as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -782,6 +782,105 @@ Tests:
   a full line read it is written after the four reads. A line a snoop hit
   while it was out is not put back.
 - tb_ap040_pipe_dblfault_bus16.v case D.
+
+## Stage E as built
+
+Throughput, measured first. The program bench's Dhrystone, on the bus16
+top with both caches on, spent its 437,103 cycles (stage R) like this:
+- 88,333 cycles with a write waiting for the bus: every write is written
+  through the 16-bit bus, and the DMU held one;
+- about 110,000 with EA-fetch stalled on an outstanding read;
+- about 90,000 with EA-calculate empty.
+A build of Dhrystone with a copyback data TTR (not in the repository)
+removed nearly all the bus's writes (181k busy cycles to 4k) but only 8%
+of the time. Its writes still waited about two cycles each for their
+translation to pass. Its reads were unchanged.
+
+Built: a store buffer in the DMU.
+- Every write for the bus waits there in order for the bus controller: a
+  write sent, a push, a copyback write going alone.
+  - Four entries. The bus controller holds one more.
+  - An entry is the bus write, and for stage R the whole write it belongs
+    to (a write crossing a page goes out a byte at a time).
+  - A write is accepted when there is room, not when the bus is free.
+- The data cache takes a write's update as the write enters, in order, as
+  before. So a read that hits never waits for the buffer.
+- What waits until the buffer is empty:
+  - a read that goes to the bus (straight through, translated, or a byte
+    of a crossing read);
+  - a line read. A read or copyback write that misses meanwhile is looked
+    up again once the buffer is empty, since a buffered write may be to
+    its line;
+  - on the bus16 top, a fetch from memory (the bus controller's f_req and
+    the IMU's f_free both);
+  - the table walker (wr_pend);
+  - CINV, CPUSH, PFLUSH, PTEST, and a MOVEC to an MMU register, which start
+    only with the memory side idle, the buffer included. The 68040 lets
+    every earlier write complete first (10.3); software pushes the cache
+    before a DMA reads memory;
+  - the push engine's end: a push is done when its last write is done on
+    the bus, not in the buffer.
+- The prefetch window's snoop sees each write as the buffer takes it
+  (sb_accept, sb_sla), not as the bus controller does, which is now later.
+- Stage R's record is the buffer's head as the bus controller takes it.
+- Result, on the program bench (bus16 top, both caches on), stage R to E,
+  first phase and the phase with the bench's memory latency:
+  - dhry: 437,103 to 374,647 (-14.3%); 538,939 to 441,672 (-18.0%);
+  - t_fpu: -1.1%; -1.9%;
+  - every other program within 0.3% either way. The small increases come
+    from a write reaching the bus controller a cycle later, through the
+    buffer. Handing it straight on when the buffer is empty would put the
+    CPU's late address back onto the bus controller's registers.
+- Fit at 25 ns, bus16 top: 41.89 MHz, +1.127 ns, 24,135 ALMs, 36 RAM
+  blocks (R: 40.01 MHz, +0.008, 24,247, 35). The extra block is the buffer's
+  address array, which Quartus put in an M10K, as it did the line read
+  buffer. The worst paths are a load's data returning into EA-fetch's
+  operand (the DMU's answer select), with no buffer logic on them. The
+  bus controller's write address now comes from the buffer's registers, not
+  the CPU's late address, which was the worst path of an earlier stage R
+  fit.
+
+Measured but not built:
+- A translated write waits two cycles for its translation to pass. It
+  could be accepted in the cycle the translation passes, but that puts the
+  MMU's pass logic onto EA-fetch's stall, the core's critical chain. It
+  could be accepted before translation, but then a refusal is imprecise,
+  and this core restarts the faulting instruction.
+- Two reads in flight at the operand port. That needs the CPU's port-B
+  protocol and EX's load return reworked, which is the restructuring
+  plan's domain (its phase 5 pipelined loads already send a load on as its
+  read goes out).
+- Back-to-back line transfers. The 16-bit adapter's contract is one stable
+  request at a time, with an idle cycle between transactions. A line
+  arrives as four transactions, and Dhrystone has 36 data misses. The line
+  interface belongs with the native 32-bit/16-byte-line DDR3 interface
+  queued after the caches.
+
+Tests:
+- tb_ap040_pipe_dcache.v test 22, on a slow bus. It covers:
+  - write-through writes taken without waiting for the bus, four behind the
+    bus controller's, the next waiting, reaching the bus in order;
+  - a hit answered while they wait;
+  - a miss, and a read with DE clear, going to the bus only after them,
+    returning the buffered write's data;
+  - a bus error on a buffered write reporting that write, the writes around
+    it landing;
+  - the window's snoop at the buffer;
+  - a miss behind buffered writes (a read's, and a copyback write's) looked
+    up once more when they are out, not over and over. The way it replaces
+    is the counter's after exactly those lookups, since each lookup counts
+    (4.1).
+- tb_ap040_pipe_program.v asserts 10.3 where a maintenance instruction
+  starts: no write in the store buffer, none with the bus controller. The
+  program cannot see it, as its own reads wait for the buffer. Its $F144
+  mode 1 raises the level on vector 32's frame write reaching the bus: a
+  frame beat leaving EA-fetch can now come before $F144's own write, still
+  buffered, arms it.
+- tb_ap040_pipe_dcache.v test 20: the window's snoop names a crossing
+  write's last byte's longword.
+- The benches that assumed one write held: tb_ap040_pipe_dmuport.v test 2
+  (the second write now waits in the buffer), and tb_ap040_pipe_program.v's
+  write-ordering monitor (a buffered write has not landed).
 
 ## Tests
 

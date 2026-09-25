@@ -92,6 +92,18 @@
 //      asked for and the beat that errs; a snoop on it, swept from before  //
 //      the line read to after the replacement, leaves it invalid and       //
 //      unwritten whenever it lands.                                        //
+// The store buffer (caches stage E):                                       //
+//  22. On a slow bus, write-through writes are taken into the buffer       //
+//      without waiting for the bus: four behind the one the bus           //
+//      controller holds, the next waiting; they reach the bus in order.   //
+//      A read that hits is answered while they wait; one that misses, and //
+//      one with DE clear, go to the bus only after them -- a read of a    //
+//      longword a buffered write holds returns the write. A bus error on  //
+//      a buffered write reports that write; the writes around it land.   //
+//      The window's snoop sees each write as the buffer takes it. A miss  //
+//      behind buffered writes -- a read's, a copyback write's -- is looked //
+//      up once more when they are out, not over and over: the way it      //
+//      replaces is the counter's after exactly those lookups.             //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -165,6 +177,8 @@ wire [31:0] pw_fa;
 wire  [7:0] pw_wb1s;
 wire [127:0] pw_pd;
 reg         pw_ack_b = 1'b0;
+wire        sb_accept, sb_empty;
+wire [29:0] sb_sla;
 wire  [1:0] mem_size;
 wire [31:0] mem_addr, mem_wdata;
 wire  [2:0] mem_fc;
@@ -211,7 +225,8 @@ ap040_pipe_dmu u_dmu
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
 	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle), .m_wberr (bb_wr_berr),
 	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
-	.pw_exc (pw_exc), .pw_ack (pw_ack_b)
+	.pw_exc (pw_exc), .pw_ack (pw_ack_b),
+	.sb_accept (sb_accept), .sb_sla (sb_sla), .sb_empty (sb_empty)
 );
 
 ap040_pipe_mmu u_mmu
@@ -1140,6 +1155,9 @@ initial begin
 	chk_pw(16'h0005, 32'h0000_0FFE, 8'h85, {96'd0, 32'hC3D4_A1B2}, 1'b0, "20: a longword crossing a page");
 	if (mem[16'h0FFE] !== 8'hA1 || mem[16'h0FFF] !== 8'hB2 || mem[16'h1001] !== 8'hD4)
 		fail("20: a crossing write's other bytes did not land");
+	// the window's snoop names each byte's own longword (caches stage E):
+	// the last, in the second page
+	if (sb_sla !== 30'h0000_0400) fail("20: the snoop did not name a crossing write's last byte's longword");
 	pw_let_go;
 	// a copyback write allocating nothing (an exception frame's) that misses
 	// goes to the bus alone: its fault is reported by its logical address, a
@@ -1330,6 +1348,123 @@ initial begin
 						fail("21: a line the snoop missed changed");
 			end
 	end
+	cinv_p(2'b11, 32'd0, 1'b1);
+	dtt1 = 32'd0;
+	mem_lat = 1;
+
+	//------------------------------------------------------------- test 22
+	// write-through (untranslated, DE set), a slow bus
+	cinv_p(2'b11, 32'd0, 1'b1);
+	want_rd(32'h0000_7E00, `AP040_SZ_L, rd32(16'h7E00), "22: a line cached");
+	quiet;
+	mem_lat = 10;
+	lg = log_n;
+	t0 = 0;
+	for (i = 0; i < 6; i = i + 1) begin
+		c_addr = 32'h0000_7F00 + i * 4; c_size = `AP040_SZ_L; c_wdata = 32'h2200_0000 + i; c_wr = 1'b1;
+		#0;
+		k = 0;
+		while (c_wr_busy_w && k < 400) begin step; k = k + 1; end
+		// the first five only wait out the data cache's update of the last
+		if ((i < 5) && (k > 3)) begin
+			$display("    write %0d waited %0d cycles", i, k);
+			fail("22: a write waited for the bus with room in the store buffer");
+		end
+		if (i == 5) t0 = k;
+		step;
+		c_wr = 1'b0;
+		if (sb_sla !== ((32'h0000_7F00 + i * 4) >> 2)) fail("22: the window's snoop did not see a write as it was taken");
+	end
+	if (t0 < 4) begin
+		$display("    the sixth write waited %0d cycles", t0);
+		fail("22: a write was taken into a full store buffer");
+	end
+	// a read that hits, answered while writes wait
+	want_rd(32'h0000_7E04, `AP040_SZ_L, rd32(16'h7E04), "22: a hit behind buffered writes");
+	if (sb_empty) fail("22: the hit waited for the store buffer (or the test no longer tests)");
+	// a read that misses, of a longword a buffered write holds: after it
+	want_rd(32'h0000_7F14, `AP040_SZ_L, 32'h2200_0005, "22: a miss behind a buffered write to its longword");
+	quiet;
+	t0 = 0;
+	for (i = lg; i < log_n; i = i + 1) if (log_write[i]) t0 = t0 + 1;
+	if (t0 != 6) fail("22: not six writes on the bus");
+	for (i = 0; i < 6; i = i + 1)
+		if (!log_write[lg + i] || log_addr[lg + i] != 32'h0000_7F00 + i * 4) begin
+			$display("    bus %0d: %h %b", i, log_addr[lg + i], log_write[lg + i]);
+			fail("22: the writes were not on the bus first, in order");
+		end
+	// DE clear: a read straight through waits for the buffer too
+	dc_en = 1'b0;
+	repeat (2) step;
+	wr(32'h0000_7F40, `AP040_SZ_L, 32'h2201_0000);
+	wr(32'h0000_7F44, `AP040_SZ_L, 32'h2201_0004);
+	want_rd(32'h0000_7F44, `AP040_SZ_L, 32'h2201_0004, "22: DE clear, a read behind a buffered write");
+	quiet;
+	dc_en = 1'b1;
+	// a bus error on the second of three buffered writes: that one reported
+	wberr_arm = 1'b1; wberr_addr = 32'h0000_7F54;
+	wr(32'h0000_7F50, `AP040_SZ_L, 32'h2202_0000);
+	wr(32'h0000_7F54, `AP040_SZ_L, 32'h2202_0004);
+	wr(32'h0000_7F58, `AP040_SZ_L, 32'h2202_0008);
+	quiet;
+	if (wberr_arm) begin wberr_arm = 1'b0; fail("22: the buffered write never erred (the test no longer tests)"); end
+	chk_pw(16'h0005, 32'h0000_7F54, 8'h85, {96'd0, 32'h2202_0004}, 1'b0, "22: a buffered write's bus error");
+	if (rd32(16'h7F50) !== 32'h2202_0000 || rd32(16'h7F58) !== 32'h2202_0008)
+		fail("22: the writes around the one that erred did not land");
+	pw_let_go;
+	// A read missing behind buffered writes: its lookup, one more once they
+	// are out, then the line read -- the way replaced is the counter's two
+	// on (each lookup counts, 4.1). Set $3E full and clean first.
+	cinv_p(2'b11, 32'd0, 1'b1);
+	mem_lat = 1;
+	for (w = 0; w < 4; w = w + 1) want_rd(32'h0000_03E0 + w * 32'h400, `AP040_SZ_L, rd32(16'h03E0 + w * 32'h400), "22: set $3E");
+	quiet;
+	// (the bus controller takes one write at once: two or more, so some wait)
+	for (d = 1; d < 4; d = d + 1) begin
+		mem_lat = 6 + d * 5;
+		for (i = 0; i <= d; i = i + 1) wr(32'h0000_7F80 + i * 4, `AP040_SZ_L, 32'h2203_0000 + i);
+		k = (u_dmu.rep + 2) % 4;
+		v = {u_dmu.u_arr.tags.mem[6'h3E][k*22 +: 22], 6'h3E, 4'h0};
+		t0 = 0;
+		fork
+			want_rd(32'h0000_13E0 + d * 32'h400, `AP040_SZ_L, rd32(16'h13E0 + d * 32'h400), "22: a miss behind buffered writes");
+			begin repeat (80) begin if (u_dmu.r_wsb) t0 = 1; step; end end
+		join
+		if (t0 == 0) fail("22: the miss never waited for the buffer (the test no longer tests)");
+		quiet;
+		if (lvalid(v)) begin
+			$display("    %0d writes: way %0d's line %h still valid", d + 1, k, v);
+			fail("22: a miss behind buffered writes was looked up other than twice");
+		end
+	end
+	// ...and a copyback write that misses behind a buffered one: the same
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	cinv_p(2'b11, 32'd0, 1'b1);
+	mem_lat = 1;
+	for (w = 0; w < 4; w = w + 1) want_rd(32'h0000_03D0 + w * 32'h400, `AP040_SZ_L, rd32(16'h03D0 + w * 32'h400), "22: set $3D");
+	quiet;
+	mem_lat = 10;
+	c_nalloc = 1'b1;                                      // allocating nothing: to the bus, buffered --
+	wr(32'h0000_7F90, `AP040_SZ_L, 32'h2204_0000);        // one with the bus controller,
+	wr(32'h0000_7F94, `AP040_SZ_L, 32'h2204_0004);        // one waiting
+	c_nalloc = 1'b0;
+	while (u_dmu.su_v || (u_dmu.ws != 3'd0)) step;        // both out of the slot, looked up
+	if (sb_empty) fail("22: the copyback writes alone are not buffered (the test no longer tests)");
+	k = (u_dmu.rep + 2) % 4;
+	v = {u_dmu.u_arr.tags.mem[6'h3D][k*22 +: 22], 6'h3D, 4'h0};
+	t0 = 0;
+	fork
+		wr(32'h0000_13D0, `AP040_SZ_L, 32'h2204_13D0);    // a copyback write that misses, allocating
+		begin repeat (40) begin if (u_dmu.su_wsb) t0 = 1; step; end end
+	join
+	if (t0 == 0) fail("22: the copyback miss never waited for the buffer (the test no longer tests)");
+	quiet;
+	if (lvalid(v)) begin
+		$display("    way %0d's line %h still valid", k, v);
+		fail("22: a copyback miss behind a buffered write was looked up other than twice");
+	end
+	if (cword(32'h0000_13D0) !== 32'h2204_13D0) fail("22: the copyback write that missed is not in its line");
 	cinv_p(2'b11, 32'd0, 1'b1);
 	dtt1 = 32'd0;
 	mem_lat = 1;

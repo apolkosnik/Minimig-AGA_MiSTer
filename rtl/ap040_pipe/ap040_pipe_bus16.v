@@ -215,7 +215,8 @@ ap040_pipe_dmu u_dmu
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
 	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle), .m_wberr (bb_wr_berr),
 	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
-	.pw_exc (pw_exc), .pw_ack (pw_ack)
+	.pw_exc (pw_exc), .pw_ack (pw_ack),
+	.sb_accept (sb_accept), .sb_sla (sb_sla), .sb_empty (sb_empty)
 );
 
 // The MMU (2026-09-25): rtl/ap040/ap040_mmu.v's rules and ATC with a
@@ -242,9 +243,14 @@ ap040_pipe_mmu u_mmu
 
 // The instruction memory unit: port A's prefetch window, and the fetch's
 // translation through the MMU's instruction port (TC.E).
-wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus, f_w_accept;
+wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus;
 wire [31:0] f_addr;
-wire [29:0] f_w_sla;
+// The window's snoop: writes as the DMU's store buffer takes them -- the
+// bus controller sees them only as they leave it (caches stage E) -- and a
+// fetch from memory waits until the buffer is empty, behind every write the
+// program made before it.
+wire        sb_accept, sb_empty;
+wire [29:0] sb_sla;
 ap040_pipe_imu u_imu
 (
 	.clk (clk), .nreset (nreset),
@@ -260,18 +266,18 @@ ap040_pipe_imu u_imu
 	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
 	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa), .x_cm (i_cm),
 	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa), .pk_cm (ip_cm),
-	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free && sb_empty),
 	.f_ack    (f_ack), .f_rdata (mem_rdata), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
-	.w_accept (f_w_accept), .w_sla (f_w_sla)
+	.w_accept (sb_accept), .w_sla (sb_sla)
 );
 
 ap040_pipe_membus u_bus
 (
 	.clk (clk), .nreset (nreset),
 
-	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_req    (f_req && sb_empty), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
 	.f_ack    (f_ack), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
-	.w_accept (f_w_accept), .w_sla (f_w_sla),
+	.w_accept (), .w_sla (),
 
 	.address_b(bb_addr), .la_b(bb_la), .data_b(bb_wdata), .wren_b(bb_wr),
 	.size_b   (bb_size),   .rd_b  (bb_rd),

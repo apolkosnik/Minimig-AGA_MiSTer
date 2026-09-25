@@ -22,10 +22,11 @@
 //      must be left down a cycle for the walker to let go of it (W_DROP):  //
 //      raised at once for the write, it never was, and nothing moved.      //
 //   2. Two writes on a slow memory: the first on the bus, the second      //
-//      accepted and waiting in the DMU for the bus controller to take it;  //
-//      then a read of the second's longword. The read must wait for that   //
-//      write: sent at once, it reached the bus controller first and read   //
-//      the memory as it was.                                               //
+//      accepted and waiting in the DMU for the bus controller to take it   //
+//      (in its write slot, or since caches stage E its store buffer); then //
+//      a read of the second's longword. The read must wait for that write: //
+//      sent at once, it reached the bus controller first and read the     //
+//      memory as it was.                                                   //
 //   3. A fetch of the invalid page: $4AFC with the fault, not a bus error; //
 //      then a fetch of page 5 returns its instruction words.               //
 //   4. A write accepted on a slow memory, then a read of a page the ATC     //
@@ -424,7 +425,8 @@ initial begin
 	mem_lat = 12;                        // the first write holds the bus
 	write_hold(32'h0000_5008, 32'h5555_AAAA);
 	write_hold(32'h0000_5004, 32'hAABB_CCDD);
-	if (u_dmu.ws != 3'd5) fail("2: the second write is not waiting in the DMU (the test no longer tests)");
+	if ((u_dmu.ws != 3'd5) && u_dmu.sb_empty)
+		fail("2: the second write is not waiting in the DMU (the test no longer tests)");
 	read_start(32'h0000_5004);
 	read_wait;
 	if (rd_flt || rd_q !== 32'hAABB_CCDD) begin

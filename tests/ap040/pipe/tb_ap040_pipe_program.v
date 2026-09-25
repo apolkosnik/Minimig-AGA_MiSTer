@@ -1,7 +1,7 @@
 //--------------------------------------------------------------------------//
 // AP040_PIPE - MC68040-style pipelined core (2026-09-24)                   //
 //                                                                          //
-// tb_ap040_pipe_program.v - the sequential core's self-checking programs  //
+// tb_ap040_pipe_program.v - the sequential core's self-checking programs   //
 //                                                                          //
 // tests/ap040/asm/*.s were written for rtl/ap040/ap040_core.v and run by   //
 // tests/ap040/tb_ap040_program.v. This is that bench around the pipelined  //
@@ -9,38 +9,42 @@
 // ready, varied wait states, and a level-held acknowledge that serves a    //
 // request issued without an idle gap the PREVIOUS data), the same reset    //
 // vectors at $0 (RESET_VECTORS=1), and the same protocol registers:        //
-//   $F100 w  failing test number       $F102 w  $600D pass / $BAD0 fail   //
-//   $F108 w  cycle stamp               $F110 w  interrupt level           //
-//   $F120    writes must carry FC=1    $F130 w  DMA-style poke of $3500   //
-//   $F134 w  a poke's address          $F136 w  poke the word there,      //
-//            behind the CPU (the data cache's tests; caches stage C)      //
-//   $F138 w  a peek's address          $F13A r  memory's word there,      //
-//            whatever the data cache holds (copyback; caches stage D)     //
-//   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N  //
-//   $F150 w  two devices: level, then a lower one after N cycles          //
-//   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has //
+//   $F100 w  failing test number       $F102 w  $600D pass / $BAD0 fail    //
+//   $F108 w  cycle stamp               $F110 w  interrupt level            //
+//   $F120    writes must carry FC=1    $F130 w  DMA-style poke of $3500    //
+//   $F134 w  a poke's address          $F136 w  poke the word there,       //
+//            behind the CPU (the data cache's tests; caches stage C)       //
+//   $F138 w  a peek's address          $F13A r  memory's word there,       //
+//            whatever the data cache holds (copyback; caches stage D)      //
+//   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N   //
+//   $F150 w  two devices: level, then a lower one after N cycles           //
+//   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has  //
 //            been read, holding the handler's first fetch a few cycles (2) //
-//   $F160 r  capability word: 7, coarse and fine interrupts, bus errors;  //
-//            not bit 5 -- IPLDLY is calibrated to the sequential core's   //
-//            cycles for t_exceptions' test 136, which is bypassed here,  //
-//            and its rule (IPEND) is this bench's claim invariant below   //
-//   $F140/$F142/$F154/$F146: bus errors on a data cycle, re-armed, on a   //
-//            fetch at an address, and on the next table-walk descriptor   //
+//   $F160 r  capability word: 7, coarse and fine interrupts, bus errors;   //
+//            not bit 5 -- IPLDLY is calibrated to the sequential core's    //
+//            cycles for t_exceptions' test 136, which is bypassed here,    //
+//            and its rule (IPEND) is this bench's claim invariant below    //
+//   $F140/$F142/$F154/$F146: bus errors on a data cycle, re-armed, on a    //
+//            fetch at an address, and on the next table-walk descriptor    //
 //                                                                          //
-// The program image is +prog=<hex>, built by tests/ap040/build_tests.sh.  //
+// The program image is +prog=<hex>, built by tests/ap040/build_tests.sh.   //
 //                                                                          //
-// Kept from the reference bench, on this core's own signals: the phantom- //
-// interrupt invariant (nothing accepted well after the level went idle)   //
-// and the mask invariant (a level 1-6 interrupt accepted at or below the  //
+// Kept from the reference bench, on this core's own signals: the phantom-  //
+// interrupt invariant (nothing accepted well after the level went idle)    //
+// and the mask invariant (a level 1-6 interrupt accepted at or below the   //
 // mask only on a claim it made while it qualified); and, added here, the   //
-// other half of that rule: a claim is not lost -- a request that         //
-// qualified and is still asserted is taken, whatever the mask does after. //
-// Not kept, because                                                       //
-// they name the sequential core's states: the exception-prefetch queue    //
-// invariant, the locked read-modify-write fetch window (this core has no  //
-// bus lock yet), and the exception-cycle function-code checks (tb_ap040_  //
-// pipe_excfc.v covers those). $F144's two moments are this core's own:    //
-// a frame beat of vector 32, and vector 32's handler address arriving.    //
+// other half of that rule: a claim is not lost -- a request that           //
+// qualified and is still asserted is taken, whatever the mask does after.  //
+// Not kept, because                                                        //
+// they name the sequential core's states: the exception-prefetch queue     //
+// invariant, the locked read-modify-write fetch window (this core has no   //
+// bus lock yet), and the exception-cycle function-code checks (tb_ap040_   //
+// pipe_excfc.v covers those). $F144's two moments are this core's own:     //
+// a frame write of vector 32 on the bus, and vector 32's handler address   //
+// arriving. The first was a frame beat leaving EA-fetch until the store    //
+// buffer (caches stage E): that can come before $F144's own write, still   //
+// buffered, reaches the bus and arms it -- on the bus the two keep their   //
+// order.                                                                   //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -227,7 +231,8 @@ always @(posedge clk) begin
 	end
 	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF144)
 		irq_exc_armed <= data_write[1:0];
-	else if (irq_exc_armed == 1 && dut.u_cpu.u_eaf.exc_writing && dut.u_cpu.u_eaf.exc_vec_r == 8'd32) begin
+	else if (irq_exc_armed == 1 && dut.u_cpu.u_eaf.exc_go && dut.u_cpu.u_eaf.exc_vec_r == 8'd32 &&
+	         mem_ready && busstate == 2'b11) begin
 		ipl_lvl <= 3'd2;
 		irq_exc_armed <= 0;
 	end
@@ -270,7 +275,7 @@ always @(posedge clk)
 // The table walker's own 32-bit physical port, tb_ap040_program.v's model:
 // an independent latency profile, and never an acknowledge on the 16-bit
 // bus, so a descriptor leaking onto that bus fails every MMU test.
-//
+                                                                            //
 // Ordering (2026-09-25). A table search must see every write the core has
 // committed to: a descriptor stored and then searched through is read as
 // stored (t_walk_order.s). The sequential core's bench asserted, and this
@@ -289,7 +294,8 @@ always @(posedge clk)
 // (caches stage D): a write the data cache takes instead of sending has
 // landed there -- the walker searches through that cache -- and a push, or
 // a copyback write sent alone, is counted from the cycle the DMU hands it
-// to the bus controller.
+// on. Since caches stage E every write the DMU sends goes into its store
+// buffer first: held there, it has not landed.
 reg        walker_pending, walker_armed, walker_we_latch;
 reg [31:0] walker_addr_latch, walker_wdat_latch;
 integer    wo_pend = 0;         // committed write bytes not yet landed
@@ -301,13 +307,14 @@ function integer sz_bytes;
 	end
 endfunction
 // The memory side's commitment: the DMU's acceptance of a tentative write
-// (its wr_busy low: w_acc), or an untranslated write handed to the bus
-// controller as it takes it.
+// (its wr_busy low: w_acc), or an untranslated write taken into its store
+// buffer.
 wire wo_commit_t = dut.u_dmu.w_acc;
-wire wo_commit_u = dut.u_dmu.w_thru && !dut.u_dmu.m_wr_busy_w;
+wire wo_commit_u = dut.u_dmu.w_thru;
 wire wo_cb       = dut.u_dmu.s_cb;                              // into the cache, not the bus
 wire wo_push     = dut.u_dmu.pb_wr || dut.u_dmu.su_pw;          // the cache's own writes
 wire wo_holds    = (dut.u_dmu.ws == 3'd5) || dut.u_bus.w_pend ||  // WS_POST, or with membus,
+                   !dut.u_dmu.sb_empty ||                       // or in the store buffer,
                    dut.u_dmu.pb_act || dut.u_dmu.su_post;       // or the cache's to send
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -538,6 +545,19 @@ always @(posedge clk)
 		         dut.u_bus.rvalid_b, dut.u_bus.rflt_b,
 		         dut.u_cpu.u_eaf.exc_go, dut.u_cpu.u_eaf.exc_ph, dut.u_cpu.u_eaf.exc_vec_r,
 		         dut.u_cpu.u_eaf.aerr_now, dut.u_cpu.u_eaf.exc_pend_aerr, dut.u_cpu.u_eaf.owe);
+	end
+
+// MC68040UM 10.3: CINV, CPUSH, PFLUSH and PTEST let every earlier write
+// complete first -- software pushes the cache before a DMA reads memory,
+// and memory must then hold everything written. The program cannot see
+// this itself (its own reads wait for the store buffer), so the bench
+// checks it where the instruction starts: no write in the DMU's store
+// buffer, none with the bus controller (caches stage E).
+always @(posedge clk)
+	if (nreset && dut.ce && dut.u_cpu.u_eaf.pm_start && (!dut.u_dmu.sb_empty || dut.u_bus.w_pend)) begin
+		errors = errors + 1;
+		$display("FAIL: a cache or ATC maintenance instruction started with a write still pending (pc=%h)", dbg_pc);
+		result = 2;
 	end
 
 //---------------------------------------------------------------------------
