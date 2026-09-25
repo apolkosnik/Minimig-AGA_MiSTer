@@ -1,6 +1,6 @@
 {
  "wait": 0,
- "rtl": "797632de82581ea5db5642a1b32747530b5b41d4",
+ "rtl": "85d95091d8ebf16815418bcad7c9be4fdfdb2277",
  "dirty": false,
  "cases": [
   {
@@ -373,8 +373,8 @@
    "instructions": 1,
    "words": 1,
    "local": {
-    "cycles_per_block": 2.0,
-    "cpi": 2.0,
+    "cycles_per_block": 1.0,
+    "cpi": 1.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1205,8 +1205,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1221,15 +1221,15 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 480,
+     "movem": 384,
      "fp": 0,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 13.0,
-    "cpi": 13.0,
+    "cycles_per_block": 12.0,
+    "cpi": 12.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1244,7 +1244,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 1056,
+     "movem": 960,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1257,8 +1257,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 19.0,
-    "cpi": 19.0,
+    "cycles_per_block": 12.0,
+    "cpi": 12.0,
     "counts": {
      "retired": 96,
      "rd": 768,
@@ -1273,15 +1273,15 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 1632,
+     "movem": 960,
      "fp": 0,
      "mul": 0,
      "div": 0
     }
    },
    "bus": {
-    "cycles_per_block": 43.0,
-    "cpi": 43.0,
+    "cycles_per_block": 36.0,
+    "cpi": 36.0,
     "counts": {
      "retired": 96,
      "rd": 768,
@@ -1296,7 +1296,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 3936,
+     "movem": 3264,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1309,8 +1309,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1325,7 +1325,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 384,
+     "movem": 288,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1361,8 +1361,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 18.0,
-    "cpi": 18.0,
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1377,7 +1377,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 1536,
+     "movem": 864,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1413,8 +1413,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 384,
@@ -1436,8 +1436,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 23.0,
-    "cpi": 23.0,
+    "cycles_per_block": 20.0,
+    "cpi": 20.0,
     "counts": {
      "retired": 96,
      "rd": 384,
@@ -1465,8 +1465,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 10.0,
-    "cpi": 10.0,
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1517,8 +1517,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 18.0,
-    "cpi": 18.0,
+    "cycles_per_block": 12.0,
+    "cpi": 12.0,
     "counts": {
      "retired": 96,
      "rd": 384,
@@ -1569,8 +1569,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1592,8 +1592,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 13.0,
-    "cpi": 13.0,
+    "cycles_per_block": 12.0,
+    "cpi": 12.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1621,8 +1621,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 6.0,
+    "cpi": 6.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1644,8 +1644,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 13.0,
-    "cpi": 13.0,
+    "cycles_per_block": 12.0,
+    "cpi": 12.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1829,8 +1829,8 @@
    "instructions": 1,
    "words": 3,
    "local": {
-    "cycles_per_block": 18.0,
-    "cpi": 18.0,
+    "cycles_per_block": 16.0,
+    "cpi": 16.0,
     "counts": {
      "retired": 96,
      "rd": 192,
@@ -1852,8 +1852,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 27.0,
-    "cpi": 27.0,
+    "cycles_per_block": 26.0,
+    "cpi": 26.0,
     "counts": {
      "retired": 96,
      "rd": 192,

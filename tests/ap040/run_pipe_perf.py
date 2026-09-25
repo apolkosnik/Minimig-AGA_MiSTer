@@ -168,8 +168,6 @@ def main():
                                            capture_output=True, text=True).stdout.strip()),
               "cases": rows}
     (args.work / "results.json").write_text(json.dumps(result, indent=1))
-    if args.write_baseline:
-        args.write_baseline.write_text(json.dumps(result, indent=1) + "\n")
     worse = 0
     if args.baseline:
         base = {r["name"]: r for r in json.loads(args.baseline.read_text())["cases"]}
@@ -185,6 +183,10 @@ def main():
                       "  fewer addresses from EA-calculate: " + ", ".join(lost) if lost else ""))
             worse += any(x > 1e-9 for x in d) or bool(lost)
     print("\n%d cases, %d failed%s" % (len(rows), bad, (", %d slower than the baseline or losing addresses" % worse) if args.baseline else ""))
+    # After the comparison: --baseline and --write-baseline are usually the
+    # same file, and writing first compared the run with itself.
+    if args.write_baseline:
+        args.write_baseline.write_text(json.dumps(result, indent=1) + "\n")
     sys.exit(1 if bad or (args.check and worse) else 0)
 
 
