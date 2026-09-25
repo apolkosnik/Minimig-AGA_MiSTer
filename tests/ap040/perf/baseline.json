@@ -1,6 +1,6 @@
 {
  "wait": 0,
- "rtl": "a093729b57ce22211b7cf6b54e67dd5ae5fad4e4",
+ "rtl": "3b93d2c9c3171b39687e40fcd7fac9ee6a99cd58",
  "dirty": false,
  "cases": [
   {
@@ -2245,8 +2245,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2260,7 +2260,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2268,8 +2268,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2283,7 +2283,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2297,8 +2297,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2312,7 +2312,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 672,
+     "bf": 576,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2320,8 +2320,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 12.0,
-    "cpi": 12.0,
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2335,7 +2335,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 960,
+     "bf": 864,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2349,8 +2349,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2364,7 +2364,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2372,8 +2372,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2387,7 +2387,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2401,8 +2401,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2416,7 +2416,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 672,
+     "bf": 576,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2424,8 +2424,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 12.0,
-    "cpi": 12.0,
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2439,7 +2439,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 960,
+     "bf": 864,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2453,8 +2453,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2468,7 +2468,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2476,8 +2476,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2491,7 +2491,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2505,8 +2505,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2520,7 +2520,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 672,
+     "bf": 576,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2528,8 +2528,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 12.0,
-    "cpi": 12.0,
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2543,7 +2543,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 960,
+     "bf": 864,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2557,8 +2557,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2572,7 +2572,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2580,8 +2580,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 4.0,
+    "cpi": 4.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2595,7 +2595,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 384,
+     "bf": 192,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2609,8 +2609,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 9.0,
-    "cpi": 9.0,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2624,7 +2624,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 672,
+     "bf": 576,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2632,8 +2632,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 12.0,
-    "cpi": 12.0,
+    "cycles_per_block": 11.0,
+    "cpi": 11.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2647,7 +2647,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 960,
+     "bf": 864,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2661,8 +2661,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2676,7 +2676,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2684,8 +2684,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2699,7 +2699,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2713,8 +2713,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2728,7 +2728,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 864,
+     "bf": 768,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2736,8 +2736,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 15.0,
-    "cpi": 15.0,
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2751,7 +2751,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 1248,
+     "bf": 1152,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2765,8 +2765,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2780,7 +2780,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2788,8 +2788,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2803,7 +2803,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2817,8 +2817,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2832,7 +2832,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 864,
+     "bf": 768,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2840,8 +2840,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 15.0,
-    "cpi": 15.0,
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2855,7 +2855,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 1248,
+     "bf": 1152,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2869,8 +2869,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2884,7 +2884,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2892,8 +2892,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2907,7 +2907,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2921,8 +2921,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2936,7 +2936,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 864,
+     "bf": 768,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2944,8 +2944,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 15.0,
-    "cpi": 15.0,
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -2959,7 +2959,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 1248,
+     "bf": 1152,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2973,8 +2973,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -2988,7 +2988,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -2996,8 +2996,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.0,
-    "cpi": 7.0,
+    "cycles_per_block": 5.0,
+    "cpi": 5.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3011,7 +3011,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 480,
+     "bf": 288,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -3025,8 +3025,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 11.0,
-    "cpi": 11.0,
+    "cycles_per_block": 10.0,
+    "cpi": 10.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -3040,7 +3040,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 864,
+     "bf": 768,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -3048,8 +3048,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 15.0,
-    "cpi": 15.0,
+    "cycles_per_block": 14.0,
+    "cpi": 14.0,
     "counts": {
      "retired": 96,
      "rd": 96,
@@ -3063,7 +3063,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 1248,
+     "bf": 1152,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -3077,8 +3077,8 @@
    "instructions": 1,
    "words": 2,
    "local": {
-    "cycles_per_block": 8.0,
-    "cpi": 8.0,
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3092,7 +3092,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 576,
+     "bf": 480,
      "movem": 0,
      "fp": 0,
      "mul": 0,
@@ -3100,8 +3100,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 8.0,
-    "cpi": 8.0,
+    "cycles_per_block": 7.0,
+    "cpi": 7.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3115,7 +3115,7 @@
      "mem": 0,
      "addr": 0,
      "port": 0,
-     "bf": 576,
+     "bf": 480,
      "movem": 0,
      "fp": 0,
      "mul": 0,
