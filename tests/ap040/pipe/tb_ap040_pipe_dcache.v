@@ -76,6 +76,22 @@
 //      started once the push has begun walks the tables (ap040_pipe_mmu.v's//
 //      walker, held by the DMU's wr_pend) and must read the pushed         //
 //      descriptor. Swept over the translation's start.                     //
+// A write-back's bus error (caches stage R; MC68040UM 8.4.6):              //
+//  20. A write the bus controller errs on is held for EA-fetch with its    //
+//      frame's fields: SSW, FA, WB1S, WB1D memory-aligned (Table 8-5) for  //
+//      each size and offset, MOVES's TT and TM; a crossing write whole; a  //
+//      push's line in PD0-PD3, the push engine busy (CPUSH not done) until //
+//      its last write is; a MOVE16's four longwords; an exception frame's  //
+//      write a double fault, also when it errs behind a fault already held;//
+//      a copyback write allocating nothing reported by its logical address;//
+//      a second fault dropped while one is held, and taken when it comes   //
+//      in the cycle the first is let go.                                   //
+//  21. A replaced dirty line is written only after its new line is in     //
+//      (4.6.1); if the new line's read errs it goes back to its place,    //
+//      valid and dirty, nothing written (4.6.2) -- swept over the longword //
+//      asked for and the beat that errs; a snoop on it, swept from before  //
+//      the line read to after the replacement, leaves it invalid and       //
+//      unwritten whenever it lands.                                        //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -142,6 +158,13 @@ wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle, bb_rx;
 wire  [2:0] bb_fc_val, bb_rx_fc;
 wire        mem_req, mem_write, mem_instr;
+// a write-back's bus error (caches stage R)
+wire        bb_wr_berr, pw_pend, pw_exc;
+wire [15:0] pw_ssw;
+wire [31:0] pw_fa;
+wire  [7:0] pw_wb1s;
+wire [127:0] pw_pd;
+reg         pw_ack_b = 1'b0;
 wire  [1:0] mem_size;
 wire [31:0] mem_addr, mem_wdata;
 wire  [2:0] mem_fc;
@@ -186,7 +209,9 @@ ap040_pipe_dmu u_dmu
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
-	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle)
+	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle), .m_wberr (bb_wr_berr),
+	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
+	.pw_exc (pw_exc), .pw_ack (pw_ack_b)
 );
 
 ap040_pipe_mmu u_mmu
@@ -218,7 +243,7 @@ ap040_pipe_membus u_bus
 	.mem_req (mem_req), .mem_write (mem_write), .mem_instr (mem_instr), .mem_size (mem_size),
 	.mem_addr (mem_addr), .mem_wdata (mem_wdata), .mem_fc (mem_fc), .mem_ack (mem_ack), .mem_rdata (mem_rdata),
 	.mem_flt (mem_flt), .mem_flt_bus (mem_flt), .mem_pass (mem_req), .wr_sync (1'b0),
-	.rflt_b (bb_rflt), .wflt (), .idle (bb_idle), .wr_drop (1'b0),
+	.rflt_b (bb_rflt), .wflt (), .idle (bb_idle), .wr_berr (bb_wr_berr), .wr_drop (1'b0),
 	.xlat_e (1'b0), .xlat_p (1'b0), .pb_req (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),
 	.flt_ma (bb_flt_ma), .flt_bus (bb_flt_bus),
 	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)
@@ -231,6 +256,8 @@ integer mem_lat = 1, mem_cnt = 0;
 reg     mem_busy = 1'b0;
 reg     berr_arm = 1'b0;
 reg [31:0] berr_addr = 32'd0;
+reg     wberr_arm = 1'b0;           // ...and a write to wberr_addr (test 20)
+reg [31:0] wberr_addr = 32'd0;
 reg  [31:0] log_addr  [0:4095];
 reg         log_write [0:4095];
 integer     log_n = 0;
@@ -249,6 +276,9 @@ always @(posedge clk) begin
 			if (!mem_write && berr_arm && mem_addr == berr_addr) begin
 				mem_flt  <= 1'b1;
 				berr_arm <= 1'b0;
+			end else if (mem_write && wberr_arm && mem_addr == wberr_addr) begin
+				mem_flt   <= 1'b1;
+				wberr_arm <= 1'b0;
 			end else begin
 				mem_ack  <= 1'b1;
 				if (mem_write) begin
@@ -399,6 +429,41 @@ reg [31:0] wk_addr_b = 32'd0, wk_wdat_b = 32'd0;
 reg [31:0] wk_got;
 integer    wk_ext = 0;
 always @(posedge clk) if (nreset && walker_req && !wk_q) wk_ext = wk_ext + 1;
+// The write-back fault held (test 20): each field as the frame takes it.
+task chk_pw;
+	input  [15:0] ssw;
+	input  [31:0] fa;
+	input   [7:0] wb1s;
+	input [127:0] pd;
+	input         exc;
+	input [8*64-1:0] what;
+	begin
+		if (!pw_pend || pw_ssw !== ssw || pw_fa !== fa || pw_wb1s !== wb1s || pw_pd !== pd || pw_exc !== exc) begin
+			errors = errors + 1;
+			$display("FAIL: %0s: pend %b ssw %h fa %h wb1s %h exc %b pd %h", what, pw_pend, pw_ssw, pw_fa, pw_wb1s,
+			         pw_exc, pw_pd);
+			$display("      want ssw %h fa %h wb1s %h exc %b pd %h", ssw, fa, wb1s, exc, pd);
+		end
+	end
+endtask
+task pw_let_go;   // EA-fetch's entry for it is done
+	begin
+		pw_ack_b = 1'b1; step; pw_ack_b = 1'b0; step;
+		if (pw_pend) fail("20: a fault let go is still held");
+	end
+endtask
+task wr_berr;   // a write whose bus error is armed; the fault then held
+	input [31:0] a;
+	input  [1:0] sz;
+	input [31:0] d;
+	input [31:0] ea;
+	begin
+		wberr_arm = 1'b1; wberr_addr = ea;
+		wr(a, sz, d);
+		quiet;
+		if (wberr_arm) begin wberr_arm = 1'b0; fail("20: the write never erred (the test no longer tests)"); end
+	end
+endtask
 task walk_access;
 	input [31:0] a;
 	input        we;
@@ -1020,6 +1085,254 @@ initial begin
 	end
 	mem_lat = 1;
 	dc_en = 1'b1;
+
+	//------------------------------------------------------------- test 20
+	cinv_p(2'b11, 32'd0, 1'b1);
+	mem_lat = 2;
+	// a longword, straight through: SSW RW 0, TT 0, TM 5; WB1 valid
+	v = rd32(16'h7A04);
+	wr_berr(32'h0000_7A04, `AP040_SZ_L, 32'h2001_A5A5, 32'h0000_7A04);
+	chk_pw(16'h0005, 32'h0000_7A04, 8'h85, {96'd0, 32'h2001_A5A5}, 1'b0, "20: a longword");
+	if (rd32(16'h7A04) !== v) fail("20: the write that erred reached memory");
+	// a second while it is held: dropped
+	wr_berr(32'h0000_7A08, `AP040_SZ_W, 32'h0000_1234, 32'h0000_7A08);
+	chk_pw(16'h0005, 32'h0000_7A04, 8'h85, {96'd0, 32'h2001_A5A5}, 1'b0, "20: a second fault replaced the first");
+	pw_let_go;
+	// sizes and offsets: WB1D in the lanes written (Table 8-5)
+	wr_berr(32'h0000_7A11, `AP040_SZ_W, 32'h0000_BEEF, 32'h0000_7A11);
+	chk_pw(16'h0045, 32'h0000_7A11, 8'hC5, {96'd0, 32'h00BE_EF00}, 1'b0, "20: a word at offset 1");
+	pw_let_go;
+	wr_berr(32'h0000_7A13, `AP040_SZ_W, 32'h0000_CAFE, 32'h0000_7A13);
+	chk_pw(16'h0045, 32'h0000_7A13, 8'hC5, {96'd0, 32'hFE00_00CA}, 1'b0, "20: a word at offset 3");
+	pw_let_go;
+	wr_berr(32'h0000_7A22, `AP040_SZ_L, 32'h1122_3344, 32'h0000_7A22);
+	chk_pw(16'h0005, 32'h0000_7A22, 8'h85, {96'd0, 32'h3344_1122}, 1'b0, "20: a longword at offset 2");
+	pw_let_go;
+	wr_berr(32'h0000_7A31, `AP040_SZ_L, 32'h5566_7788, 32'h0000_7A31);
+	chk_pw(16'h0005, 32'h0000_7A31, 8'h85, {96'd0, 32'h8855_6677}, 1'b0, "20: a longword at offset 1");
+	pw_let_go;
+	wr_berr(32'h0000_7A33, `AP040_SZ_B, 32'h0000_00C3, 32'h0000_7A33);
+	chk_pw(16'h0025, 32'h0000_7A33, 8'hA5, {96'd0, 32'h0000_00C3}, 1'b0, "20: a byte at offset 3");
+	pw_let_go;
+	// MOVES: to user program space, TM 1 (a data reference); to FC 3, TT 2
+	c_fc_ovr = 1'b1; c_fc_val = 3'd2;
+	wr_berr(32'h0000_7A40, `AP040_SZ_L, 32'h2002_0002, 32'h0000_7A40);
+	chk_pw(16'h0001, 32'h0000_7A40, 8'h81, {96'd0, 32'h2002_0002}, 1'b0, "20: MOVES to FC 2");
+	pw_let_go;
+	c_fc_val = 3'd3;
+	wr_berr(32'h0000_7A44, `AP040_SZ_L, 32'h2002_0003, 32'h0000_7A44);
+	chk_pw(16'h0013, 32'h0000_7A44, 8'h93, {96'd0, 32'h2002_0003}, 1'b0, "20: MOVES to FC 3");
+	pw_let_go;
+	c_fc_ovr = 1'b0;
+	// translated (the slot), and a write crossing a page: its bytes one bus
+	// write each; the fault reports the whole write, from its first byte
+	tc = 32'h0000_8000;
+	pf_req_b = 1'b1;
+	k = 0;
+	while (!pf_done_b && k < 400) begin step; k = k + 1; end
+	step;
+	pf_req_b = 1'b0;
+	step;
+	wr_berr(32'h0000_7A48, `AP040_SZ_L, 32'h2003_7A48, 32'h0000_7A48);
+	chk_pw(16'h0005, 32'h0000_7A48, 8'h85, {96'd0, 32'h2003_7A48}, 1'b0, "20: a translated longword");
+	pw_let_go;
+	wr_berr(32'h0000_0FFE, `AP040_SZ_L, 32'hA1B2_C3D4, 32'h0000_1000);
+	chk_pw(16'h0005, 32'h0000_0FFE, 8'h85, {96'd0, 32'hC3D4_A1B2}, 1'b0, "20: a longword crossing a page");
+	if (mem[16'h0FFE] !== 8'hA1 || mem[16'h0FFF] !== 8'hB2 || mem[16'h1001] !== 8'hD4)
+		fail("20: a crossing write's other bytes did not land");
+	pw_let_go;
+	// a copyback write allocating nothing (an exception frame's) that misses
+	// goes to the bus alone: its fault is reported by its logical address, a
+	// double fault. Logical page $00047 is physical $8000, copyback.
+	wr32(16'h201C, 32'h0000_8023);
+	pf_req_b = 1'b1;
+	k = 0;
+	while (!pf_done_b && k < 400) begin step; k = k + 1; end
+	step;
+	pf_req_b = 1'b0;
+	step;
+	c_nalloc = 1'b1;
+	wr_berr(32'h0004_7010, `AP040_SZ_L, 32'h2004_7010, 32'h0000_8010);
+	c_nalloc = 1'b0;
+	chk_pw(16'h0005, 32'h0004_7010, 8'h85, {96'd0, 32'h2004_7010}, 1'b1, "20: a frame's copyback write alone");
+	if (u_bus.w_sla !== 30'h0001_1C04) fail("20: a copyback write alone was snooped by its physical address");
+	pw_let_go;
+	tc = 32'd0;
+	// an exception frame's write errs behind a fault held: now a double fault
+	wr_berr(32'h0000_7A50, `AP040_SZ_L, 32'h2005_7A50, 32'h0000_7A50);
+	c_nalloc = 1'b1;
+	wr_berr(32'h0000_7A54, `AP040_SZ_L, 32'h2005_7A54, 32'h0000_7A54);
+	c_nalloc = 1'b0;
+	chk_pw(16'h0005, 32'h0000_7A50, 8'h85, {96'd0, 32'h2005_7A50}, 1'b1, "20: a frame's write erring behind a fault");
+	pw_let_go;
+	// a fault that comes in the cycle the one held is let go: taken
+	wr_berr(32'h0000_7A58, `AP040_SZ_L, 32'h2006_7A58, 32'h0000_7A58);
+	wberr_arm = 1'b1; wberr_addr = 32'h0000_7A5C;
+	wr(32'h0000_7A5C, `AP040_SZ_L, 32'h2006_7A5C);
+	k = 0;
+	while (!bb_wr_berr && k < 400) begin step; k = k + 1; end
+	if (k >= 400) fail("20: the second write never erred (the test no longer tests)");
+	pw_ack_b = 1'b1;
+	step;
+	pw_ack_b = 1'b0;
+	quiet;
+	chk_pw(16'h0005, 32'h0000_7A5C, 8'h85, {96'd0, 32'h2006_7A5C}, 1'b0, "20: a fault in the cycle the last goes");
+	pw_let_go;
+	// a push's bus error: SSW 0 (TT 0, TM 0, a longword), FA its physical
+	// address, WB1S invalid, PD0-PD3 the line; CPUSH done only after it
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	wr(32'h0000_7B04, `AP040_SZ_L, 32'h2007_0004);
+	wr(32'h0000_7B0C, `AP040_SZ_L, 32'h2007_000C);
+	quiet;
+	wberr_arm = 1'b1; wberr_addr = 32'h0000_7B0C;
+	cinv_p(2'b01, 32'h0000_7B00, 1'b1);
+	if (!pw_pend) fail("20: CPUSH was done before its push's last write was");
+	quiet;
+	if (wberr_arm) begin wberr_arm = 1'b0; fail("20: the push never erred (the test no longer tests)"); end
+	chk_pw(16'h0000, 32'h0000_7B0C, 8'h00, {32'h2007_000C, rd32(16'h7B08), 32'h2007_0004, rd32(16'h7B00)}, 1'b0,
+	       "20: a push");
+	if (rd32(16'h7B04) !== 32'h2007_0004) fail("20: the push's other longword did not land");
+	pw_let_go;
+	dtt1 = 32'd0;
+	repeat (2) step;
+	// MOVE16's line: its second longword errs; SSW TT 1, SIZE line
+	c_m16 = 1'b1; c_nalloc = 1'b1;
+	wberr_arm = 1'b1; wberr_addr = 32'h0000_7C04;
+	for (i = 0; i < 4; i = i + 1) wr(32'h0000_7C00 + i * 4, `AP040_SZ_L, 32'h2008_0000 + i);
+	quiet;
+	c_m16 = 1'b0; c_nalloc = 1'b0;
+	if (wberr_arm) begin wberr_arm = 1'b0; fail("20: MOVE16's write never erred (the test no longer tests)"); end
+	chk_pw(16'h006D, 32'h0000_7C04, 8'hED, {32'h2008_0003, 32'h2008_0002, 32'h2008_0001, 32'h2008_0000}, 1'b0,
+	       "20: MOVE16's line");
+	// ...and a second MOVE16 before the fault is taken: its line is not the
+	// first's, and stays out of PD0-PD3
+	c_m16 = 1'b1; c_nalloc = 1'b1;
+	for (i = 0; i < 4; i = i + 1) wr(32'h0000_7D00 + i * 4, `AP040_SZ_L, 32'h2009_0000 + i);
+	quiet;
+	c_m16 = 1'b0; c_nalloc = 1'b0;
+	chk_pw(16'h006D, 32'h0000_7C04, 8'hED, {32'h2008_0003, 32'h2008_0002, 32'h2008_0001, 32'h2008_0000}, 1'b0,
+	       "20: a second MOVE16 reached the first's line");
+	pw_let_go;
+	// its last longword erring: nothing after it is captured
+	c_m16 = 1'b1; c_nalloc = 1'b1;
+	wberr_arm = 1'b1; wberr_addr = 32'h0000_7C1C;
+	for (i = 0; i < 4; i = i + 1) wr(32'h0000_7C10 + i * 4, `AP040_SZ_L, 32'h200A_0000 + i);
+	for (i = 0; i < 4; i = i + 1) wr(32'h0000_7D10 + i * 4, `AP040_SZ_L, 32'h200B_0000 + i);
+	quiet;
+	c_m16 = 1'b0; c_nalloc = 1'b0;
+	if (wberr_arm) begin wberr_arm = 1'b0; fail("20: MOVE16's last write never erred (the test no longer tests)"); end
+	chk_pw(16'h006D, 32'h0000_7C1C, 8'hED, {32'h200A_0003, 32'h200A_0002, 32'h200A_0001, 32'h200A_0000}, 1'b0,
+	       "20: MOVE16's last longword");
+	pw_let_go;
+	mem_lat = 1;
+
+	//------------------------------------------------------------- test 21
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	mem_lat = 2;
+	for (k = 0; k < 4; k = k + 1) for (d = 0; d < 4; d = d + 1) begin
+		cinv_p(2'b11, 32'd0, 1'b1);
+		// set $3C: four lines, every longword dirty
+		for (w = 0; w < 4; w = w + 1)
+			for (i = 0; i < 4; i = i + 1)
+				wr(32'h0000_03C0 + w * 32'h400 + i * 4, `AP040_SZ_L, 32'h2100_0000 + k * 32'h1000 + d * 32'h100 + w * 16 + i);
+		quiet;
+		// a fifth line, read from longword k; its beat d errs (0: the one asked for)
+		berr_arm = 1'b1; berr_addr = 32'h0000_13C0 + ((k + d) % 4) * 4;
+		lg = log_n;
+		rd(32'h0000_13C0 + k * 4, `AP040_SZ_L);
+		quiet;
+		if (berr_arm) begin berr_arm = 1'b0; fail("21: the line read never erred (the test no longer tests)"); end
+		if ((d == 0) && !rd_flt) fail("21: the read whose longword erred did not fault");
+		if ((d != 0) && (rd_flt || (rd_q !== rd32(16'h13C0 + k * 4)))) fail("21: the read was not answered");
+		for (i = lg; i < log_n; i = i + 1)
+			if (log_write[i]) fail("21: a replaced line was written though its new line's read erred");
+		for (w = 0; w < 4; w = w + 1) begin
+			if (!lvalid(32'h0000_03C0 + w * 32'h400)) begin
+				$display("    first %0d beat %0d: line %0d", k, d, w);
+				fail("21: a replaced line did not go back");
+			end
+			for (i = 0; i < 4; i = i + 1)
+				if (cword(32'h0000_03C0 + w * 32'h400 + i * 4) !== 32'h2100_0000 + k * 32'h1000 + d * 32'h100 + w * 16 + i)
+					fail("21: a replaced line went back with a longword changed");
+		end
+		if (lvalid(32'h0000_13C0)) fail("21: the line whose read erred is valid");
+		// dirty again, every longword: CPUSHA writes all sixteen
+		lg = log_n;
+		cinv_p(2'b11, 32'd0, 1'b1);
+		quiet;
+		t0 = 0;
+		for (i = lg; i < log_n; i = i + 1) if (log_write[i]) t0 = t0 + 1;
+		if (t0 != 16) begin
+			$display("    first %0d beat %0d: %0d writes", k, d, t0);
+			fail("21: a replaced line went back without its dirty bits");
+		end
+	end
+	// a new line read in full: the replaced line is written after its four reads
+	cinv_p(2'b11, 32'd0, 1'b1);
+	for (w = 0; w < 4; w = w + 1)
+		for (i = 0; i < 4; i = i + 1)
+			wr(32'h0000_03C0 + w * 32'h400 + i * 4, `AP040_SZ_L, 32'h2110_0000 + w * 16 + i);
+	quiet;
+	lg = log_n;
+	want_rd(32'h0000_13C8, `AP040_SZ_L, rd32(16'h13C8), "21: a fifth line");
+	quiet;
+	t0 = 0;
+	for (i = lg; i < log_n; i = i + 1) if (log_write[i]) t0 = t0 + 1;
+	if ((log_n != lg + 8) || log_write[lg] || log_write[lg + 1] || log_write[lg + 2] || log_write[lg + 3] || (t0 != 4))
+		fail("21: a replaced line was not written after its new line's four reads");
+	// A snoop on the line to be replaced, swept from before the line read
+	// starts to after it has replaced the line: whenever it lands -- on the
+	// line still in the cache, or out with the push engine -- the line is
+	// not valid after, its dirty data never written, the others intact.
+	// The line to be replaced is the counter's: named before, checked after.
+	for (d = 0; d < 12; d = d + 1) begin
+		cinv_p(2'b11, 32'd0, 1'b1);
+		for (w = 0; w < 4; w = w + 1)
+			for (i = 0; i < 4; i = i + 1)
+				wr(32'h0000_03C0 + w * 32'h400 + i * 4, `AP040_SZ_L, 32'h2120_0000 + d * 32'h100 + w * 16 + i);
+		quiet;
+		mem_lat = 5;
+		k = (u_dmu.rep + 1) % 4;                          // the way the next miss replaces
+		v = {u_dmu.u_arr.tags.mem[6'h3C][k*22 +: 22], 6'h3C, 4'h0};
+		berr_arm = 1'b1; berr_addr = 32'h0000_13C4;
+		lg = log_n;
+		t0 = 0;
+		fork
+			rd(32'h0000_13C0, `AP040_SZ_L);
+			begin
+				repeat (d) step;
+				sn_addr = v; sn_req = 1'b1;
+				step;
+				sn_req = 1'b0;
+			end
+			begin
+				while (!u_dmu.pb_act && t0 < 60) begin step; t0 = t0 + 1; end
+				if ((t0 < 60) && (u_dmu.pb_way !== k[1:0])) begin
+					$display("    snoop %0d: way %0d replaced, %0d named", d, u_dmu.pb_way, k);
+					fail("21: the counter did not name the way replaced (the test no longer tests)");
+				end
+			end
+		join
+		quiet;
+		if (berr_arm) begin berr_arm = 1'b0; fail("21: the snooped case's line read never erred"); end
+		if (lvalid(v)) begin
+			$display("    snoop %0d cycles in: line %h", d, v);
+			fail("21: a line a snoop hit is valid");
+		end
+		for (i = lg; i < log_n; i = i + 1) if (log_write[i]) fail("21: a line a snoop hit was written");
+		for (w = 0; w < 4; w = w + 1)
+			if ((32'h0000_03C0 + w * 32'h400) != v) begin
+				if (!lvalid(32'h0000_03C0 + w * 32'h400)) fail("21: a line the snoop missed is not valid");
+				for (i = 0; i < 4; i = i + 1)
+					if (cword(32'h0000_03C0 + w * 32'h400 + i * 4) !== 32'h2120_0000 + d * 32'h100 + w * 16 + i)
+						fail("21: a line the snoop missed changed");
+			end
+	end
+	cinv_p(2'b11, 32'd0, 1'b1);
+	dtt1 = 32'd0;
+	mem_lat = 1;
 
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");

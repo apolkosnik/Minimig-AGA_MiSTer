@@ -4,7 +4,7 @@
 // ap040_pipe_bus16.v - the pipelined core on the 16-bit Minimig bus        //
 //                                                                          //
 // The third pairing of ap040_pipe_cpu.v, and the first that speaks a bus   //
-// something outside this repo already talks: CPU -> ap040_pipe_membus.v   //
+// something outside this repo already talks: CPU -> ap040_pipe_membus.v    //
 // (port B through the data memory unit, ap040_pipe_dmu.v; both ports       //
 // translated through ap040_pipe_mmu.v) ->                                  //
 // rtl/ap040/ap040_bus16_adapter.v, which is the FSM core's own adapter,    //
@@ -21,9 +21,10 @@
 // concurrency to keep running while a transfer is outstanding; this one    //
 // does, which is the point of it.                                          //
 //                                                                          //
-// mem_berr is tied off here. A bus error needs the access-error frame      //
-// (format $7) that this core does not build yet -- deferred with the       //
-// mechanism it needs, like the throwaway frame, rather than half-wired.    //
+// A physical bus error (berr) ends the sub-cycle it comes on. A read's or  //
+// a fetch's faults that access; a posted write's -- or a push's -- has no  //
+// instruction left, so the DMU holds it and EA-fetch takes it as an        //
+// access error at an instruction boundary (caches stage R).                //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -87,6 +88,12 @@ wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma,
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
 wire        cm_req, cm_ic, cm_dc, cm_push, cm_done, cm_done_i, cm_done_d, ic_en, dc_en;
+// a write-back's bus error: the bus controller's, held by the DMU for EA-fetch
+wire        bb_wr_berr, pw_pend, pw_exc, pw_ack;
+wire [15:0] pw_ssw;
+wire [31:0] pw_fa;
+wire  [7:0] pw_wb1s;
+wire [127:0] pw_pd;
 // the table walker's port, between the MMU and the data cache
 wire        mw_req, mw_we, mw_ack, mw_berr;
 wire [31:0] mw_addr, mw_wdat, mw_data;
@@ -144,6 +151,8 @@ ap040_pipe_cpu #(
 	.pf_fc (pf_fc), .pf_done (pf_done),
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr),
 	.cm_done (cm_done), .ic_en (ic_en), .dc_en (dc_en),
+	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
+	.pw_exc (pw_exc), .pw_ack (pw_ack),
 	.l1_nalloc_b (l1_nalloc_b), .l1_m16_b (l1_m16_b), .l1_lock_b (l1_lock_b),
 	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
 	.mmu_dtt0(mmu_dtt0), .mmu_dtt1(mmu_dtt1),
@@ -204,7 +213,9 @@ ap040_pipe_dmu u_dmu
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
-	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle)
+	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle), .m_wberr (bb_wr_berr),
+	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
+	.pw_exc (pw_exc), .pw_ack (pw_ack)
 );
 
 // The MMU (2026-09-25): rtl/ap040/ap040_mmu.v's rules and ATC with a
@@ -282,7 +293,7 @@ ap040_pipe_membus u_bus
 	.mem_pass (mem_req),
 	.wr_sync  (1'b0),
 	.rflt_b   (bb_rflt), .wflt (), .flt_bus (bb_flt_bus),
-	.idle     (bb_idle), .wr_drop (1'b0),
+	.idle     (bb_idle), .wr_berr (bb_wr_berr), .wr_drop (1'b0),
 	// The DMU splits a transfer that crosses a page and probes nothing here.
 	.xlat_e   (1'b0), .xlat_p (1'b0),
 	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),

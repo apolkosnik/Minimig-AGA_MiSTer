@@ -97,7 +97,7 @@ ap040_pipe_cpu #(
 	// the instruction cache is the IMU's: CINV/CPUSH, IE, and the ITTs for
 	// its caching modes
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
-	.cm_done (cm_done), .ic_en (ic_en), .mmu_itt0 (mmu_itt0), .mmu_itt1 (mmu_itt1),
+	.cm_done (cm_done), .ic_en (ic_en), .pw_pend (1'b0), .pw_ssw (16'h0), .pw_fa (32'h0), .pw_wb1s (8'h0), .pw_pd (128'h0), .pw_exc (1'b0), .pw_ack (), .mmu_itt0 (mmu_itt0), .mmu_itt1 (mmu_itt1),
 	// no data cache on this top: port B goes straight to the bus controller
 	.dc_en (), .l1_nalloc_b (), .l1_m16_b (), .l1_lock_b (),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
@@ -158,7 +158,7 @@ ap040_pipe_membus u_bus
 	// soon as it is on the port.
 	.mem_flt  (1'b0), .mem_flt_bus (1'b0), .mem_pass (mem_req), .wr_sync (l1_wr_sync),
 	.rflt_b   (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
-	.idle     (l1_idle), .wr_drop (l1_wr_drop),
+	.idle     (l1_idle), .wr_berr (), .wr_drop (l1_wr_drop),
 	// no MMU behind this memory: nothing is translated, nothing crosses
 	.xlat_e   (1'b0), .xlat_p (1'b0),
 	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0), .flt_ma (l1_flt_ma),

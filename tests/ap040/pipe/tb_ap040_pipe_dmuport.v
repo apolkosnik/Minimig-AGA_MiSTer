@@ -130,6 +130,12 @@ wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle, bb_rx;
 wire  [2:0] bb_fc_val, bb_rx_fc;
 wire        mem_req, mem_write, mem_instr;
+// a write-back's bus error (caches stage R)
+wire        bb_wr_berr, pw_pend, pw_exc;
+wire [15:0] pw_ssw;
+wire [31:0] pw_fa;
+wire  [7:0] pw_wb1s;
+wire [127:0] pw_pd;
 wire  [1:0] mem_size;
 wire [31:0] mem_addr, mem_wdata;
 wire  [2:0] mem_fc;
@@ -166,7 +172,9 @@ ap040_pipe_dmu u_dmu
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
 	.m_q (bb_q), .m_rvalid (bb_rvalid), .m_wr_busy_w (bb_wr_busy_w), .m_rflt (bb_rflt),
-	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle)
+	.m_flt_bus (bb_flt_bus), .m_flt_ma (bb_flt_ma), .m_idle (bb_idle), .m_wberr (bb_wr_berr),
+	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
+	.pw_exc (pw_exc), .pw_ack (1'b0)
 );
 
 ap040_pipe_mmu u_mmu
@@ -218,7 +226,7 @@ ap040_pipe_membus u_bus
 	.mem_req (mem_req), .mem_write (mem_write), .mem_instr (mem_instr), .mem_size (mem_size),
 	.mem_addr (mem_addr), .mem_wdata (mem_wdata), .mem_fc (mem_fc), .mem_ack (mem_ack), .mem_rdata (mem_rdata),
 	.mem_flt (1'b0), .mem_flt_bus (1'b0), .mem_pass (mem_req), .wr_sync (1'b0),
-	.rflt_b (bb_rflt), .wflt (), .idle (bb_idle), .wr_drop (1'b0),
+	.rflt_b (bb_rflt), .wflt (), .idle (bb_idle), .wr_berr (bb_wr_berr), .wr_drop (1'b0),
 	.xlat_e (1'b0), .xlat_p (1'b0), .pb_req (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),
 	.flt_ma (bb_flt_ma), .flt_bus (bb_flt_bus),
 	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)

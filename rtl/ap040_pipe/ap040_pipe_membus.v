@@ -110,6 +110,9 @@ module ap040_pipe_membus
 	output reg        rflt_b,       // with rvalid_b: the read faulted
 	output            wflt,         // the tentative write being presented faulted (held until withdrawn)
 	output            idle,         // nothing on the bus, posted or waiting
+	// A posted write -- accepted, its instruction gone -- erred on the bus: a
+	// pulse, for the DMU, which knows what the write was (caches stage R).
+	output            wr_berr,
 	// The requester has withdrawn its write, in a cycle it ran: the refusal
 	// has been seen. Not !wren_b, which the CPU gates with its ce -- a strobe
 	// left up through a disabled cycle is a write accepted twice (milestone
@@ -215,6 +218,7 @@ assign wr_busy_w = w_block || (!w_receipt && (w_pend ? !w_pass_now : wr_sync));
 // runs under ce and may not be looking that clock.
 assign wflt    = w_block;
 assign idle    = !busy && !w_pend && !b_pend;
+assign wr_berr = busy && mem_flt && (who == WHO_BW) && !w_tent;
 
 // Port B is sized (milestone 86), so address, size and data go out as they
 // arrive: ap040_bus16_adapter.v splits whatever alignment they have.
@@ -302,7 +306,9 @@ always @(posedge clk) begin
 			// that joined a prefetch already on the bus is not a demand yet:
 			// it stays pending, and the read goes out again for it. A write
 			// already accepted (posted) has no instruction left to take it: that
-			// is only a physical bus error, and it is dropped (see the plan).
+			// is only a physical bus error, and it is told (wr_berr) to whoever
+			// can report it -- on the 16-bit top the DMU, which holds it for
+			// EA-fetch; elsewhere nobody, and it is dropped.
 			busy    <= 1'b0;
 			mem_req <= 1'b0;
 			flt_bus <= mem_flt_bus;

@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review; stages A-D built
-(below, "Stage A as built" through "Stage D as built"). Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stages A-D and R
+built (below, "Stage A as built" through "Stage R as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -656,6 +656,132 @@ Tests:
 - tb_ap040_pipe_program.v's write-ordering monitor counts a copyback
   write as landed when the cache takes it, and a push when handed to the
   bus controller.
+
+## Stage R as built
+
+Write-back recovery (8.4.6). The plan put it before copyback; it came after,
+and is exercised with copyback on.
+
+- Fill beats (4.6.1): stage C's rules stand. An error on the beat a read
+  waits for faults that read; one on another beat abandons the line. A
+  copyback write whose line read errs goes to the bus alone (stage D).
+- A write's bus error. A write is accepted, and its instruction completes,
+  long before the bus answers it, and the bus controller used to drop a
+  bus error then. It now tells the DMU (wr_berr). The DMU records every
+  write it hands over and holds the fault, with its access error frame's
+  fields, until EA-fetch takes it.
+  - The record is the whole write:
+    - its logical address (a push's is physical), size and data;
+    - the SSW's TT and TM, MOVES reported as the precise path reports it;
+    - LK;
+    - whether it was MOVE16's or an exception frame's write.
+    A write crossing a page goes out a byte at a time but is reported
+    whole: FA is its first byte (8.4.6.4).
+  - A write's frame (Table 8-6, case 3):
+    - SSW with RW 0 and ATC 0;
+    - FA, and EA = FA;
+    - WB1S valid; WB1A = FA;
+    - WB1D in the byte lanes written (Table 8-5);
+    - WB2S and WB3S clear.
+  - A push (case 2):
+    - SSW 0: TT 0, TM 0, a longword;
+    - FA and WB1A the longword's physical address;
+    - WB1S invalid;
+    - PD0-PD3 the line.
+    The push engine now keeps its line until its last write is done on the
+    bus, not only handed over, so the line is still in its registers. The
+    other dirty longwords are written all the same.
+  - MOVE16 (case 4): TT 1, SIZE line, WB1S valid, PD0-PD3 its four
+    longwords, captured as they go.
+  - EA-fetch takes it at an instruction boundary, as it takes an
+    interrupt. An instruction arriving while the fault is held is itself
+    held, and becomes the entry: format $7, vector 2, with its own address
+    as the PC, the instruction RTE comes back to.
+  - Unlike an interrupt's entry, it does not wait for EX and WB to drain.
+    It is an access error's entry, which a precise fault already takes with
+    older instructions still in EX: the SR it stacks is forwarded from EX,
+    and the frame waits on the registers it needs.
+  - Order at a boundary. The fault goes before an interrupt. It goes after
+    a trace already owed, and is then held in the trace handler's first
+    instruction. The 68040 would set CT instead; this core's RTE does not
+    continue it.
+- The writes behind it. One fault is held at a time.
+  - The writes accepted after the one that erred complete as they would
+    have. The 68040 would stop and hand them to the handler in WB2/WB3
+    (Table 8-6).
+  - A further bus error while one is held is dropped, unless it is an
+    exception frame's write.
+- A bus error on an exception frame's write is a double fault. The write
+  goes out before its entry's vector read, so the DMU holds it by then, and
+  the entry departs as the halt (tb_ap040_pipe_dblfault_bus16.v case D).
+  The same holds for a frame's write that errs while another fault is held.
+- A replaced dirty line (4.6.1, 4.6.2).
+  - It is written once the new line is in, as the 68040 orders it; stage D
+    wrote it while the new line was being read.
+  - If the new line's read errs, the line goes back to its place. Its tag
+    is still in the row, since the fill writes the tag last. The longwords
+    the fill overwrote are written back from the push engine through port
+    B, the fill's own port (the same way and set), and its valid and dirty
+    bits are set again. Nothing is written to memory.
+  - A snoop that hits the line while it is out means it is not put back,
+    as it would have been lost in the cache.
+- A fix. A copyback write that goes to the bus alone was handed to the bus
+  controller with its physical address in place of the logical one, which
+  the prefetch window snoops by (m_la). It now carries its logical address
+  (su_la).
+- Fit at 25 ns, bus16 top: 40.01 MHz, +0.008 ns, 24,247 ALMs, 35 RAM
+  blocks (D: 42.14 MHz, +1.271, 23,840). The worst paths are the core's own
+  chain: a pipelined load's forward, EA-fetch's CHK and DIV bound checks,
+  its stall, then the IMU's fetch issue. None runs through stage R's logic.
+  - Two choices keep them that way. The take is registers only (above),
+    since it feeds every exception decision in EA-fetch. MOVE16's capture
+    after its fault counts to the line's last longword rather than
+    comparing the CPU's address.
+  - The restore first wrote back through port A. Quartus 17.0's placer
+    aborted on that netlist, twice, on an internal assertion
+    (apl_dp.cpp hpwl_cost, `!net._external_pins`). Through port B the
+    lookup path gains no muxes.
+
+Tests:
+- t_wberr.s (pipelined core only). It uses the program bench's new
+  registers: $F156 and $F158, a one-shot bus error on the next data write
+  or read to a longword; $F15A, how many cycles that write is held before
+  it errs. It covers:
+  - a longword write: every frame field, the PC within the run, each
+    instruction run once, the stacked condition codes those of the
+    instruction before the PC, the write never landed;
+  - a word at offset 1, a byte at offset 3 and a longword at offset 2
+    (WB1D per Table 8-5);
+  - MOVES to FC 1 (TM 1) and to FC 3 (TT 2);
+  - a trace owed at the same boundary goes first, and an interrupt at the
+    same boundary second (the write's error held 40 cycles, so the MOVE to
+    SR lowering the mask arrives before it);
+  - a push through a logical alias: FA physical, PD0-PD3 the line, the
+    fault taken at the instruction after the CPUSH, the other dirty
+    longword in memory;
+  - MOVE16's write: TT 1, SIZE line, PD0-PD3, the rest of its line written;
+  - a traced CPUSH whose push errs, so that the next instruction arrives
+    owing the trace with the fault held: the trace first (test 11);
+  - a dirty line going back when its new line's read errs, through the
+    bench's new $F158 (a one-shot bus error on a data read): nothing in
+    memory, the data in the cache, and CPUSHA then writing all four lines
+    (test 12).
+- tb_ap040_pipe_dcache.v test 20, at the DMU's ports. It covers:
+  - each field, for each size and offset;
+  - a write crossing a page;
+  - MOVES;
+  - the push's line, with CPUSH done only after the push's last write;
+  - MOVE16's line, captured before and after its fault;
+  - an exception frame's write in a copyback page, sent alone: reported by
+    its logical address and marked a double fault;
+  - a frame's write erring behind a fault already held;
+  - a second fault dropped, and one taken in the cycle the first is let go.
+- tb_ap040_pipe_dcache.v test 21. A replaced dirty line goes back, swept
+  over the longword asked for and the beat that errs: nothing written, the
+  data intact, and every dirty bit back (CPUSHA writes all sixteen). After
+  a full line read it is written after the four reads. A line a snoop hit
+  while it was out is not put back.
+- tb_ap040_pipe_dblfault_bus16.v case D.
 
 ## Tests
 

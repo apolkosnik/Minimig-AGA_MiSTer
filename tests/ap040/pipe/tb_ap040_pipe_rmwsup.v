@@ -94,6 +94,7 @@ ap040_pipe_cpu #(
 	.pt_req(), .pt_write(), .pt_addr(), .pt_fc(), .pt_done(1'b0), .pt_mmusr(32'd0),
 	.pf_req(), .pf_mode(), .pf_addr(), .pf_fc(), .pf_done(1'b0),
 	.cm_req(), .cm_ic(), .cm_dc(), .cm_push(), .cm_scope(), .cm_addr(), .cm_done(1'b0), .ic_en(),
+	.pw_pend (1'b0), .pw_ssw (16'h0), .pw_fa (32'h0), .pw_wb1s (8'h0), .pw_pd (128'h0), .pw_exc (1'b0), .pw_ack (),
 	.dc_en(), .l1_nalloc_b(), .l1_m16_b(), .l1_lock_b(),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),

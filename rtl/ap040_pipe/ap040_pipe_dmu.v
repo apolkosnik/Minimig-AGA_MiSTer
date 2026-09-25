@@ -99,8 +99,10 @@
 //   Replacement: the first invalid way, else the counter's, which counts   //
 //   every read looked up and every write sent or taken (4.1). A dirty line //
 //   replaced is read out through port A before the new one lands on it,    //
-//   and its dirty longwords written after, ahead of any CPU write; no line //
-//   is read and no read goes to the bus until they are.                    //
+//   and its dirty longwords written once the new line is in, ahead of any  //
+//   CPU write; no line is read and no read goes to the bus until they are. //
+//   If the new line's read errs, the replaced line goes back to its place, //
+//   valid and dirty, nothing written (4.6.2; stage R).                     //
 //   CINV/CPUSH on the data cache (cm_*), whatever CACR says: all ways, a   //
 //   line, or a 4 KB page (64 tag rows), at a physical address; CPUSH       //
 //   pushes each dirty line first, CINV drops the dirty data.               //
@@ -108,6 +110,22 @@
 //   (U, M) updates a line holding the descriptor and goes to memory.       //
 //   Snoops (sn_*): as the instruction cache's, through the tag copy; a     //
 //   dirty line snooped loses its data (the platform's boundary).           //
+// A write-back's bus error (caches stage R; MC68040UM 8.4.6). A write is   //
+// accepted, and its instruction goes on, long before the bus answers it;   //
+// a bus error then has no instruction to fault. The bus controller tells   //
+// this unit (m_wberr), which records every write it hands over (hw_*),     //
+// the whole write -- a crossing one's bytes are one write -- by its        //
+// logical address, a push's by its physical one. The fault is held here    //
+// (pw_*) with what its access error frame reports: the SSW; WB1S, WB1A     //
+// and WB1D, the data in the byte lanes it was written on (Table 8-5), for  //
+// the handler to complete; for a push, WB1S invalid and the line in PD0-   //
+// PD3, so the push engine keeps its line until its last write is done;     //
+// for MOVE16, TT 1, a line, and its four longwords. EA-fetch takes it at   //
+// an instruction boundary (pae_hold) and lets it go (pw_ack). One is held  //
+// at a time: another bus error meanwhile is dropped -- the writes behind   //
+// the one that erred complete as they would have, where the 68040 would    //
+// hand them to the handler in WB2/WB3 -- unless it is an exception         //
+// frame's write, which makes the fault held a double fault (pw_exc).       //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -216,7 +234,21 @@ module ap040_pipe_dmu
 	input             m_rflt,
 	input             m_flt_bus,
 	input             m_flt_ma,
-	input             m_idle
+	input             m_idle,
+	// the write it was sending erred on the bus (caches stage R)
+	input             m_wberr,
+
+	// ---- a write-back's bus error, for EA-fetch (caches stage R) ----
+	// A write has no instruction left when its bus error comes: the fault is
+	// held here, with what the access error frame reports of it (MC68040UM
+	// 8.4.6), until EA-fetch takes it at an instruction boundary.
+	output            pw_pend,
+	output     [15:0] pw_ssw,
+	output     [31:0] pw_fa,
+	output      [7:0] pw_wb1s,
+	output    [127:0] pw_pd,       // WB1D/PD0 in 31:0, PD1, PD2, PD3
+	output            pw_exc,      // an exception frame's write: a double fault
+	input             pw_ack       // its entry is done
 );
 
 // Page geometry, and whether a transfer crosses out of its page
@@ -263,6 +295,44 @@ function [2:0] fc_bus;
 	end
 endfunction
 wire c_alt = alt_of(c_fc_ovr, c_fc_val);
+// An access error's SSW fields for a data access (ap040_ea_fetch.v's aer_*):
+// MOVES to a space with no data meaning reports TT 10, to program space its
+// function code with bit 0 set in place of bit 1; SIZE B 01, W 10, L 00.
+function [1:0] tt_of;
+	input       ovr;
+	input [2:0] fcv;
+	begin
+		tt_of = (ovr && ((fcv == 3'd0) || (fcv == 3'd3) || (fcv == 3'd4) || (fcv == 3'd7))) ? 2'b10 : 2'b00;
+	end
+endfunction
+function [2:0] tm_of;
+	input       ovr;
+	input [2:0] fcv;
+	input       sup;
+	begin
+		tm_of = !ovr ? {sup, 2'b01} : (fcv[1:0] == 2'b10) ? {fcv[2], 2'b01} : fcv;
+	end
+endfunction
+function [1:0] szf_of;
+	input [1:0] sz;
+	begin
+		szf_of = (sz == `AP040_SZ_B) ? 2'b01 : (sz == `AP040_SZ_W) ? 2'b10 : 2'b00;
+	end
+endfunction
+// WB1D: the data memory-aligned, in the byte lanes it was written on
+// (Table 8-5) -- the operand's first byte in lane A1-A0, wrapping.
+function [31:0] wb1d_of;
+	input [31:0] d;
+	input  [1:0] sz;
+	input  [1:0] off;
+	reg   [31:0] top;
+	reg   [63:0] two;
+	begin
+		top = (sz == `AP040_SZ_B) ? {d[7:0], 24'd0} : (sz == `AP040_SZ_W) ? {d[15:0], 16'd0} : d;
+		two = {top, top} >> {off, 3'b000};
+		wb1d_of = two[31:0];
+	end
+endfunction
 function ttr_match;   // ap040_pipe_mmu.v's
 	input [31:0] ttr;
 	input [31:0] la;
@@ -320,7 +390,7 @@ localparam [1:0] SU_WT = 2'd0, SU_CI = 2'd1, SU_CB = 2'd2;
 reg        su_v;
 reg        su_cmp;              // its set's rows are on the outputs
 reg        su_part;             // its second longword (it spans two)
-reg [31:0] su_pa;
+reg [31:0] su_pa, su_la;
 reg  [1:0] su_size;
 reg [31:0] su_data;
 reg  [1:0] su_md;
@@ -347,6 +417,10 @@ reg [27:0] pb_line;
 reg  [1:0] pb_way;
 reg  [3:0] pb_dty;
 reg [31:0] pb_d [0:3];
+reg        pb_vic;              // a replaced line's: written only once the new line is in
+reg        pb_rs;               // ...whose new line's read erred: being put back
+reg  [3:0] pb_rm;               // its longwords the fill overwrote, still to put back
+reg        pb_sn;               // snooped while out of the cache: not put back
 // the table walker's access
 localparam [2:0] WK_IDLE = 3'd0, WK_CMP = 3'd1, WK_EXT = 3'd2, WK_ACK = 3'd3;
 reg  [2:0] wk_st;
@@ -502,7 +576,7 @@ wire [31:0] pb_wa   = {pb_line, pb_wi, 2'b00};
 assign m_wr     = pb_wr || su_pw || s_post || w_thru;
 assign m_rd     = r_thru;
 assign m_addr   = pb_wr ? pb_wa : su_pw ? su_pa : s_post ? (w_x ? w_byte_pa : w_pa1) : c_addr;
-assign m_la     = pb_wr ? pb_wa : su_pw ? su_pa : s_post ? (w_x ? w_byte_la : w_la) : c_addr;
+assign m_la     = pb_wr ? pb_wa : su_pw ? su_la : s_post ? (w_x ? w_byte_la : w_la) : c_addr;
 assign m_size   = pb_wr ? `AP040_SZ_L : su_pw ? su_size : s_post ? (w_x ? `AP040_SZ_B : w_size) : c_size;
 assign m_wdata  = pb_wr ? pb_d[pb_wi] : su_pw ? su_data : s_post ? (w_x ? {24'd0, w_byte} : w_data) : c_wdata;
 assign m_sup    = pb_wr ? 1'b1 : su_pw ? su_s : s_post ? w_sup : c_sup;
@@ -647,10 +721,23 @@ wire        cm_push1 = (cm_st == CM_PUSH) && (cm_pend != 4'd0) && !pb_act;
 // replacing fill asks for first, so each is out before the fill's longword
 // lands on it -- then its dirty longwords are written to the bus controller
 // ahead of any CPU write. Until they are, no read goes to the bus and no new
-// line is read: memory has the line first.
+// line is read: memory has the line first. The engine stays busy until the
+// last of them is done on the bus, not only handed over: a push's bus error
+// reports the whole line (pw_pd), from these registers.
+// A replaced line (pb_vic) is written only once the new line is in, as the
+// 68040 orders it (4.6.1). If the new line's read errs, the replaced line
+// goes back to its place instead (4.6.2): its tag is still in the row (the
+// fill writes the tag last), the longwords the fill overwrote are written
+// back through port B, the fill's own -- the same way, the same set -- and
+// its valid and dirty bits are set again; unless a snoop hit it while it
+// was out, which it would have lost in the cache.
 wire        pb_start = fl_vpush || su_push || rd_push || cm_push1;
 wire  [1:0] pb_wi    = pb_dty[0] ? 2'd0 : pb_dty[1] ? 2'd1 : pb_dty[2] ? 2'd2 : 2'd3;
-wire        pb_wr    = pb_act && !pb_rd && !pb_rv && (pb_dty != 4'd0) && !m_wr_busy_w;
+wire        pb_wr    = pb_act && !pb_rd && !pb_rv && (pb_dty != 4'd0) && !m_wr_busy_w && !pb_rs &&
+                       !(pb_vic && fl_act);
+wire        pb_rsw   = pb_rs && !pb_rd && !pb_rv && (pb_rm != 4'd0);    // a longword put back now
+wire  [1:0] pb_rsi   = pb_rm[0] ? 2'd0 : pb_rm[1] ? 2'd1 : pb_rm[2] ? 2'd2 : 2'd3;
+wire        pb_rdone = pb_rs && !pb_rd && !pb_rv && (pb_rm == 4'd0);    // back: valid and dirty again
 // the line and way it starts with
 wire [27:0] pb_sline = fl_vpush ? {a_tags[fl_vict*22 +: 22], ck_set} :
                        cm_push1 ? {cm_row[cm_pway*22 +: 22], cm_rset} :
@@ -693,20 +780,21 @@ function [15:0] wm16;   // the dirty bits of the ways in m
 endfunction
 wire        cm_all  = cm_go && cm_dc && (cm_scope == 2'b11) && !cm_push_in;
 wire [15:0] o_lwb   = 16'd1 << {ck_way, ck_lwi};             // a hit's longword
-wire        o_v     = rd_inv || su_inv1 || su_cbw || wk_whit || fl_start || fl_done || cm_clr || cm_push1;
-wire  [5:0] o_set   = fl_done ? fl_line[5:0] : (cm_clr || cm_push1) ? cm_rset : ck_set;
+wire        o_v     = rd_inv || su_inv1 || su_cbw || wk_whit || fl_start || fl_done || cm_clr || cm_push1 ||
+                      pb_rdone;
+wire  [5:0] o_set   = pb_rdone ? pb_line[5:0] : fl_done ? fl_line[5:0] : (cm_clr || cm_push1) ? cm_rset : ck_set;
 wire  [3:0] o_vand  = (rd_inv || su_inv1) ? ~(4'd1 << ck_way) :
                       fl_start ? ~(4'd1 << fl_vict) :
                       cm_clr   ? ~(cm_mv & ~cm_topush) :
                       cm_push1 ? ~(4'd1 << cm_pway) : 4'hF;
-wire  [3:0] o_vor   = (fl_done && !fl_nov && !sn_fill) ? (4'd1 << fl_way) : 4'd0;
+wire  [3:0] o_vor   = pb_rdone ? (4'd1 << pb_way) : (fl_done && !fl_nov && !sn_fill) ? (4'd1 << fl_way) : 4'd0;
 wire [15:0] o_dand  = (rd_inv || su_inv1) ? ~wm16(4'd1 << ck_way) :
                       fl_start ? ~wm16(4'd1 << fl_vict) :
                       fl_done  ? ~wm16(4'd1 << fl_way) :
                       wk_whit  ? ~o_lwb :
                       cm_clr   ? ~wm16(cm_mv & ~cm_topush) :
                       cm_push1 ? ~wm16(4'd1 << cm_pway) : 16'hFFFF;
-wire [15:0] o_dor   = su_cbw ? o_lwb : 16'd0;
+wire [15:0] o_dor   = pb_rdone ? ({12'd0, pb_dty} << {pb_way, 2'b00}) : su_cbw ? o_lwb : 16'd0;
 wire [15:0] sn_dclr = wm16(sn_clr);
 
 ap040_pipe_dcache_arr u_arr
@@ -714,7 +802,10 @@ ap040_pipe_dcache_arr u_arr
 	.clk     (clk),
 	.a_addr  (a_addr), .a_data (a_data), .a_way (ck_way),
 	.a_wdata (wk_whit ? wk_wdat : su_wd), .a_be (wk_whit ? 4'hF : su_be), .a_we (su_hit || wk_whit),
-	.b_addr  ({fl_line[5:0], fl_aidx}), .b_data (), .b_way (fl_way), .b_wdata (m_q), .b_we (fl_ack),
+	// port B: the line being read lands here -- or, its read having erred,
+	// the line it was to replace is put back, into the same way and set
+	.b_addr  ({fl_line[5:0], pb_rsw ? pb_rsi : fl_aidx}), .b_data (), .b_way (fl_way),
+	.b_wdata (pb_rsw ? pb_d[pb_rsi] : m_q), .b_we (fl_ack || pb_rsw),
 	.ta_set  (a_addr[7:2]), .ta_tags (a_tags),
 	.tb_set  ((cm_st != CM_IDLE) ? cm_set : fl_line[5:0]), .tb_tags (b_tags),
 	.tb_wtags (fl_wtags), .tb_we (fl_done),
@@ -727,13 +818,14 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		fl_act <= 1'b0; fl_line <= 28'd0; fl_fc <= 3'd0; fl_st <= 2'd0; fl_iss <= 3'd0; fl_arr <= 2'd0;
 		fl_have <= 4'd0; fl_way <= 2'd0; fl_tags <= 88'd0; fl_out <= 1'b0; fl_nov <= 1'b0; fl_su <= 1'b0;
-		su_v <= 1'b0; su_cmp <= 1'b0; su_part <= 1'b0; su_pa <= 32'd0; su_size <= `AP040_SZ_L;
+		su_v <= 1'b0; su_cmp <= 1'b0; su_part <= 1'b0; su_pa <= 32'd0; su_la <= 32'd0; su_size <= `AP040_SZ_L;
 		su_data <= 32'd0; su_md <= SU_WT; su_na <= 1'b0; su_tt <= 1'b0; su_s <= 1'b1; su_post <= 1'b0;
 		rep <= 2'd0;
 		cm_st <= CM_IDLE; cm_set <= 6'd0; cm_rset <= 6'd0; cm_seen <= 1'b0; cm_pend <= 4'd0;
 		cm_row <= 88'd0; cm_line <= 1'b0; cm_allw <= 1'b0; cm_push <= 1'b0;
 		pb_act <= 1'b0; pb_rd <= 1'b0; pb_rv <= 1'b0; pb_i <= 2'd0; pb_ri <= 2'd0; pb_n <= 3'd0;
 		pb_line <= 28'd0; pb_way <= 2'd0; pb_dty <= 4'd0;
+		pb_vic <= 1'b0; pb_rs <= 1'b0; pb_rm <= 4'd0; pb_sn <= 1'b0;
 		wk_st <= WK_IDLE; wk_seen <= 1'b0; wk_q <= 32'd0; wk_eber <= 1'b0;
 		sn_v1 <= 1'b0; sn_v2 <= 1'b0; sn_junk2 <= 1'b0; sn_l1 <= 28'd0; sn_l2 <= 28'd0;
 		for (i = 0; i < 64; i = i + 1) begin vld[i] <= 4'd0; dty[i] <= 16'd0; end
@@ -744,6 +836,7 @@ always @(posedge clk) begin
 			su_cmp  <= 1'b0;
 			su_part <= 1'b0;
 			su_pa   <= m_addr;
+			su_la   <= m_la;
 			su_size <= m_size;
 			su_data <= m_wdata;
 			// sent: not cached if its translation says so, or a MOVE16,
@@ -760,6 +853,7 @@ always @(posedge clk) begin
 			su_cmp  <= 1'b0;
 			su_part <= 1'b0;
 			su_pa   <= w_pa1;
+			su_la   <= w_la;
 			su_size <= w_size;
 			su_data <= w_data;
 			su_md   <= SU_CB;
@@ -805,10 +899,11 @@ always @(posedge clk) begin
 			if (fl_arr == 2'd3) fl_act <= 1'b0;       // valid (below), its tag written now
 		end
 		if (fl_flt) begin
-			// the line is abandoned; its way stays invalid (a dirty line it
-			// was to replace is pushed all the same). A copyback write it was
-			// read for goes to the bus alone: looked up again it would miss,
-			// and read the line again, for as long as the memory errs.
+			// the line is abandoned; its way stays invalid -- or holds again
+			// the dirty line it was to replace (the push engine puts it
+			// back). A copyback write it was read for goes to the bus alone:
+			// looked up again it would miss, and read the line again, for as
+			// long as the memory errs.
 			fl_out <= 1'b0;
 			fl_act <= 1'b0;
 			if (fl_su) su_post <= 1'b1;
@@ -823,16 +918,26 @@ always @(posedge clk) begin
 			pb_line <= pb_sline;
 			pb_way  <= pb_sway;
 			pb_dty  <= pb_sdty;
+			pb_vic  <= fl_vpush;
+			pb_rs   <= 1'b0;
+			pb_sn   <= sn_v2 && (sn_l2 == pb_sline);
 		end else begin
 			if (pb_rd) begin
 				pb_i <= pb_i + 2'd1;
 				pb_n <= pb_n + 3'd1;
 				if (pb_n == 3'd3) pb_rd <= 1'b0;
 			end
-			if (pb_wr) begin
-				pb_dty[pb_wi] <= 1'b0;
-				if ((pb_dty & ~(4'd1 << pb_wi)) == 4'd0) pb_act <= 1'b0;
+			if (pb_wr) pb_dty[pb_wi] <= 1'b0;
+			else if (pb_act && !pb_rd && !pb_rv && (pb_dty == 4'd0) && !m_wr_busy_w) pb_act <= 1'b0;
+			if (sn_v2 && pb_act && (sn_l2 == pb_line)) pb_sn <= 1'b1;
+			// the new line's read erred: the replaced line goes back, or, if a
+			// snoop took it meanwhile, is dropped
+			if (fl_flt && pb_act && pb_vic && !pb_rs) begin
+				if (pb_sn) pb_act <= 1'b0;
+				else begin pb_rs <= 1'b1; pb_rm <= fl_have; end
 			end
+			if (pb_rsw) pb_rm[pb_rsi] <= 1'b0;
+			if (pb_rdone) begin pb_rs <= 1'b0; pb_act <= 1'b0; end
 		end
 		pb_rv <= pb_rd && !pb_start;
 		pb_ri <= pb_i;
@@ -907,6 +1012,91 @@ always @(posedge clk) begin
 		end
 	end
 end
+
+//---------------------------------------------------------------------------
+// a write-back's bus error (caches stage R)
+//---------------------------------------------------------------------------
+
+// The bus controller holds one write at a time, and takes the next only
+// once the last is done: a bus error it reports is the write handed over
+// last, recorded here as it goes -- the whole write, a crossing one's bytes
+// included, as the frame reports it (8.4.6.4: the first byte's address).
+wire        m_take  = m_wr && !m_wr_busy_w;
+reg         hw_push, hw_m16, hw_lk, hw_exc;
+reg  [31:0] hw_la, hw_data;
+reg   [1:0] hw_size, hw_tt;
+reg   [2:0] hw_tm;
+// The fault taken, until EA-fetch's entry for it is done. PD0-PD3 hold a
+// push's line; a MOVE16's four longwords (captured as they go, while no
+// fault is held, and after its own for the rest of its line); a write's
+// memory-aligned data in WB1D. Any further bus error is dropped -- one on
+// an exception frame's write marks the fault a double fault.
+// The rest of a MOVE16's line: its fault comes before the bus controller
+// takes another write, so the MOVE16 writes after it, up to its fourth
+// longword, are that MOVE16's (pf_m16c).
+reg         pf_v, pf_m16, pf_m16c, pf_exc;
+reg  [15:0] pf_ssw;
+reg  [31:0] pf_fa;
+reg   [7:0] pf_wb1s;
+reg  [31:0] pf_pd [0:3];
+wire  [1:0] hw_szf  = hw_m16 ? 2'b11 : szf_of(hw_size);
+wire  [1:0] hw_ttf  = hw_m16 ? 2'b01 : hw_tt;
+wire        pf_new  = m_wberr && (!pf_v || pw_ack);
+always @(posedge clk) begin
+	if (!nreset) begin
+		hw_push <= 1'b0; hw_m16 <= 1'b0; hw_lk <= 1'b0; hw_exc <= 1'b0;
+		hw_la <= 32'd0; hw_data <= 32'd0; hw_size <= `AP040_SZ_L; hw_tt <= 2'b00; hw_tm <= 3'd0;
+		pf_v <= 1'b0; pf_m16 <= 1'b0; pf_m16c <= 1'b0; pf_exc <= 1'b0;
+		pf_ssw <= 16'd0; pf_fa <= 32'd0; pf_wb1s <= 8'd0;
+		pf_pd[0] <= 32'd0; pf_pd[1] <= 32'd0; pf_pd[2] <= 32'd0; pf_pd[3] <= 32'd0;
+	end else begin
+		if (m_take) begin
+			hw_push <= pb_wr;
+			hw_la   <= pb_wr ? pb_wa : su_pw ? su_la : s_post ? w_la : c_addr;
+			hw_data <= pb_wr ? pb_d[pb_wi] : su_pw ? su_data : s_post ? w_data : c_wdata;
+			hw_size <= pb_wr ? `AP040_SZ_L : su_pw ? su_size : s_post ? w_size : c_size;
+			// a copyback write going alone is never MOVES to another space
+			hw_tt   <= (pb_wr || su_pw) ? 2'b00 : s_post ? tt_of(w_ovr, w_fcv) : tt_of(c_fc_ovr, c_fc_val);
+			hw_tm   <= pb_wr ? 3'd0 : su_pw ? {su_s, 2'b01} :
+			           s_post ? tm_of(w_ovr, w_fcv, w_sup) : tm_of(c_fc_ovr, c_fc_val, c_sup);
+			hw_m16  <= !pb_wr && !su_pw && (s_post ? w_m16 : c_m16);
+			hw_lk   <= !pb_wr && !su_pw && (s_post ? w_lk : c_lock);
+			// allocating nothing and not MOVE16: an exception frame's
+			hw_exc  <= !pb_wr && (su_pw ? su_na : s_post ? (w_na && !w_m16) : (c_nalloc && !c_m16));
+		end
+		// a MOVE16's longwords, as they go
+		if (m_take && !pb_wr && !su_pw && (s_post ? w_m16 : c_m16) && (!pf_v || pf_m16c)) begin
+			pf_pd[s_post ? w_la[3:2] : c_addr[3:2]] <= s_post ? w_data : c_wdata;
+			if ((s_post ? w_la[3:2] : c_addr[3:2]) == 2'd3) pf_m16c <= 1'b0;
+		end
+		if (pf_new) begin
+			pf_v    <= 1'b1;
+			pf_m16  <= hw_m16;
+			pf_m16c <= hw_m16 && (hw_la[3:2] != 2'd3);
+			pf_exc  <= hw_exc;
+			pf_fa   <= hw_la;
+			// ATC clear: a physical bus error; RW clear: a write. A push is TT 0,
+			// TM 0, a longword (its record says so); MOVE16's write TT 1, a line.
+			pf_ssw  <= {6'b000000, hw_lk, 1'b0, 1'b0, hw_szf, hw_ttf, hw_tm};
+			pf_wb1s <= hw_push ? 8'h00 : {1'b1, hw_szf, hw_ttf, hw_tm};
+			if (hw_push) begin
+				pf_pd[0] <= pb_d[0]; pf_pd[1] <= pb_d[1]; pf_pd[2] <= pb_d[2]; pf_pd[3] <= pb_d[3];
+			end else if (!hw_m16) begin
+				pf_pd[0] <= wb1d_of(hw_data, hw_size, hw_la[1:0]);
+				pf_pd[1] <= 32'd0; pf_pd[2] <= 32'd0; pf_pd[3] <= 32'd0;
+			end
+		end else begin
+			if (pw_ack) pf_v <= 1'b0;
+			if (m_wberr && hw_exc) pf_exc <= 1'b1;
+		end
+	end
+end
+assign pw_pend = pf_v;
+assign pw_ssw  = pf_ssw;
+assign pw_fa   = pf_fa;
+assign pw_wb1s = pf_wb1s;
+assign pw_pd   = {pf_pd[3], pf_pd[2], pf_pd[1], pf_pd[0]};
+assign pw_exc  = pf_exc;
 
 //---------------------------------------------------------------------------
 // toward the CPU: registers, and the bus controller's registered answers
@@ -1097,6 +1287,10 @@ end
 `ifdef VERILATOR
 always @(posedge clk)
 	if (nreset) begin
+		// A put-back writes the way and set the fill wrote: a replaced line's
+		// are the fill's by construction (pb_sway, pb_sline).
+		if (pb_rsw && ((pb_way != fl_way) || (pb_line[5:0] != fl_line[5:0])))
+			$error("ap040_pipe_dmu: a line put back where its fill was not");
 		// The bus controller's port B takes one address a cycle.
 		if (m_rd && m_wr)
 			$error("ap040_pipe_dmu: a read and a write on the bus controller's port B in one cycle");

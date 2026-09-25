@@ -220,6 +220,16 @@ module ap040_pipe_cpu
 	output  [1:0] cm_scope,
 	output [31:0] cm_addr,
 	input         cm_done,
+	// a write-back's bus error, held by the DMU until EA-fetch takes it
+	// (caches stage R; ap040_ea_fetch.v's pae_hold): tie pw_pend low where
+	// nothing reports one
+	input         pw_pend,
+	input  [15:0] pw_ssw,
+	input  [31:0] pw_fa,
+	input   [7:0] pw_wb1s,
+	input [127:0] pw_pd,
+	input         pw_exc,
+	output        pw_ack,
 	output        ic_en,        // CACR IE
 	output        dc_en,        // CACR DE
 	// what a port-B access is, for the data cache: no allocation, MOVE16,
@@ -1487,6 +1497,8 @@ ap040_ea_fetch #(
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope),
 	.cm_addr (cm_addr), .cm_done (cm_done),
+	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
+	.pw_exc (pw_exc), .pw_ack (pw_ack),
 	.l1_nalloc_b (eaf_l1_nalloc), .l1_m16_b (eaf_l1_m16), .l1_lock_b (eaf_l1_lock),
 	.smc_hit          (smc_hit),
 	.l1_rflt_b        (l1_rflt_b),

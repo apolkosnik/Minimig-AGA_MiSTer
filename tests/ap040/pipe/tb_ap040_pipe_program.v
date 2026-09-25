@@ -72,11 +72,28 @@ reg         fberr_armed = 0;
 reg  [15:0] poke_addr = 0;
 reg  [15:0] peek_addr = 0;
 reg  [15:0] fberr_addr = 0;
+// $F156: a one-shot bus error on the next data write sub-cycle to the
+// longword written there (0 disarms) -- a posted write's, a push's, an
+// exception frame's (caches stage R). $F158: the same for a data read -- a
+// line read's beat, say. $F15A: how many cycles the armed write sub-cycle is
+// held before it errs (0: at once) -- so a program can have instructions
+// arrive while a write's bus error is still to come.
+reg         wberr_d_armed = 0;
+reg  [15:0] wberr_d_addr = 0;
+reg  [15:0] wberr_d_delay = 0;
+reg  [15:0] wberr_d_wait = 0;
+reg         rberr_d_armed = 0;
+reg  [15:0] rberr_d_addr = 0;
 wire        berr_d = berr_armed && nreset && (busstate != 2'b01) &&
                      (addr_out[15:0] == 16'hF140);
 wire        fberr  = fberr_armed && nreset && (busstate == 2'b00) &&
                      (addr_out[15:0] == fberr_addr);
-wire        berr   = berr_d | fberr;
+wire        wberr_hit = wberr_d_armed && nreset && (busstate == 2'b11) &&
+                        (addr_out[15:2] == wberr_d_addr[15:2]);
+wire        wberr_d = wberr_hit && (wberr_d_wait >= wberr_d_delay);
+wire        rberr_d = rberr_d_armed && nreset && (busstate == 2'b10) &&
+                      (addr_out[15:2] == rberr_d_addr[15:2]);
+wire        berr   = berr_d | fberr | wberr_d | rberr_d;
 
 wire        bus_clkena = (busstate == 2'b01) | mem_ready | berr;
 
@@ -161,7 +178,14 @@ always @(posedge clk) begin
 		// one physical bus error per arming; the restarted access succeeds
 		if (berr_d) berr_armed  <= 0;
 		if (fberr)  fberr_armed <= 0;
+		if (wberr_d) begin wberr_d_armed <= 0; wberr_d_wait <= 0; end
+		if (rberr_d) rberr_d_armed <= 0;
 		mem_ready <= 0; lvl_hold <= 0;
+	end
+	else if (wberr_hit) begin
+		// the armed write sub-cycle, held until its error is due
+		mem_ready <= 0; lvl_hold <= 0;
+		wberr_d_wait <= wberr_d_wait + 16'd1;
 	end
 	else if (phase == 2) begin
 		if (busstate == 2'b01) begin mem_ready <= 0; lvl_hold <= 0; end
@@ -190,6 +214,16 @@ always @(posedge clk) begin
 	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF154) begin
 		fberr_armed <= |data_write;
 		fberr_addr  <= data_write;
+	end
+	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF156) begin
+		wberr_d_armed <= |data_write;
+		wberr_d_addr  <= data_write;
+	end
+	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF15A)
+		wberr_d_delay <= data_write;
+	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF158) begin
+		rberr_d_armed <= |data_write;
+		rberr_d_addr  <= data_write;
 	end
 	if (nreset && mem_ready && busstate == 2'b11 && addr_out[15:0] == 16'hF144)
 		irq_exc_armed <= data_write[1:0];

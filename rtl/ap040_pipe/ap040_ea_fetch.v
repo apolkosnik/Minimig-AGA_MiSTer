@@ -400,6 +400,15 @@ module ap040_ea_fetch
 	output      [1:0] cm_scope,     // 01 line, 10 page, 11 all
 	output     [31:0] cm_addr,
 	input             cm_done,
+	// A write-back's bus error, held by the DMU until taken here (caches
+	// stage R; MC68040UM 8.4.6): what its access error frame reports.
+	input             pw_pend,
+	input      [15:0] pw_ssw,
+	input      [31:0] pw_fa,
+	input       [7:0] pw_wb1s,
+	input     [127:0] pw_pd,        // WB1D/PD0 in 31:0, PD1, PD2, PD3
+	input             pw_exc,       // it was an exception frame's write: a double fault
+	output            pw_ack,       // its entry is done
 	input             l1_wflt,
 	input             l1_flt_bus,
 	input             l1_flt_ma,   // the fault was past the boundary of a transfer crossing pages
@@ -1293,6 +1302,17 @@ always @(posedge clk)
 	if (!nreset)             fp_ea_r <= 32'd0;
 	else if (ce && fp_start) fp_ea_r <= ea_target;
 
+// The write-back fault's arm (see pae_hold): sampled as an instruction
+// arrives, as irq_arm is; spent when the fault's entry is done, which is
+// also when the DMU lets it go.
+assign pw_ack = ce && exc_vec_done && !stall_in && eac_is_aerr && aer_pw_r;
+always @(posedge clk)
+	if (!nreset) pae_arm <= 1'b0;
+	else if (ce) begin
+		if (pw_ack)                         pae_arm <= 1'b0;
+		else if (!eac_valid || !eaf_stall)  pae_arm <= pw_pend;
+	end
+
 // The full-format pointer read (see its block above). ADDR latches the
 // intermediate address once EX can take the instruction's operands as
 // final; RD sends it; the data may come back whatever EX is doing. It
@@ -2114,9 +2134,31 @@ reg        exc_pend_irq;
 reg  [2:0] irq_lvl_r;
 reg        trace_carried;
 wire irq_hold     = eac_valid && irq_arm && !(trace_arm && trace_carried) && !cmr_busy && !cm_resume;
-wire trace_hold   = trc_hold || irq_hold;   // an entry holds this instruction
+// A write-back's bus error (caches stage R). A write the bus controller
+// erred on has no instruction left -- its own completed when the write was
+// accepted -- so the DMU holds the fault, and, as for an interrupt, an
+// instruction arriving while it is pending is held here (it starts
+// nothing) and becomes the access error's entry: format $7, vector 2, its
+// own address in the PC field, the instruction the handler's RTE comes back
+// to -- "the instruction executing at the time the fault was detected"
+// (8.4.6). The frame's write-back fields
+// are the DMU's (pw_*): WB1 the write, or PD0-PD3 a push's line. It
+// outranks an interrupt at the same boundary. A trace already owed is taken
+// first and the fault is held in the trace handler's first instruction: the
+// 68040 sets CT instead, a continuation this core's RTE does not have.
+// Unlike the trace and interrupt entries it does not wait for EX and WB to
+// drain: it is an access error's entry, which a precise fault takes with
+// older instructions still in EX -- the SR it stacks is the one forwarded
+// from EX (sr_in), and the frame waits on a7_busy, creg_busy and
+// hold_hazard (exc_go). So the take is registers only: it feeds every
+// exception decision here (aerr_now).
+reg        pae_arm;
+wire pae_hold     = eac_valid && pae_arm && !trace_arm && !cmr_busy && !cm_resume;
+wire pae_take     = pae_hold && !exc_pend_irq && !exc_pend_trace && !exc_pend_aerr;
+wire trace_hold   = trc_hold || irq_hold || pae_hold;   // an entry holds this instruction
 wire trace_take   = trc_hold && !irq_hold && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq;
-wire irq_take     = irq_hold && irq_pend && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq && !exc_pend_trace;
+wire irq_take     = irq_hold && irq_pend && !pae_hold && !eaf_valid && !wb_busy && !stall_in && !exc_pend_irq &&
+                    !exc_pend_trace;
 wire eac_is_trace = trace_take || exc_pend_trace;
 wire eac_is_irq   = irq_take || exc_pend_irq;
 wire [2:0] irq_lvl_now = exc_pend_irq ? irq_lvl_r : irq_take_lvl;
@@ -2258,7 +2300,9 @@ reg [31:0] owe_pc, owe_fa, owe_wd;
 reg [15:0] owe_ssw;
 wire       owe_hit  = owe && (eac_pc == owe_pc);
 wire       aerr_ow  = owe_hit && !trace_hold && !ae_hold && !hold_hazard;
-wire       aerr_now = live && (aerr_rd || aerr_wr || aerr_if || aerr_ow);
+// ...or a write-back's bus error, at the instruction it holds (pae_take).
+wire       aerr_pw  = pae_take;
+wire       aerr_now = live && (aerr_rd || aerr_wr || aerr_if || aerr_ow || aerr_pw);
 reg        exc_pend_aerr;
 always @(posedge clk)
 	if (!nreset) begin
@@ -2296,6 +2340,7 @@ wire  [2:0] aer_tm_f    = (aer_now_mv && (aer_now_fc == 3'd2 || aer_now_fc == 3'
                           ? {aer_now_fc[2], 2'b01} : aer_now_fc;
 wire       eac_is_aerr = aerr_now || exc_pend_aerr;
 reg [31:0] aer_fa, aer_wd;
+reg        aer_pw_r;      // the entry is a write-back's bus error's: its fields are the DMU's
 reg [31:0] aer_eaf;       // the EA field: the MOVEM's first address with CM, else FA
 reg [15:0] aer_ssw;
 wire eac_is_exc    = eac_is_aerr || eac_is_trace || eac_is_irq || ae_take ||
@@ -2717,7 +2762,10 @@ wire [31:0] exc_beat_addr = exc_f7_r ? exc_f7_addr :
 // address (the fault address here), the SSW, three write-back statuses
 // all CLEAR -- the instruction is restarted, so an OS that completes
 // valid write-backs must find none -- the fault address, WB3A = the fault
-// address, WB3D = the data of a faulted write, and zeroes.
+// address, WB3D = the data of a faulted write, and zeroes. A write-back's
+// bus error (aer_pw_r) restarts nothing: WB1S, WB1A and WB1D/PD0-PD3 are
+// the DMU's -- the write, valid, for the handler to complete, or a push's
+// line (8.4.6, Table 8-6).
 reg  [31:0] f7_word;
 always @(*)
 	case (exc_f7_beat)
@@ -2725,9 +2773,15 @@ always @(*)
 	4'd1:    f7_word = {exc_pc_field[15:0], exc_vecoff_word};
 	4'd2:    f7_word = aer_eaf;
 	4'd3:    f7_word = {aer_ssw, 16'h0000};
+	4'd4:    f7_word = aer_pw_r ? {24'h000000, pw_wb1s} : 32'h0;
 	4'd5:    f7_word = aer_fa;
 	4'd6:    f7_word = aer_fa;
 	4'd7:    f7_word = aer_wd;
+	4'd10:   f7_word = aer_pw_r ? pw_fa : 32'h0;
+	4'd11:   f7_word = aer_pw_r ? pw_pd[31:0] : 32'h0;
+	4'd12:   f7_word = aer_pw_r ? pw_pd[63:32] : 32'h0;
+	4'd13:   f7_word = aer_pw_r ? pw_pd[95:64] : 32'h0;
+	4'd14:   f7_word = aer_pw_r ? pw_pd[127:96] : 32'h0;
 	default: f7_word = 32'h0;
 	endcase
 wire [31:0] exc_wdata     = exc_f7_r ? f7_word :
@@ -3037,6 +3091,7 @@ always @(posedge clk) begin
 		exc_f7_beat     <= 4'd0;
 		exc_f7_addr     <= 32'd0;
 		exc_pend_aerr   <= 1'b0;
+		aer_pw_r        <= 1'b0;
 		owe <= 1'b0; owe_pc <= 32'd0; owe_fa <= 32'd0; owe_wd <= 32'd0; owe_ssw <= 16'd0;
 		cmr_ph <= CMR_IDLE; cmr_pend <= 1'b0; cmr_base <= 32'd0; exc_dbl_r <= 1'b0;
 		cm_resume <= 1'b0; cm_ea <= 32'd0; mvm_ea0 <= 32'd0; aer_eaf <= 32'd0;
@@ -3222,21 +3277,25 @@ always @(posedge clk) begin
 			            2'b00, ex_st_sup, 2'b01};
 		end else if ((exc_vec_done && !stall_in) || (live && !owe_hit)) owe <= 1'b0;
 
-		if (exc_vec_done && !stall_in) exc_pend_aerr <= 1'b0;
-		else if (aerr_now && !exc_pend_aerr) begin
+		if (exc_vec_done && !stall_in) begin
+			exc_pend_aerr <= 1'b0;
+			aer_pw_r      <= 1'b0;
+		end else if (aerr_now && !exc_pend_aerr) begin
 			exc_pend_aerr <= 1'b1;
-			aer_fa  <= aerr_ow ? owe_fa : aerr_if ? (eac_pc + {27'd0, eac_fflt[3:0], 1'b0}) : aerr_rd ? rdq_a : l1_addr_b;
+			aer_pw_r      <= aerr_pw;
+			aer_fa  <= aerr_pw ? pw_fa : aerr_ow ? owe_fa : aerr_if ? (eac_pc + {27'd0, eac_fflt[3:0], 1'b0}) :
+			           aerr_rd ? rdq_a : l1_addr_b;
 			// CM: a MOVEM's own transfer faulted -- not its pointer read, which
 			// comes before mvm_active -- or a resumed one faulted before it
 			// could start (its fetch, say): that keeps the outer CM and EA.
-			aer_eaf <= mvm_active ? mvm_ea0 : cm_resume ? cm_ea :
+			aer_eaf <= aerr_pw ? pw_fa : mvm_active ? mvm_ea0 : cm_resume ? cm_ea :
 			           (aer_now_16 && !aerr_ow && !aerr_if) ? {(aerr_rd ? rdq_a[31:4] : l1_addr_b[31:4]), 4'd0} :
 			           aerr_ow ? owe_fa : aerr_if ? (eac_pc + {27'd0, eac_fflt[3:0], 1'b0}) : aerr_rd ? rdq_a : l1_addr_b;
-			aer_wd  <= aerr_ow ? owe_wd : (aerr_rd || aerr_if) ? 32'd0 : l1_data_b;
+			aer_wd  <= aerr_ow ? owe_wd : (aerr_rd || aerr_if || aerr_pw) ? 32'd0 : l1_data_b;
 			// A fetch: a longword read of program space under the privilege
 			// the instruction runs in, which is the one it was fetched under
 			// -- an SR write that changes it refetches what follows.
-			aer_ssw <= (aerr_ow ? owe_ssw :
+			aer_ssw <= aerr_pw ? pw_ssw : (aerr_ow ? owe_ssw :
 			            aerr_if ? {3'b000, 1'b0, 1'b0, !eac_fflt[4], 1'b0, 1'b1, 1'b0,
 			                       2'b00, 2'b00, sr_in[13], 2'b10}
 			                    : {3'b000, 1'b0, l1_flt_ma, !l1_flt_bus, aer_now_lk, !aer_now_wr && !aer_now_lk, 1'b0,
@@ -3908,8 +3967,11 @@ always @(posedge clk) begin
 				// read that faulted. Halted, not stopped: nothing but reset ends
 				// it (ap040_core.v's fatal_halt), where a STOP is woken by an
 				// interrupt -- which since bundle 9 woke this halt too.
-				eaf_is_stop    <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec;
-				eaf_halt       <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec;
+				// A bus error on an exception frame's write is one too (caches
+				// stage R): the write went out before the entry's vector read,
+				// so the DMU holds it by now, whichever entry wrote it.
+				eaf_is_stop    <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec || (pw_pend && pw_exc);
+				eaf_halt       <= exc_vec_dbl || exc_dbl_r || exc_dbl_vec || (pw_pend && pw_exc);
 				eaf_is_chk     <= eac_is_chk_trap && own_exc;
 				eaf_chk_ok     <= 1'b0;
 				eaf_is_trapcc     <= eac_is_trapcc_trap && own_exc;
