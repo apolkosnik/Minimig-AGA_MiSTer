@@ -50,6 +50,15 @@
 //      window at $400 with its second half, a word inside one at $408, a   //
 //      word at $410 just past a full window at $400 leaves it full, and a  //
 //      longword at $40E reaches its last longword with its first half.    //
+//   6. A write accepted, and a fetch of the same longword requested in    //
+//      that very cycle, the longword outside the window (behind it, as a  //
+//      store onto the next instruction finds it once the fetch has run    //
+//      ahead). The write must reach the bus before the read of it, and   //
+//      the fetch return the written word. The prefetch stream's guard      //
+//      looked only at the window as it stood, so the read went out in the  //
+//      write's own cycle, ahead of it: t_integer.s 192 ran the old         //
+//      instruction, and t_exceptions.s 141's fetch passed the write that  //
+//      armed its bus error -- both only under random ce with the slow L1.  //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -405,6 +414,25 @@ initial begin
 	want_q("$40E after a longword there", 16'hCCCC);
 	req(32'h0000_0410);
 	want_q("$410 after a longword at $40E", 16'hDDDD);
+
+	// ---------------- phase 6: a fetch in its write's own cycle, outside the window
+	req(32'h0000_0600);
+	want_q("$600 for phase 6", img(32'h0000_0600));
+	settle;
+	mark = log_n;
+	wren_b = 1'b1; address_b = 32'h0000_0500; size_b = `AP040_SZ_W; data_b = 32'h0000_7777;
+	en_a   = 1'b1; address_a = 32'h0000_0500;
+	step;
+	wren_b = 1'b0; en_a = 1'b0;
+	want_q("$500 fetched in the cycle its write was accepted", 16'h7777);
+	begin : order6
+		integer k, first;
+		first = -1;
+		for (k = mark; k < log_n; k = k + 1)
+			if (first < 0 && log_addr[k][31:2] == 30'h140) first = k;
+		if (first < 0 || !log_write[first])
+			fail("a fetch went out ahead of the write to its longword accepted in the same cycle");
+	end
 
 	if (unasked != 0) fail("a request went out before the first en_a");
 

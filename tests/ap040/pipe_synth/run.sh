@@ -20,7 +20,13 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; rtl="$(cd "$here/../../../rtl/ap040_pipe" && pwd)"
 rtl040="$(cd "$here/../../../rtl/ap040" && pwd)"   # the shared FPU engine
 work="${1:-/home/adam/ap040-audit4/pipe-synth}"; rm -rf "$work"; mkdir -p "$work"
-sed -e "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" -e "s#\.\./\.\./\.\./rtl/ap040#$rtl040#g" "$here/pipe.qsf" > "$work/pipe.qsf"
+# The second argument names another top: ap040_pipe_bus16 is the CPU with
+# the MMU and the 16-bit adapter -- what would sit on the card.
+top="${2:-ap040_pipe_core}"
+rtlroot="$(cd "$here/../../../rtl" && pwd)"
+sed -e "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" -e "s#\.\./\.\./\.\./rtl/ap040#$rtl040#g" \
+    -e "s#\.\./\.\./\.\./rtl/bram.vhd#$rtlroot/bram.vhd#g" \
+    -e "s#TOP_LEVEL_ENTITY ap040_pipe_core#TOP_LEVEL_ENTITY $top#" "$here/pipe.qsf" > "$work/pipe.qsf"
 cp "$here/pipe.sdc" "$here/pipe.qpf" "$here/paths40.tcl" "$work/"; cd "$work"
 Q=/opt/intelFPGA_lite/17.0/quartus/bin; echo "quartus pid $$ in $work"
 # Temporaries go in the work directory, not the shared tmpfs: a full one

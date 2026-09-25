@@ -506,9 +506,13 @@ always @(posedge clk) begin
 			mem_size  <= b_x ? `AP040_SZ_B : b_size;
 			mem_addr  <= b_x ? (b_addr + {30'd0, b_bi}) : b_addr;
 			mem_fc    <= b_fc;
-		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_hits_pf && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
+		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_accept && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
 			// The next longword of the stream, as the window stands after
-			// this cycle's request. Not before the first request (review 15):
+			// this cycle's request. Not in a cycle a write is accepted: whether
+			// that write lands in the window is a thirty-bit compare on an
+			// address the CPU has only just formed, and deciding the bus on it
+			// was the bus16 top's worst path (-4.913 ns at 25 ns); the write
+			// goes first next cycle anyway. Not before the first request (review 15):
 			// pf_base is zero out of reset, and a read of $0 the fetch unit
 			// never asked for went out while ce held the core -- one the
 			// reset PC's fetch then queued behind, for ever if $0 never

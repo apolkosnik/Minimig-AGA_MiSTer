@@ -588,8 +588,15 @@ wire [31:0] operand_a = eac_src_a_is_imm ? eac_imm :
 // This is the 68040's own change/use stall. Register-only instructions
 // keep the full forward, so a dependent ALU chain is not slowed.
 wire        lf_a         = !eac_src_a_is_imm && (fwd_a_from_ex || (fwd_a_from_ex2 && ex_fwd2_slow));
-wire [31:0] operand_a_ea = eac_src_a_is_imm ? eac_imm :
-                           (fwd_a_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_a;
+// EX's second forward is an An step -- eaf_an_data, this stage's own output
+// register -- or, for MULL/DIVL, the high result (ex_fwd2_slow). The views
+// take only the first, so they take it from the register itself: through
+// ex_fwd2_data the divider's high word was a mux input on the address, and
+// with membus under the core that was the bus16 top's worst path (-4.913
+// ns). The select is the same one, so the value is too.
+wire        an_fwd_ok    = eaf_valid && eaf_writes_an && !ex_fwd2_slow;
+wire        an_fwd_a     = an_fwd_ok && (eaf_an_reg == raddr_a);
+wire [31:0] operand_a_ea = eac_src_a_is_imm ? eac_imm : an_fwd_a ? eaf_an_data : rdata_a;
 
 // The effective address: operand_a (An's value, resolved by the mux above)
 // PLUS eac_imm (the sign-extended displacement for a (d16,An) form, or
@@ -2325,7 +2332,7 @@ wire fwd_c_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == raddr_c);
 wire [31:0] operand_c = fwd_c_from_ex  ? ex_fwd_data  :
                         fwd_c_from_ex2 ? ex_fwd2_data : rdata_c;
 wire        lf_c         = fwd_c_from_ex || (fwd_c_from_ex2 && ex_fwd2_slow);
-wire [31:0] operand_c_ea = (fwd_c_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_c;
+wire [31:0] operand_c_ea = (an_fwd_ok && (eaf_an_reg == raddr_c)) ? eaf_an_data : rdata_c;
 
 assign raddr_b    = eac_dest_reg;
 
@@ -2337,7 +2344,7 @@ wire fwd_b_from_ex2 = ex_fwd2_valid && (ex_fwd2_dest == eac_dest_reg);
 wire [31:0] operand_b = fwd_b_from_ex  ? ex_fwd_data  :
                        fwd_b_from_ex2 ? ex_fwd2_data : rdata_b;
 wire        lf_b         = fwd_b_from_ex || (fwd_b_from_ex2 && ex_fwd2_slow);
-wire [31:0] operand_b_ea = (fwd_b_from_ex2 && !ex_fwd2_slow) ? ex_fwd2_data : rdata_b;
+wire [31:0] operand_b_ea = (an_fwd_ok && (eaf_an_reg == eac_dest_reg)) ? eaf_an_data : rdata_b;
 
 // BSR/JSR's push address AND the new A7 value to commit are the SAME
 // expression, from operand_b (A7's current value via port B, decode having
