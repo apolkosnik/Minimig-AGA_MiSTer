@@ -49,6 +49,33 @@
 //      completes, the line valid and whole; the reads after it go to the   //
 //      bus alone.                                                          //
 //  11. Translated: a page whose descriptor says CM 10 is not cached.       //
+// Copyback (caches stage D; a data TTR with CM 01 makes every access so):  //
+//  12. A write that misses reads its line and stays in it; one that hits   //
+//      stays in it; neither reaches memory; CPUSHL pushes exactly the       //
+//      dirty longwords, CINVL drops them. A byte write that misses lands   //
+//      in the longword the line read brought: its other bytes memory's.    //
+//  13. A dirty line replaced: its longwords are read out before the new    //
+//      line's land on them, and pushed after -- swept over memory latency  //
+//      0-5 and the longword the fill asks for first; memory ends with the  //
+//      dirty data and the cache with the new line.                         //
+//  14. CPUSH over a set with three dirty ways and a clean one, two lines   //
+//      in each of two pages: CPUSHL its line, CPUSHP its page's (the clean //
+//      one invalidated, only the dirty longword written), CPUSHA the rest. //
+//  15. The table walker through the cache: a read that hits reads nothing  //
+//      from its port; a write that hits updates the line, goes to memory,  //
+//      and leaves its longword clean (a CPUSH after it writes nothing).   //
+//  16. A copyback write that allocates nothing and misses is one bus write;//
+//      an inhibited read that hits a dirty line has its pushes on the bus  //
+//      first; a copyback write meeting a line being read waits, then hits. //
+//  17. A copyback write whose line read errs -- on the longword written,   //
+//      or a later one -- goes to the bus alone, and nothing hangs.         //
+//  18. A write-through write to a longword a replaced line is pushing: the //
+//      push reaches memory first. Swept across the push.                  //
+//  19. DE clear, CPUSHA pushing a line whose last longword is a page        //
+//      descriptor, memory's copy stale: an instruction-side translation    //
+//      started once the push has begun walks the tables (ap040_pipe_mmu.v's//
+//      walker, held by the DMU's wr_pend) and must read the pushed         //
+//      descriptor. Swept over the translation's start.                     //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -99,7 +126,7 @@ wire [31:0] c_q;
 wire        c_rvalid, c_wr_busy_w, c_rflt, c_wflt, c_flt_bus, c_flt_ma, c_idle, wr_pend;
 wire        c_wr_drop = !c_wr;
 reg         dc_en = 1'b0;
-reg         cm_req = 1'b0, cm_dc = 1'b1;
+reg         cm_req = 1'b0, cm_dc = 1'b1, cm_push = 1'b0;
 reg   [1:0] cm_scope = 2'b11;
 reg  [31:0] cm_addr = 32'd0;
 wire        cm_done;
@@ -121,9 +148,18 @@ wire  [2:0] mem_fc;
 reg         mem_ack = 1'b0, mem_flt = 1'b0;
 reg  [31:0] mem_rdata = 32'd0;
 wire        walker_req, walker_we;
+wire        mw_req, mw_we, mw_ack, mw_berr;
+wire [31:0] mw_addr, mw_wdat, mw_data;
 wire [31:0] walker_addr, walker_wdat;
 reg         walker_ack = 1'b0;
 reg  [31:0] walker_data = 32'd0;
+// the MMU's instruction-side port (test 19)
+reg         i_req_b = 1'b0;
+reg  [31:0] i_addr_b = 32'd0;
+wire        i_pass_b, i_flt_b;
+wire [31:0] i_pa_b;
+reg         pf_req_b = 1'b0;   // PFLUSHA
+wire        pf_done_b;
 
 ap040_pipe_dmu u_dmu
 (
@@ -133,8 +169,14 @@ ap040_pipe_dmu u_dmu
 	.c_sup (c_sup), .c_fc_ovr (c_fc_ovr), .c_fc_val (c_fc_val), .c_wr_drop (c_wr_drop),
 	.c_nalloc (c_nalloc), .c_m16 (c_m16), .c_lock (c_lock),
 	.dc_en (dc_en), .dtt0 (ttr0), .dtt1 (dtt1),
-	.cm_req (cm_req), .cm_dc (cm_dc), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done),
+	.cm_req (cm_req), .cm_dc (cm_dc), .cm_push_in (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done),
 	.sn_req (sn_req), .sn_addr (sn_addr),
+	.wk_req (mw_req || wk_req_b), .wk_we (wk_req_b ? wk_we_b : mw_we),
+	.wk_addr (wk_req_b ? wk_addr_b : mw_addr), .wk_wdat (wk_req_b ? wk_wdat_b : mw_wdat),
+	.wk_ack (mw_ack), .wk_data (mw_data), .wk_berr (mw_berr),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (1'b0),
 	.c_q (c_q), .c_rvalid (c_rvalid), .c_wr_busy_w (c_wr_busy_w), .c_rflt (c_rflt),
 	.c_wflt (c_wflt), .c_flt_bus (c_flt_bus), .c_flt_ma (c_flt_ma), .c_idle (c_idle),
 	.wr_pend (wr_pend),
@@ -151,17 +193,17 @@ ap040_pipe_mmu u_mmu
 (
 	.clk (clk), .nreset (nreset),
 	.tc (tc), .urp (urp), .srp (srp), .itt0 (ttr0), .itt1 (ttr0), .dtt0 (ttr0), .dtt1 (dtt1),
-	.i_req (1'b0), .i_addr (32'd0), .i_sup (1'b1), .i_pass (), .i_flt (), .i_pa (), .i_cm (),
+	.i_req (i_req_b), .i_addr (i_addr_b), .i_sup (1'b1), .i_pass (i_pass_b), .i_flt (i_flt_b), .i_pa (i_pa_b), .i_cm (),
 	.ip_addr (32'd0), .ip_sup (1'b1), .ip_hit (), .ip_pa (), .ip_cm (),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
 	.pt_done (), .pt_mmusr (),
-	.pf_req (1'b0), .pf_mode (2'd0), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (),
+	.pf_req (pf_req_b), .pf_mode (2'b11), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (pf_done_b),
 	.walk_hold (wr_pend),
-	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
-	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
-	.walker_berr (1'b0)
+	.walker_req (mw_req), .walker_we (mw_we), .walker_addr (mw_addr),
+	.walker_wdat (mw_wdat), .walker_ack (mw_ack), .walker_data (mw_data),
+	.walker_berr (mw_berr)
 );
 
 ap040_pipe_membus u_bus
@@ -338,6 +380,39 @@ task cinv;   // the DMU's CINV/CPUSH: held until done, then down a clock
 		step;
 		cm_req = 1'b0;
 		step;
+	end
+endtask
+task cinv_p;   // CINV or CPUSH
+	input [1:0] scope;
+	input [31:0] a;
+	input        push;
+	begin
+		cm_push = push;
+		cinv(scope, a);
+		cm_push = 1'b0;
+	end
+endtask
+// The walker's port, driven as the MMU drives it: a request held until its
+// acknowledgement, then down a cycle.
+reg        wk_req_b = 1'b0, wk_we_b = 1'b0;
+reg [31:0] wk_addr_b = 32'd0, wk_wdat_b = 32'd0;
+reg [31:0] wk_got;
+integer    wk_ext = 0;
+always @(posedge clk) if (nreset && walker_req && !wk_q) wk_ext = wk_ext + 1;
+task walk_access;
+	input [31:0] a;
+	input        we;
+	input [31:0] d;
+	integer k;
+	begin
+		wk_addr_b = a; wk_we_b = we; wk_wdat_b = d; wk_req_b = 1'b1;
+		k = 0;
+		while (!mw_ack && k < 400) begin step; k = k + 1; end
+		wk_got = mw_data;
+		if (k >= 400) fail("a walker access was never answered");
+		step;
+		wk_req_b = 1'b0;
+		step; step;
 	end
 endtask
 task want_rd;   // a read's answer
@@ -670,6 +745,281 @@ initial begin
 	if (lvalid(32'h6800)) fail("11: a page whose descriptor says CM 10 was cached");
 	if (!lvalid(32'h5900)) fail("11: a write-through page was not cached");
 	tc = 32'd0;
+
+	//------------------------------------------------------------- test 12
+	cinv(2'b11, 32'd0);
+	dtt1 = 32'h0000_C020;                // $00xxxxxx, either mode, CM 01
+	repeat (2) step;
+	v = rd32(16'h7000);
+	lg = log_n;
+	wr(32'h0000_7004, `AP040_SZ_L, 32'hC0DE_0001);
+	quiet;
+	if (rd32(16'h7004) === 32'hC0DE_0001) fail("12: a copyback write that missed reached memory");
+	if (cword(32'h7004) !== 32'hC0DE_0001) fail("12: a copyback write that missed is not in its line");
+	for (k = lg; k < log_n; k = k + 1) if (log_write[k]) fail("12: a copyback write missing wrote the bus");
+	wr(32'h0000_7000, `AP040_SZ_B, 32'h0000_00AB);
+	quiet;
+	if (mem[16'h7000] === 8'hAB) fail("12: a copyback write that hit reached memory");
+	want_rd(32'h0000_7000, `AP040_SZ_L, {8'hAB, v[23:0]}, "12: read back the copyback bytes");
+	lg = log_n;
+	cinv_p(2'b01, 32'h0000_7000, 1'b1);  // CPUSHL
+	quiet;
+	k = 0; for (i = lg; i < log_n; i = i + 1) if (log_write[i]) k = k + 1;
+	if (k != 2) begin $display("    %0d push write(s)", k); fail("12: CPUSHL did not push exactly the two dirty longwords"); end
+	if (rd32(16'h7000) !== {8'hAB, v[23:0]} || rd32(16'h7004) !== 32'hC0DE_0001) fail("12: CPUSHL did not put the dirty data in memory");
+	if (lvalid(32'h7000)) fail("12: CPUSHL left the line");
+	wr(32'h0000_7008, `AP040_SZ_L, 32'hDEAD_0008);
+	quiet;
+	cinv(2'b01, 32'h0000_7008);           // CINVL: the dirty longword is lost
+	if (rd32(16'h7008) === 32'hDEAD_0008) fail("12: CINVL wrote the dirty longword");
+	// a byte write that misses: the rest of its longword is memory's
+	v = rd32(16'h7106);
+	v = rd32(16'h7104);
+	wr(32'h0000_7106, `AP040_SZ_B, 32'h0000_00EE);
+	quiet;
+	if (cword(32'h7104) !== {v[31:16], 8'hEE, v[7:0]}) begin
+		$display("    the line holds %h, want %h", cword(32'h7104), {v[31:16], 8'hEE, v[7:0]});
+		fail("12: a copyback byte write that missed did not land in memory's longword");
+	end
+	if (mem[16'h7106] === 8'hEE) fail("12: a copyback byte write that missed reached memory");
+	// a write-through write to a dirty longword keeps it dirty (Table 4-4):
+	// the CPUSH after it writes both dirty longwords
+	cinv_p(2'b11, 32'd0, 1'b1);
+	wr(32'h0000_7200, `AP040_SZ_L, 32'h1200_7200);
+	wr(32'h0000_7204, `AP040_SZ_L, 32'h1200_7204);
+	quiet;
+	dtt1 = 32'h0000_C000;                // CM 00: write-through
+	repeat (2) step;
+	wr(32'h0000_7200, `AP040_SZ_L, 32'h1200_0000);
+	quiet;
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	if (rd32(16'h7200) !== 32'h1200_0000) fail("12: a write-through write to a dirty line did not reach memory");
+	lg = log_n;
+	cinv_p(2'b01, 32'h0000_7200, 1'b1);
+	quiet;
+	k = 0; for (i = lg; i < log_n; i = i + 1) if (log_write[i]) k = k + 1;
+	if (k != 2) begin $display("    %0d push write(s)", k); fail("12: a write-through write cleared its longword's dirty bit"); end
+
+	//------------------------------------------------------------- test 13
+	for (d = 0; d < 6; d = d + 1) for (k = 0; k < 4; k = k + 1) begin
+		mem_lat = d;
+		cinv(2'b11, 32'd0);
+		// four lines of set $30 made dirty, all four longwords each
+		for (w = 0; w < 4; w = w + 1)
+			for (i = 0; i < 4; i = i + 1)
+				wr(32'h0000_0300 + w * 32'h400 + i * 4, `AP040_SZ_L, {8'h30 + w[7:0], 8'h00 + d[7:0], 8'h00 + k[7:0], i[7:0]});
+		quiet;
+		// a fifth line, read from its k'th longword: one dirty line replaced;
+		// then every longword of the four read back at once -- the replaced
+		// line's while its push drains
+		want_rd(32'h0000_1300 + k * 4, `AP040_SZ_L, rd32(16'h1300 + k * 4), "13: the fifth line");
+		for (w = 0; w < 4; w = w + 1) for (i = 0; i < 4; i = i + 1)
+			want_rd(32'h0000_0300 + w * 32'h400 + i * 4, `AP040_SZ_L,
+			        {8'h30 + w[7:0], 8'h00 + d[7:0], 8'h00 + k[7:0], i[7:0]}, "13: read back at once");
+		quiet;
+		for (w = 0; w < 4; w = w + 1) for (i = 0; i < 4; i = i + 1) begin
+			v = {8'h30 + w[7:0], 8'h00 + d[7:0], 8'h00 + k[7:0], i[7:0]};
+			if (lvalid(32'h0000_0300 + w * 32'h400)) begin
+				if (cword(32'h0000_0300 + w * 32'h400 + i * 4) !== v) fail("13: a kept dirty line changed");
+			end else if (rd32(16'h0300 + w * 32'h400 + i * 4) !== v) begin
+				$display("    lat %0d first %0d: line %0d longword %0d in memory %h, want %h", d, k, w, i,
+				         rd32(16'h0300 + w * 32'h400 + i * 4), v);
+				fail("13: a replaced dirty line's longword was not pushed intact");
+			end
+		end
+		// (the read back replaced lines again: the fifth line may have gone)
+		for (i = 0; i < 4; i = i + 1)
+			if (lvalid(32'h1300) && cword(32'h0000_1300 + i * 4) !== rd32(16'h1300 + i * 4))
+				fail("13: the fifth line's longword is wrong");
+	end
+	mem_lat = 1;
+
+	//------------------------------------------------------------- test 14
+	// set $34: $0340 and $0740 in page 0, $1340 and $1740 in page 1; the
+	// first three dirty, the fourth clean
+	cinv(2'b11, 32'd0);
+	want_rd(32'h0000_0340, `AP040_SZ_L, rd32(16'h0340), "14: fill");
+	want_rd(32'h0000_0740, `AP040_SZ_L, rd32(16'h0740), "14: fill");
+	want_rd(32'h0000_1340, `AP040_SZ_L, rd32(16'h1340), "14: fill");
+	want_rd(32'h0000_1740, `AP040_SZ_L, rd32(16'h1740), "14: fill");
+	wr(32'h0000_0348, `AP040_SZ_L, 32'h1400_0000);
+	wr(32'h0000_0748, `AP040_SZ_L, 32'h1400_0001);
+	wr(32'h0000_1348, `AP040_SZ_L, 32'h1400_0002);
+	quiet;
+	cinv_p(2'b01, 32'h0000_0348, 1'b1);   // CPUSHL: $0340's line only
+	quiet;
+	if (lvalid(32'h0340) || !lvalid(32'h0740) || !lvalid(32'h1340) || !lvalid(32'h1740))
+		fail("14: CPUSHL took another line, or left its own");
+	if (rd32(16'h0348) !== 32'h1400_0000) fail("14: CPUSHL did not push its line");
+	lg = log_n;
+	cinv_p(2'b10, 32'h0000_1ABC, 1'b1);   // CPUSHP page 1: $1340 (dirty) and $1740 (clean)
+	quiet;
+	if (lvalid(32'h1340) || lvalid(32'h1740) || !lvalid(32'h0740)) fail("14: CPUSHP took the wrong lines");
+	if (rd32(16'h1348) !== 32'h1400_0002) fail("14: CPUSHP did not push its dirty line");
+	k = 0; for (i = lg; i < log_n; i = i + 1) if (log_write[i]) k = k + 1;
+	if (k != 1) begin $display("    %0d write(s)", k); fail("14: CPUSHP wrote other than the one dirty longword"); end
+	if (rd32(16'h0748) === 32'h1400_0001) fail("14: page 0's dirty line reached memory before its CPUSH");
+	cinv_p(2'b11, 32'h0000_0000, 1'b1);   // CPUSHA
+	quiet;
+	if (lvalid(32'h0740)) fail("14: CPUSHA left a line");
+	if (rd32(16'h0748) !== 32'h1400_0001) fail("14: CPUSHA did not push a dirty line");
+
+	//------------------------------------------------------------- test 15
+	// the walker's port, driven as the MMU drives it
+	cinv(2'b11, 32'd0);
+	want_rd(32'h0000_7200, `AP040_SZ_L, rd32(16'h7200), "15: fill");
+	wr(32'h0000_7204, `AP040_SZ_L, 32'h0000_7203);   // a descriptor, dirty in the line
+	quiet;
+	wk_ext = 0;
+	walk_access(32'h0000_7204, 1'b0, 32'd0);
+	if (wk_got !== 32'h0000_7203) fail("15: the walker's read of a dirty descriptor did not get the cached one");
+	if (wk_ext != 0) fail("15: a walker read that hit went to the walker's port");
+	walk_access(32'h0000_7204, 1'b1, 32'h0000_720B);  // its U write
+	if (cword(32'h7204) !== 32'h0000_720B) fail("15: the walker's write did not update the line");
+	if (rd32(16'h7204) !== 32'h0000_720B) fail("15: the walker's write did not reach memory");
+	lg = log_n;
+	cinv_p(2'b01, 32'h0000_7200, 1'b1);
+	quiet;
+	for (i = lg; i < log_n; i = i + 1)
+		if (log_write[i] && log_addr[i] == 32'h7204) fail("15: a longword the walker wrote was pushed as dirty");
+	wk_ext = 0;
+	walk_access(32'h0000_7300, 1'b0, 32'd0);
+	if (wk_ext != 1 || wk_got !== rd32(16'h7300)) fail("15: a walker read that missed was not the port's");
+
+	//------------------------------------------------------------- test 16
+	cinv(2'b11, 32'd0);
+	c_nalloc = 1'b1;
+	lg = log_n;
+	wr(32'h0000_7400, `AP040_SZ_L, 32'h1600_0000);
+	c_nalloc = 1'b0;
+	quiet;
+	if (log_n != lg + 1 || !log_write[lg] || rd32(16'h7400) !== 32'h1600_0000 || lvalid(32'h7400))
+		fail("16: a copyback write allocating nothing that missed was not one bus write");
+	// an inhibited read of a dirty line: its pushes first
+	wr(32'h0000_7500, `AP040_SZ_L, 32'h1600_7500);
+	quiet;
+	c_lock = 1'b1;
+	lg = log_n;
+	want_rd(32'h0000_7500, `AP040_SZ_L, 32'h1600_7500, "16: a locked read of a dirty line");
+	c_lock = 1'b0;
+	quiet;
+	if (log_n < lg + 2 || !log_write[lg] || log_write[lg + 1]) fail("16: the push was not on the bus before the read");
+	// a copyback write meeting a line being read
+	mem_lat = 6;
+	fork
+		rd(32'h0000_7600, `AP040_SZ_L);
+		begin
+			repeat (3) step;
+			wr(32'h0000_760C, `AP040_SZ_L, 32'h1600_760C);
+		end
+	join
+	quiet;
+	if (cword(32'h760C) !== 32'h1600_760C) fail("16: a copyback write meeting its line's fill is not in the line");
+	if (rd32(16'h760C) === 32'h1600_760C) fail("16: a copyback write meeting its line's fill reached memory");
+	mem_lat = 1;
+
+	//------------------------------------------------------------- test 17
+	for (k = 0; k < 2; k = k + 1) begin
+		cinv_p(2'b11, 32'd0, 1'b1);
+		berr_arm = 1'b1; berr_addr = (k == 0) ? 32'h0000_7704 : 32'h0000_770C;
+		lg = log_n;
+		wr(32'h0000_7704, `AP040_SZ_L, 32'h1700_0000 + k);
+		quiet;
+		if (berr_arm) fail("17: the line read never erred (the test no longer tests)");
+		if (rd32(16'h7704) !== 32'h1700_0000 + k) begin
+			$display("    error on %h", berr_addr);
+			fail("17: a copyback write whose line read erred did not reach memory");
+		end
+		if (lvalid(32'h7700)) fail("17: a line whose read erred is valid");
+		if (!c_idle) fail("17: the unit did not go idle after a copyback write's line read erred");
+	end
+	//------------------------------------------------------------- test 18
+	// A write-through write to a longword a replaced line is still pushing:
+	// the push -- older -- reaches memory first, the write last. Swept.
+	for (d = 0; d < 12; d = d + 1) begin
+		mem_lat = 4;
+		cinv_p(2'b11, 32'd0, 1'b1);
+		for (w = 0; w < 4; w = w + 1)
+			for (i = 0; i < 4; i = i + 1)
+				wr(32'h0000_0380 + w * 32'h400 + i * 4, `AP040_SZ_L, 32'h1800_0000 + w * 16 + i);
+		quiet;
+		fork
+			rd(32'h0000_1380, `AP040_SZ_L);                  // a fifth line: one replaced
+			begin
+				while (!u_dmu.pb_act) step;
+				repeat (d) step;
+				dtt1 = 32'h0000_C000;                        // write-through, now
+				k = u_dmu.pb_line[7:6];                      // the line going out
+				wr(32'h0000_0384 + k * 32'h400, `AP040_SZ_L, 32'h18FF_0000 + d);
+				dtt1 = 32'h0000_C020;
+			end
+		join
+		quiet;
+		if (rd32(16'h0384 + k * 32'h400) !== 32'h18FF_0000 + d) begin
+			$display("    d=%0d: memory %h", d, rd32(16'h0384 + k * 32'h400));
+			fail("18: a push overtook a newer write to its longword");
+		end
+	end
+	mem_lat = 1;
+
+	cinv_p(2'b11, 32'd0, 1'b1);
+	dtt1 = 32'd0;
+
+	//------------------------------------------------------------- test 19
+	// Pointer 1 (logical $00040000-$0007FFFF) -> a page table at $2000; page
+	// 7's descriptor is longword 3 of line $2010. Memory maps it to $9000;
+	// the cache -- the line written in copyback, all four longwords dirty --
+	// to $8000. The translation starts d cycles into the line's push.
+	wr32(16'h4204, 32'h0000_2003);
+	mem_lat = 6;
+	for (d = 0; d < 40; d = d + 1) begin
+		dc_en = 1'b1;
+		dtt1 = 32'h0000_C020;
+		repeat (2) step;
+		wr32(16'h201C, 32'h0000_9003);
+		for (i = 0; i < 3; i = i + 1)
+			wr(32'h0000_2010 + i * 4, `AP040_SZ_L, 32'h1900_0000 + d * 16 + i);
+		wr(32'h0000_201C, `AP040_SZ_L, 32'h0000_8003);
+		quiet;
+		if (rd32(16'h201C) !== 32'h0000_9003) fail("19: the descriptor reached memory before the push");
+		dc_en = 1'b0;                        // DE clear, then CPUSHA
+		dtt1 = 32'd0;
+		tc = 32'h0000_8000;
+		pf_req_b = 1'b1;                     // PFLUSHA: the last iteration's translation
+		k = 0;
+		while (!pf_done_b && k < 400) begin step; k = k + 1; end
+		step;
+		pf_req_b = 1'b0;
+		step;
+		fork
+			cinv_p(2'b11, 32'd0, 1'b1);
+			begin
+				k = 0;
+				while (!u_dmu.pb_act && k < 400) begin step; k = k + 1; end
+				if (k >= 400) fail("19: CPUSHA pushed nothing (the test no longer tests)");
+				repeat (d) step;
+				i_addr_b = 32'h0004_7124;
+				i_req_b = 1'b1;
+				#0;
+				k = 0;
+				while (!i_pass_b && !i_flt_b && k < 400) begin step; #0; k = k + 1; end
+				if (i_flt_b || k >= 400) fail("19: the instruction-side translation did not pass");
+				else if (i_pa_b !== 32'h0000_8124) begin
+					$display("    d=%0d: translated to %h", d, i_pa_b);
+					fail("19: the walk read the descriptor before its push landed");
+				end
+				step;
+				i_req_b = 1'b0;
+			end
+		join
+		quiet;
+		if (rd32(16'h201C) !== 32'h0000_800B)
+			fail("19: memory's descriptor is not the pushed one with its U bit");
+		tc = 32'd0;
+	end
+	mem_lat = 1;
+	dc_en = 1'b1;
 
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");

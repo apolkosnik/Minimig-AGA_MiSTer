@@ -86,7 +86,10 @@ wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
-wire        cm_req, cm_ic, cm_dc, cm_done, cm_done_i, cm_done_d, ic_en, dc_en;
+wire        cm_req, cm_ic, cm_dc, cm_push, cm_done, cm_done_i, cm_done_d, ic_en, dc_en;
+// the table walker's port, between the MMU and the data cache
+wire        mw_req, mw_we, mw_ack, mw_berr;
+wire [31:0] mw_addr, mw_wdat, mw_data;
 wire        l1_nalloc_b, l1_m16_b, l1_lock_b;
 wire  [1:0] d_cm;
 wire  [1:0] cm_scope;
@@ -139,7 +142,7 @@ ap040_pipe_cpu #(
 	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr),
 	.pf_fc (pf_fc), .pf_done (pf_done),
-	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
+	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr),
 	.cm_done (cm_done), .ic_en (ic_en), .dc_en (dc_en),
 	.l1_nalloc_b (l1_nalloc_b), .l1_m16_b (l1_m16_b), .l1_lock_b (l1_lock_b),
 	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
@@ -181,12 +184,17 @@ ap040_pipe_dmu u_dmu
 	.c_sup (l1_sup_b), .c_fc_ovr (l1_fc_ovr), .c_fc_val (l1_fc_val), .c_wr_drop (l1_wr_drop),
 	.c_nalloc (l1_nalloc_b), .c_m16 (l1_m16_b), .c_lock (l1_lock_b),
 	.dc_en (dc_en), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
-	.cm_req (cm_req), .cm_dc (cm_dc), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done_d),
-	// The table walker writes U and M through its own port, behind the
-	// data cache: a line holding the descriptor is invalidated as the write
-	// lands (MC68040UM 4.3.3 has a table search's write hit update the line;
-	// write-through, the two are the same). No other master yet (stage F).
-	.sn_req (walker_req && walker_we && walker_ack), .sn_addr (walker_addr),
+	.cm_req (cm_req), .cm_dc (cm_dc), .cm_push_in (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr),
+	.cm_done (cm_done_d),
+	.sn_req (1'b0), .sn_addr (32'd0),     // no other master yet (stage F)
+	// The table walker's port goes through the data cache (MC68040UM
+	// 4.3.3): its reads use a hit, its U/M writes update a line holding
+	// the descriptor.
+	.wk_req (mw_req), .wk_we (mw_we), .wk_addr (mw_addr), .wk_wdat (mw_wdat),
+	.wk_ack (mw_ack), .wk_data (mw_data), .wk_berr (mw_berr),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (walker_berr),
 	.c_q (l1_q_b), .c_rvalid (l1_rvalid_b), .c_wr_busy_w (l1_wr_busy_w), .c_rflt (l1_rflt_b),
 	.c_wflt (l1_wflt), .c_flt_bus (l1_flt_bus), .c_flt_ma (l1_flt_ma), .c_idle (l1_idle),
 	.wr_pend (dmu_wr_pend),
@@ -216,9 +224,9 @@ ap040_pipe_mmu u_mmu
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr),
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.walk_hold (dmu_wr_pend),
-	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
-	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
-	.walker_berr (walker_berr)
+	.walker_req (mw_req), .walker_we (mw_we), .walker_addr (mw_addr),
+	.walker_wdat (mw_wdat), .walker_ack (mw_ack), .walker_data (mw_data),
+	.walker_berr (mw_berr)
 );
 
 // The instruction memory unit: port A's prefetch window, and the fetch's

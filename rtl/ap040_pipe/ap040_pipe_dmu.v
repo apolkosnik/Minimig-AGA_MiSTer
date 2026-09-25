@@ -28,11 +28,11 @@
 // refuse (xlat), a request is latched as it arrives and translated from    //
 // the latch, and every signal toward the CPU and the MMU comes from        //
 // registers: a read goes to the bus controller the cycle after it is       //
-// asked for, through its translated-read input (rx_*), which puts it on   //
+// asked for, through its translated-read input (rx_*), which puts it on    //
 // the bus in that cycle -- the bus controller's own timing, which took a   //
 // read the cycle it came and put it on the bus the next; a write is        //
 // accepted the cycle after its translation passes -- a cycle after it is   //
-// taken when the MMU's most recent hit covers it, two when its lookup     //
+// taken when the MMU's most recent hit covers it, two when its lookup      //
 // runs, as the bus controller accepted it. Untranslated (xlat low), reads  //
 // and writes go straight through, as they did.                             //
 //                                                                          //
@@ -60,46 +60,54 @@
 //                                                                          //
 // MOVES spaces (MC68040UM 3.2, Table 3-2; stage A2). $0, $3, $4 and $7 are //
 // alternate address spaces: the address is physical, used without          //
-// translation -- no ATC lookup, no search, no protection, no MMU fault --   //
+// translation -- no ATC lookup, no search, no protection, no MMU fault --  //
 // and not split at a page. $2 and $6 are converted to the data spaces $1   //
 // and $5: translated as any data access, and on the bus as data (the bus   //
-// controller converts what it is given; this unit its translated reads).  //
+// controller converts what it is given; this unit its translated reads).   //
 //                                                                          //
-// The data cache (caches stage C, write-through; MC68040UM 4). 64 sets of  //
-// four 16-byte lines, physically tagged, on stage 0's arrays (a longword a //
-// way a read, byte enables; a tag row a set; the snoop copy); valid bits    //
-// and the replacement counter in flops. CACR DE turns it on; with DE clear //
-// every path above is as it was.                                           //
-//   Reads. Every read is latched and translated (untranslated, the MMU      //
+// The data cache (caches stages C and D; MC68040UM 4). 64 sets of four     //
+// 16-byte lines, physically tagged, on stage 0's arrays (a longword a way  //
+// a read, byte enables; a tag row a set; the snoop copy); valid bits, a    //
+// dirty bit a longword and the replacement counter in flops. CACR DE turns //
+// it on; with DE clear every path above is as it was.                      //
+//   Reads. Every read is latched and translated (untranslated, the MMU     //
 //   passes it at once, with the caching mode a TTR gives, else write-      //
 //   through). Its set is read in the cycle its translation passes -- PA9-  //
 //   PA2 are the untranslated bits, already in the latch -- and compared    //
 //   the next: a hit is answered from the cache, right-aligned by size.     //
 //   A miss reads the line, the longword asked for first and the rest       //
 //   wrapping, each longword a bus controller read; the first answers the   //
-//   read, the rest are handed to later reads of the line as they arrive.  //
-//   The line is valid when all four are in; an error on any beat abandons //
+//   read, the rest are handed to later reads of the line as they arrive.   //
+//   The line is valid when all four are in; an error on any beat abandons  //
 //   it, faulting only the read waiting for that longword.                  //
+//   Writes. Written through (CM 00, and every write untranslated with no   //
+//   data TTR): sent to the bus controller as they were, each updating a    //
+//   line holding it through the byte enables, its dirty bits kept, in the  //
+//   order the writes are sent (4.3.1.1; Table 4-4). Copyback (CM 01, the   //
+//   translating slot's aligned writes): the write goes to the cache        //
+//   instead -- a hit updates the line and marks its longword dirty, a miss //
+//   reads the line and then does so, or, allocating nothing, goes to the   //
+//   bus alone (4.3.1.2). A write's update waits for a line being read, and //
+//   a read's lookup for the update of every write before it.               //
 //   Not cached: an access a TTR or page marks inhibited (CM 1x), MOVES to  //
-//   an alternate space, a locked access (TAS, CAS, CAS2); each first       //
-//   invalidates a line holding its address (4.3.2, 7.4.5), then goes to    //
-//   the bus. A read spanning two longwords, or pages, goes to the bus too  //
-//   (the cache holds what memory does: it is write-through). Exception     //
-//   frames, the vector fetch and MOVE16 allocate nothing (4.3.3): a read   //
-//   of theirs that misses goes to the bus alone.                           //
-//   Writes go to the bus controller as they did, and each updates a line   //
-//   holding it, through the byte enables, in the order the writes are      //
-//   sent (4.3.1.1; Table 4-4) -- a MOVE16 write, or a write to a page not  //
-//   cached, invalidates the line instead. A read's lookup waits for the    //
-//   update of every write before it. A write into the line being read     //
-//   keeps that line from being made valid, and its longwords from being    //
-//   handed on.                                                             //
+//   an alternate space, a locked access (TAS, CAS, CAS2), a MOVE16 write;  //
+//   each pushes a dirty line holding its address -- a write merged into it //
+//   first -- and invalidates it (4.3.2, 7.4.5), then goes to the bus. A    //
+//   read spanning two longwords, or pages, goes to the bus too, and a      //
+//   write that does is written through. Exception frames, the vector fetch //
+//   and MOVE16 allocate nothing (4.3.3).                                   //
 //   Replacement: the first invalid way, else the counter's, which counts   //
-//   every read looked up and every write sent (4.1).                       //
+//   every read looked up and every write sent or taken (4.1). A dirty line //
+//   replaced is read out through port A before the new one lands on it,    //
+//   and its dirty longwords written after, ahead of any CPU write; no line //
+//   is read and no read goes to the bus until they are.                    //
 //   CINV/CPUSH on the data cache (cm_*), whatever CACR says: all ways, a   //
-//   line, or a 4 KB page (64 tag rows), at a physical address; there is no //
-//   dirty data, so CPUSH is CINV (stage D brings copyback).                //
-//   Snoops (sn_*): as the instruction cache's, through the tag copy.       //
+//   line, or a 4 KB page (64 tag rows), at a physical address; CPUSH       //
+//   pushes each dirty line first, CINV drops the dirty data.               //
+//   Table searches go through the cache (wk_*): a read uses a hit, a write //
+//   (U, M) updates a line holding the descriptor and goes to memory.       //
+//   Snoops (sn_*): as the instruction cache's, through the tag copy; a     //
+//   dirty line snooped loses its data (the platform's boundary).           //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -121,12 +129,29 @@ module ap040_pipe_dmu
 	// this done with the instruction cache's
 	input             cm_req,
 	input             cm_dc,
+	input             cm_push_in,  // CPUSH: dirty lines are pushed first
 	input       [1:0] cm_scope,    // 01 line, 10 page, 11 all
 	input      [31:0] cm_addr,     // physical
 	output reg        cm_done,
 	// another master wrote memory (caches stage F wires it)
 	input             sn_req,
 	input      [31:0] sn_addr,
+	// the MMU's table walker, through the data cache (stage D) ...
+	input             wk_req,
+	input             wk_we,
+	input      [31:0] wk_addr,
+	input      [31:0] wk_wdat,
+	output            wk_ack,
+	output     [31:0] wk_data,
+	output            wk_berr,
+	// ...and its physical port, for what the cache does not answer
+	output            walker_req,
+	output            walker_we,
+	output     [31:0] walker_addr,
+	output     [31:0] walker_wdat,
+	input             walker_ack,
+	input      [31:0] walker_data,
+	input             walker_berr,
 
 	// ---- EA-fetch (port B) ----
 	input      [31:0] c_addr,
@@ -288,23 +313,46 @@ reg  [1:0] fl_way;
 reg [87:0] fl_tags;             // the set's tag row, written back with the new tag
 reg        fl_out;              // a read of the line is with the bus controller
 reg        fl_nov;              // snooped while being read: not to be made valid
-// The last write's update: a line holding it takes its bytes, or goes.
+reg        fl_su;               // read for a copyback write (su)
+// The last write's update (see su_md): a line holding it takes its bytes,
+// or is pushed and goes; or, copyback, it is the write itself.
+localparam [1:0] SU_WT = 2'd0, SU_CI = 2'd1, SU_CB = 2'd2;
 reg        su_v;
 reg        su_cmp;              // its set's rows are on the outputs
 reg        su_part;             // its second longword (it spans two)
 reg [31:0] su_pa;
 reg  [1:0] su_size;
 reg [31:0] su_data;
-reg        su_inv;              // invalidate the line rather than update it
+reg  [1:0] su_md;
+reg        su_na;               // CB: allocates nothing
 reg        su_tt, su_s;         // untranslated: a data TTR may inhibit it; its privilege
-// Valid bits and the replacement counter, in flops.
+reg        su_post;             // CB, missing, allocating nothing: to the bus alone
+// Valid bits, dirty bits (a longword each: {way3 lw3-0, ..., way0 lw3-0}),
+// and the replacement counter, in flops.
 reg  [3:0] vld [0:63];
+reg [15:0] dty [0:63];
 reg  [1:0] rep;
 // CINV/CPUSH
-localparam [1:0] CM_IDLE = 2'd0, CM_LINE = 2'd1, CM_PAGE = 2'd2;
+localparam [1:0] CM_IDLE = 2'd0, CM_RD = 2'd1, CM_CMP = 2'd2, CM_PUSH = 2'd3;
 reg  [1:0] cm_st;
 reg  [5:0] cm_set, cm_rset;
-reg        cm_more, cm_rdv, cm_seen;
+reg        cm_seen, cm_line, cm_allw, cm_push;
+reg [87:0] cm_row;              // the row compared, for the pushes' addresses
+reg  [3:0] cm_pend;             // its ways still to push
+// the push engine: a line's longwords read, then its dirty ones written
+reg        pb_act, pb_rd, pb_rv;
+reg  [1:0] pb_i, pb_ri;
+reg  [2:0] pb_n;
+reg [27:0] pb_line;
+reg  [1:0] pb_way;
+reg  [3:0] pb_dty;
+reg [31:0] pb_d [0:3];
+// the table walker's access
+localparam [2:0] WK_IDLE = 3'd0, WK_CMP = 3'd1, WK_EXT = 3'd2, WK_ACK = 3'd3;
+reg  [2:0] wk_st;
+reg        wk_seen;             // answered: it drops its request before the next
+reg [31:0] wk_q;
+reg        wk_eber;
 // snoops: captured (1), their row on the copy's outputs (2)
 reg        sn_v1, sn_v2, sn_junk2;
 reg [27:0] sn_l1, sn_l2;
@@ -328,6 +376,7 @@ reg [31:0] w_pa1, w_pa2;        // physical: the address (w_x: page 1's base), p
 reg  [1:0] w_bi, w_last;
 reg  [1:0] w_cm;                // its caching mode, from its translation
 reg        w_m16, w_lk;         // MOVE16; locked
+reg        w_na;                // allocates nothing
 reg        w_block;             // a tentative write was refused: take none until the CPU lets go
 reg        w_receipt;           // accepted while the CPU was not looking
 reg        w_acc;               // accepted this cycle: its translation passed last cycle
@@ -343,7 +392,7 @@ wire       w_take  = xlat && c_wr && !w_slot && !w_block && !w_receipt;
 // Untranslated, straight to the bus controller -- unless the slot still
 // holds a write from before translation was turned off, or (DE) the data
 // cache has not yet taken the last write's update.
-wire       w_thru  = !xlat && c_wr && !w_slot && !su_v;
+wire       w_thru  = !xlat && c_wr && !w_slot && !su_v && !pb_act;
 
 //---------------------------------------------------------------------------
 // the read
@@ -423,7 +472,13 @@ wire  [7:0] w_byte    = w_data[{w_bk, 3'b000} +: 8];
 wire [31:0] w_byte_la = w_la + {30'd0, w_bi};
 wire        w_byte_p2 = (w_byte_la & ~pg_mask32) != (w_la & ~pg_mask32);
 wire [31:0] w_byte_pa = (w_byte_p2 ? w_pa2 : w_pa1) | (w_byte_la & pg_mask32);
-wire        s_post    = (ws == WS_POST) && !m_wr_busy_w && !su_v;
+// Copyback (DE, CM 01): an aligned write that is neither MOVE16, locked
+// nor to an alternate space goes to the cache instead (s_cb); a write
+// spanning longwords, or crossing a page, is written through.
+wire        w_cb      = dc_en && (w_cm == 2'b01) && !w_x && !spans(w_la[1:0], w_size) &&
+                        !w_m16 && !w_lk && !alt_of(w_ovr, w_fcv);
+wire        s_cb      = (ws == WS_POST) && w_cb && !su_v && !pb_act;
+wire        s_post    = (ws == WS_POST) && !w_cb && !m_wr_busy_w && !su_v && !pb_act;
 
 // A translated read goes only when nothing older is here: the slot empty.
 // (A write the CPU presents in the same cycle is not older than a read
@@ -431,7 +486,7 @@ wire        s_post    = (ws == WS_POST) && !m_wr_busy_w && !su_v;
 // outstanding is answered before its instruction's own writes -- and it
 // goes into the slot, or to the bus controller's write input: never onto
 // rx's.)
-wire        r_go      = !w_slot && !fl_act;
+wire        r_go      = !w_slot && !fl_act && !pb_act && !su_v;
 wire        r_send_x  = r_pass && (rs == RS_XL) && !r_x && r_go && !r_dc;   // straight on its translation
 wire        r_send_q  = (rs == RS_RDY) && r_go;                    // translated earlier
 wire [31:0] r_byte_la = r_la + {30'd0, r_bi};
@@ -439,32 +494,46 @@ wire        r_byte_p2 = (r_byte_la & ~pg_mask32) != (r_la & ~pg_mask32);
 wire [31:0] r_byte_pa = (r_byte_p2 ? r_pa2 : r_pa1) | (r_byte_la & pg_mask32);
 wire        r_issue   = (rs == RS_BYTE) && !r_wait && r_go;
 
-// Writes and untranslated reads: the CPU's own, or the slot's.
-assign m_wr     = s_post || w_thru;
+// Writes and untranslated reads: a push (the data cache's dirty line,
+// ahead of everything), a copyback write that allocates nothing, the
+// slot's, or the CPU's own.
+wire        su_pw   = su_post && !pb_act && !m_wr_busy_w;
+wire [31:0] pb_wa   = {pb_line, pb_wi, 2'b00};
+assign m_wr     = pb_wr || su_pw || s_post || w_thru;
 assign m_rd     = r_thru;
-assign m_addr   = s_post ? (w_x ? w_byte_pa : w_pa1) : c_addr;
-assign m_la     = s_post ? (w_x ? w_byte_la : w_la) : c_addr;
-assign m_size   = s_post ? (w_x ? `AP040_SZ_B : w_size) : c_size;
-assign m_wdata  = s_post ? (w_x ? {24'd0, w_byte} : w_data) : c_wdata;
-assign m_sup    = s_post ? w_sup : c_sup;
-assign m_fc_ovr = s_post ? w_ovr : c_fc_ovr;
+assign m_addr   = pb_wr ? pb_wa : su_pw ? su_pa : s_post ? (w_x ? w_byte_pa : w_pa1) : c_addr;
+assign m_la     = pb_wr ? pb_wa : su_pw ? su_pa : s_post ? (w_x ? w_byte_la : w_la) : c_addr;
+assign m_size   = pb_wr ? `AP040_SZ_L : su_pw ? su_size : s_post ? (w_x ? `AP040_SZ_B : w_size) : c_size;
+assign m_wdata  = pb_wr ? pb_d[pb_wi] : su_pw ? su_data : s_post ? (w_x ? {24'd0, w_byte} : w_data) : c_wdata;
+assign m_sup    = pb_wr ? 1'b1 : su_pw ? su_s : s_post ? w_sup : c_sup;
+assign m_fc_ovr = !pb_wr && !su_pw && (s_post ? w_ovr : c_fc_ovr);
 assign m_fc_val = s_post ? w_fcv : c_fc_val;
 // Translated reads, and the data cache's line reads -- the first in the
 // cycle the miss is seen (nothing else of this unit's is out then).
 assign m_rx      = r_send_x || r_send_q || r_issue || fl_start || fl_rq;
-assign m_rx_addr = fl_start ? {r_pa1[31:2], 2'b00} : fl_rq ? {fl_line, fl_st + fl_iss[1:0], 2'b00} :
+assign m_rx_addr = fl_start ? {fl_spa, 2'b00} : fl_rq ? {fl_line, fl_st + fl_iss[1:0], 2'b00} :
                    r_send_x ? d_pa : r_send_q ? r_pa1 : r_byte_pa;
 assign m_rx_size = (fl_start || fl_rq) ? `AP040_SZ_L : r_issue ? `AP040_SZ_B : r_size;
-assign m_rx_fc   = fl_start ? r_fcb : fl_rq ? fl_fc : r_ovr ? fc_bus(r_fcv) : {r_sup, 2'b01};
+assign m_rx_fc   = fl_start ? (su_cmp ? {su_s, 2'b01} : r_fcb) : fl_rq ? fl_fc :
+                   r_ovr ? fc_bus(r_fcv) : {r_sup, 2'b01};
 
 //---------------------------------------------------------------------------
-// the data cache (stage C)
+// the data cache (stages C, D)
 //---------------------------------------------------------------------------
 
-// The cache is free for a lookup: no line being read, no maintenance.
-wire        cm_go   = cm_req && !cm_seen && (cm_st == CM_IDLE) && !su_v && !fl_act && (rs != RS_CMP) && !su_cmp;
-wire        c_free  = !fl_act && (cm_st == CM_IDLE) && !cm_go;
-// The last write's update: its bytes in an 8-byte window from its longword.
+// The arrays' port A: lookups (a read's, an update's, the walker's), an
+// update's or the walker's write, and the push engine's reads. Maintenance
+// holds the tag port B; a line being read, the data port B.
+wire        cm_go   = cm_req && !cm_seen && (cm_st == CM_IDLE) && !su_v && !fl_act && !pb_act &&
+                      (rs != RS_CMP) && !su_cmp && (wk_st == WK_IDLE);
+wire        c_free  = !fl_act && !pb_act && (cm_st == CM_IDLE) && !cm_go;
+
+// ---- a write's update (su) ----
+// SU_WT -- update a line holding it, its dirty bits kept (Table 4-4); SU_CI
+// -- merge it into a line holding it, push the line's dirty longwords, then
+// invalidate the line (4.3.2); SU_CB -- the write itself, not sent: update a
+// line holding it and mark its longword dirty; missing, read the line and
+// then do so, or send it alone if it allocates nothing (4.3.1.2, 4.3.3).
 wire  [7:0] su_be8  = ((su_size == `AP040_SZ_L) ? 8'hF0 : (su_size == `AP040_SZ_W) ? 8'hC0 : 8'h80) >> su_pa[1:0];
 wire [63:0] su_d64  = ((su_size == `AP040_SZ_L) ? {su_data, 32'd0} :
                        (su_size == `AP040_SZ_W) ? {su_data[15:0], 48'd0} : {su_data[7:0], 56'd0}) >> {su_pa[1:0], 3'b000};
@@ -474,20 +543,28 @@ wire [31:0] su_wd   = su_part ? su_d64[31:0] : su_d64[63:32];
 wire        su_two  = (su_be8[3:0] != 4'd0);
 wire        su_ta   = ttr_match(dtt0, su_pa, su_s);
 wire        su_tb   = ttr_match(dtt1, su_pa, su_s);
-wire        su_ci   = su_inv || (su_tt && (su_ta ? dtt0[6] : su_tb ? dtt1[6] : 1'b0));
-wire        su_rd   = su_v && !su_cmp && c_free;          // its set is read now
+// straight through (untranslated): a data TTR may still say not cached
+wire  [1:0] su_mode = ((su_md == SU_WT) && su_tt && (su_ta ? dtt0[6] : su_tb ? dtt1[6] : 1'b0)) ? SU_CI : su_md;
+wire        su_rd   = su_v && !su_cmp && !su_post && c_free;   // its set is read now
+// The walker's lookup: its set read now.
+wire        wk_new  = dc_en && wk_req && !wk_seen && (wk_st == WK_IDLE);
+wire        wk_lk   = wk_new && c_free && !su_v;
+wire        wk_cmp  = (wk_st == WK_CMP);
 // A read's lookup: in the cycle its translation passes, or later from
 // RS_LK; never while a write's update is waiting (the write is older).
-wire        rd_lk   = c_free && !su_v && r_go &&
+wire        rd_lk   = c_free && !su_v && !wk_lk && !wk_cmp && r_go &&
                       (((rs == RS_XL) && r_pass && !r_x && r_dc && !spans(r_la[1:0], r_size)) ||
                        (rs == RS_LK));
-wire  [7:0] a_addr  = su_v ? su_lw[7:0] : r_la[9:2];
+wire  [7:0] a_addr  = pb_rd ? {pb_line[5:0], pb_i} : (wk_lk || wk_cmp) ? wk_addr[9:2] :
+                      su_v ? su_lw[7:0] : r_la[9:2];
 wire [127:0] a_data;
 wire  [87:0] a_tags, b_tags, s_tags;
-// the compare: a read's (RS_CMP, against its translation) or an update's
-wire [21:0] ck_tag  = su_cmp ? su_lw[29:8] : r_pa1[31:10];
-wire  [5:0] ck_set  = su_cmp ? su_lw[7:2]  : r_pa1[9:4];
+// the compare: an update's, the walker's, or a read's (RS_CMP)
+wire [21:0] ck_tag  = su_cmp ? su_lw[29:8] : wk_cmp ? wk_addr[31:10] : r_pa1[31:10];
+wire  [5:0] ck_set  = su_cmp ? su_lw[7:2]  : wk_cmp ? wk_addr[9:4]   : r_pa1[9:4];
+wire  [1:0] ck_lwi  = su_cmp ? su_lw[1:0]  : wk_addr[3:2];
 wire  [3:0] ck_vrow = vld[ck_set];
+wire [15:0] ck_drow = dty[ck_set];
 wire  [3:0] ck_hw;
 genvar gw;
 generate
@@ -497,15 +574,32 @@ end
 endgenerate
 wire        ck_hit  = |ck_hw;
 wire  [1:0] ck_way  = ck_hw[0] ? 2'd0 : ck_hw[1] ? 2'd1 : ck_hw[2] ? 2'd2 : 2'd3;
-wire        dc_hit  = (rs == RS_CMP) && !su_cmp && ck_hit;
-wire [31:0] dc_hlw  = a_data[ck_way*32 +: 32];
+wire  [3:0] ck_wdty = ck_drow[ck_way*4 +: 4];            // the hit line's dirty longwords
+wire [31:0] ck_hlw  = a_data[ck_way*32 +: 32];
+wire        rd_cmp  = (rs == RS_CMP) && !su_cmp && !wk_cmp;
+wire        dc_hit  = rd_cmp && ck_hit;
 wire        su_hit  = su_cmp && ck_hit;
-wire        su_we   = su_hit && !su_ci;
-// A miss reads the line (a read that allocates); the way it replaces: the
-// first invalid, else the counter's.
-wire        fl_start = (rs == RS_CMP) && !su_cmp && !ck_hit && !r_ci && !r_na;
-wire  [1:0] fl_vict  = !ck_vrow[0] ? 2'd0 : !ck_vrow[1] ? 2'd1 : !ck_vrow[2] ? 2'd2 :
-                       !ck_vrow[3] ? 2'd3 : rep;
+wire        wk_hit  = wk_cmp && ck_hit;
+wire        wk_whit = wk_hit && wk_we;
+// the hit line is pushed if dirty -- a not-cached access's (the write merged
+// into it first); the hit line is invalidated
+wire        su_push = su_hit && (su_mode == SU_CI) && (ck_wdty != 4'd0);
+wire        rd_push = dc_hit && r_ci && (ck_wdty != 4'd0);
+wire        rd_inv  = dc_hit && r_ci;
+wire        su_inv1 = su_hit && (su_mode == SU_CI);
+wire        su_cbw  = su_hit && (su_mode == SU_CB);
+// A CB write that misses reads its line, or goes to the bus alone.
+wire        su_miss = su_cmp && !ck_hit && (su_mode == SU_CB);
+// A miss reads the line (a read that allocates, or a CB write); the way it
+// replaces: the first invalid, else the counter's -- a dirty one pushed.
+wire        rd_fill = rd_cmp && !ck_hit && !r_ci && !r_na;
+wire        su_fill = su_miss && !su_na;
+wire        fl_start = rd_fill || su_fill;
+wire [29:0] fl_spa  = su_cmp ? su_lw : r_pa1[31:2];      // the longword asked for
+wire  [1:0] fl_vict = !ck_vrow[0] ? 2'd0 : !ck_vrow[1] ? 2'd1 : !ck_vrow[2] ? 2'd2 :
+                      !ck_vrow[3] ? 2'd3 : rep;
+wire  [3:0] fl_vdty = ck_drow[fl_vict*4 +: 4];
+wire        fl_vpush = fl_start && ck_vrow[fl_vict] && (fl_vdty != 4'd0);
 wire  [1:0] fl_aidx  = fl_st + fl_arr;                    // the longword arriving next
 wire        fl_ack   = fl_out && m_rvalid && !m_rflt;
 wire        fl_flt   = fl_out && m_rvalid && m_rflt;
@@ -528,16 +622,56 @@ for (gw = 0; gw < 4; gw = gw + 1) begin : twr
 	assign fl_wtags[gw*22 +: 22] = (fl_way == gw) ? fl_line[27:6] : fl_tags[gw*22 +: 22];
 end
 endgenerate
-// CINV/CPUSH rows through the tag port B
-wire        cm_rd   = (cm_st != CM_IDLE) && cm_more;
+
+// ---- CINV/CPUSH ----
+// A row a set: read through the tag port B, compared, its matching lines
+// invalidated; CPUSH pushes each dirty one first, one at a time.
 wire  [3:0] cm_hw;
 generate
 for (gw = 0; gw < 4; gw = gw + 1) begin : cmw
-	assign cm_hw[gw] = (cm_st == CM_LINE) ? (b_tags[gw*22 +: 22] == cm_addr[31:10])
-	                                      : (b_tags[gw*22 + 2 +: 20] == cm_addr[31:12]);
+	assign cm_hw[gw] = cm_allw ? 1'b1 :
+	                   cm_line ? (b_tags[gw*22 +: 22] == cm_addr[31:10])
+	                           : (b_tags[gw*22 + 2 +: 20] == cm_addr[31:12]);
 end
 endgenerate
-// snoops
+wire [15:0] cm_drow = dty[cm_rset];
+wire  [3:0] cm_ddty = {|cm_drow[15:12], |cm_drow[11:8], |cm_drow[7:4], |cm_drow[3:0]};
+wire        cm_clr  = (cm_st == CM_CMP);
+wire  [3:0] cm_mv   = vld[cm_rset] & cm_hw;                  // the row's matching lines
+wire  [3:0] cm_topush = cm_push ? (cm_mv & cm_ddty) : 4'd0;  // ...pushed before they go
+wire  [1:0] cm_pway = cm_pend[0] ? 2'd0 : cm_pend[1] ? 2'd1 : cm_pend[2] ? 2'd2 : 2'd3;
+wire        cm_push1 = (cm_st == CM_PUSH) && (cm_pend != 4'd0) && !pb_act;
+
+// ---- the push engine ----
+// A dirty line's four longwords are read through port A -- the one a
+// replacing fill asks for first, so each is out before the fill's longword
+// lands on it -- then its dirty longwords are written to the bus controller
+// ahead of any CPU write. Until they are, no read goes to the bus and no new
+// line is read: memory has the line first.
+wire        pb_start = fl_vpush || su_push || rd_push || cm_push1;
+wire  [1:0] pb_wi    = pb_dty[0] ? 2'd0 : pb_dty[1] ? 2'd1 : pb_dty[2] ? 2'd2 : 2'd3;
+wire        pb_wr    = pb_act && !pb_rd && !pb_rv && (pb_dty != 4'd0) && !m_wr_busy_w;
+// the line and way it starts with
+wire [27:0] pb_sline = fl_vpush ? {a_tags[fl_vict*22 +: 22], ck_set} :
+                       cm_push1 ? {cm_row[cm_pway*22 +: 22], cm_rset} :
+                       su_push  ? su_lw[29:2] : r_pa1[31:4];
+wire  [1:0] pb_sway  = fl_vpush ? fl_vict : cm_push1 ? cm_pway : ck_way;
+wire  [3:0] pb_sdty  = fl_vpush ? fl_vdty : cm_push1 ? cm_drow[cm_pway*4 +: 4] : ck_wdty;
+wire  [1:0] pb_si    = fl_vpush ? fl_spa[1:0] : 2'd0;
+
+// ---- the table walker, through the cache ----
+// Its reads use a hit; its writes (U, M) update a line holding the
+// descriptor, whose longword is then clean -- memory takes the write too
+// (4.3.3). DE clear, it goes straight to its port.
+assign walker_req  = dc_en ? (wk_st == WK_EXT) : wk_req;
+assign walker_we   = wk_we;
+assign walker_addr = wk_addr;
+assign walker_wdat = wk_wdat;
+assign wk_ack      = dc_en ? (wk_st == WK_ACK) : walker_ack;
+assign wk_data     = dc_en ? wk_q : walker_data;
+assign wk_berr     = dc_en ? ((wk_st == WK_ACK) && wk_eber) : walker_berr;
+
+// ---- snoops ----
 wire  [3:0] sn_hw;
 generate
 for (gw = 0; gw < 4; gw = gw + 1) begin : snw
@@ -546,20 +680,40 @@ end
 endgenerate
 wire  [3:0] sn_clr  = sn_junk2 ? 4'hF : sn_hw;
 wire        sn_fill = sn_v2 && fl_act && (sn_l2 == fl_line);
-// The valid bits: a snoop's set and one other change a cycle, merged.
-wire        cm_all  = cm_go && cm_dc && (cm_scope == 2'b11);
-wire        rd_inv  = (rs == RS_CMP) && !su_cmp && ck_hit && r_ci;
-wire        su_inv1 = su_hit && su_ci;
-wire        o_v     = rd_inv || su_inv1 || fl_start || fl_done || cm_rdv;
-wire  [5:0] o_set   = fl_done ? fl_line[5:0] : cm_rdv ? cm_rset : ck_set;
-wire  [3:0] o_and   = (rd_inv || su_inv1) ? ~(4'd1 << ck_way) : fl_start ? ~(4'd1 << fl_vict) :
-                      cm_rdv ? ~cm_hw : 4'hF;
-wire  [3:0] o_or    = (fl_done && !fl_nov && !sn_fill) ? (4'd1 << fl_way) : 4'd0;
+
+// ---- the valid and dirty bits ----
+// A snoop's set and one other change a cycle, merged: a hit's (an
+// invalidation, a CB update, the walker's write), a fill's start or end, a
+// maintenance row's, a pushed line's.
+function [15:0] wm16;   // the dirty bits of the ways in m
+	input [3:0] m;
+	begin
+		wm16 = {{4{m[3]}}, {4{m[2]}}, {4{m[1]}}, {4{m[0]}}};
+	end
+endfunction
+wire        cm_all  = cm_go && cm_dc && (cm_scope == 2'b11) && !cm_push_in;
+wire [15:0] o_lwb   = 16'd1 << {ck_way, ck_lwi};             // a hit's longword
+wire        o_v     = rd_inv || su_inv1 || su_cbw || wk_whit || fl_start || fl_done || cm_clr || cm_push1;
+wire  [5:0] o_set   = fl_done ? fl_line[5:0] : (cm_clr || cm_push1) ? cm_rset : ck_set;
+wire  [3:0] o_vand  = (rd_inv || su_inv1) ? ~(4'd1 << ck_way) :
+                      fl_start ? ~(4'd1 << fl_vict) :
+                      cm_clr   ? ~(cm_mv & ~cm_topush) :
+                      cm_push1 ? ~(4'd1 << cm_pway) : 4'hF;
+wire  [3:0] o_vor   = (fl_done && !fl_nov && !sn_fill) ? (4'd1 << fl_way) : 4'd0;
+wire [15:0] o_dand  = (rd_inv || su_inv1) ? ~wm16(4'd1 << ck_way) :
+                      fl_start ? ~wm16(4'd1 << fl_vict) :
+                      fl_done  ? ~wm16(4'd1 << fl_way) :
+                      wk_whit  ? ~o_lwb :
+                      cm_clr   ? ~wm16(cm_mv & ~cm_topush) :
+                      cm_push1 ? ~wm16(4'd1 << cm_pway) : 16'hFFFF;
+wire [15:0] o_dor   = su_cbw ? o_lwb : 16'd0;
+wire [15:0] sn_dclr = wm16(sn_clr);
 
 ap040_pipe_dcache_arr u_arr
 (
 	.clk     (clk),
-	.a_addr  (a_addr), .a_data (a_data), .a_way (ck_way), .a_wdata (su_wd), .a_be (su_be), .a_we (su_we),
+	.a_addr  (a_addr), .a_data (a_data), .a_way (ck_way),
+	.a_wdata (wk_whit ? wk_wdat : su_wd), .a_be (wk_whit ? 4'hF : su_be), .a_we (su_hit || wk_whit),
 	.b_addr  ({fl_line[5:0], fl_aidx}), .b_data (), .b_way (fl_way), .b_wdata (m_q), .b_we (fl_ack),
 	.ta_set  (a_addr[7:2]), .ta_tags (a_tags),
 	.tb_set  ((cm_st != CM_IDLE) ? cm_set : fl_line[5:0]), .tb_tags (b_tags),
@@ -572,54 +726,77 @@ always @(posedge clk) begin
 	cm_done <= 1'b0;
 	if (!nreset) begin
 		fl_act <= 1'b0; fl_line <= 28'd0; fl_fc <= 3'd0; fl_st <= 2'd0; fl_iss <= 3'd0; fl_arr <= 2'd0;
-		fl_have <= 4'd0; fl_way <= 2'd0; fl_tags <= 88'd0; fl_out <= 1'b0; fl_nov <= 1'b0;
+		fl_have <= 4'd0; fl_way <= 2'd0; fl_tags <= 88'd0; fl_out <= 1'b0; fl_nov <= 1'b0; fl_su <= 1'b0;
 		su_v <= 1'b0; su_cmp <= 1'b0; su_part <= 1'b0; su_pa <= 32'd0; su_size <= `AP040_SZ_L;
-		su_data <= 32'd0; su_inv <= 1'b0; su_tt <= 1'b0; su_s <= 1'b1;
+		su_data <= 32'd0; su_md <= SU_WT; su_na <= 1'b0; su_tt <= 1'b0; su_s <= 1'b1; su_post <= 1'b0;
 		rep <= 2'd0;
-		cm_st <= CM_IDLE; cm_set <= 6'd0; cm_rset <= 6'd0; cm_more <= 1'b0; cm_rdv <= 1'b0; cm_seen <= 1'b0;
+		cm_st <= CM_IDLE; cm_set <= 6'd0; cm_rset <= 6'd0; cm_seen <= 1'b0; cm_pend <= 4'd0;
+		cm_row <= 88'd0; cm_line <= 1'b0; cm_allw <= 1'b0; cm_push <= 1'b0;
+		pb_act <= 1'b0; pb_rd <= 1'b0; pb_rv <= 1'b0; pb_i <= 2'd0; pb_ri <= 2'd0; pb_n <= 3'd0;
+		pb_line <= 28'd0; pb_way <= 2'd0; pb_dty <= 4'd0;
+		wk_st <= WK_IDLE; wk_seen <= 1'b0; wk_q <= 32'd0; wk_eber <= 1'b0;
 		sn_v1 <= 1'b0; sn_v2 <= 1'b0; sn_junk2 <= 1'b0; sn_l1 <= 28'd0; sn_l2 <= 28'd0;
-		for (i = 0; i < 64; i = i + 1) vld[i] <= 4'd0;
+		for (i = 0; i < 64; i = i + 1) begin vld[i] <= 4'd0; dty[i] <= 16'd0; end
 	end else begin
-		// ---- a write sent: its update ----
-		if (dc_en && m_wr) begin
+		// ---- a write: its update ----
+		if (dc_en && (s_post || w_thru)) begin
 			su_v    <= 1'b1;
 			su_cmp  <= 1'b0;
 			su_part <= 1'b0;
 			su_pa   <= m_addr;
 			su_size <= m_size;
 			su_data <= m_wdata;
-			// the slot's: its translation's mode, a crossing write's bytes, a
-			// MOVES to an alternate space; straight through: an alternate
-			// space, or a data TTR (su_tt, below)
-			su_inv  <= s_post ? (w_cm[1] || w_x || w_m16 || w_lk || alt_of(w_ovr, w_fcv))
-			                  : (c_m16 || c_lock || c_alt);
+			// sent: not cached if its translation says so, or a MOVE16,
+			// locked, or MOVES to an alternate space; straight through, a
+			// data TTR may still say so (su_tt)
+			su_md   <= (s_post ? (w_cm[1] || w_m16 || w_lk || alt_of(w_ovr, w_fcv))
+			                   : (c_m16 || c_lock || c_alt)) ? SU_CI : SU_WT;
+			su_na   <= 1'b0;
 			su_tt   <= !s_post;
 			su_s    <= s_post ? w_sup : sup_of(c_fc_ovr, c_fc_val, c_sup);
+		end else if (s_cb) begin
+			// copyback: the write goes to the cache instead of the bus
+			su_v    <= 1'b1;
+			su_cmp  <= 1'b0;
+			su_part <= 1'b0;
+			su_pa   <= w_pa1;
+			su_size <= w_size;
+			su_data <= w_data;
+			su_md   <= SU_CB;
+			su_na   <= w_na;
+			su_tt   <= 1'b0;
+			su_s    <= w_sup;
 		end else if (su_rd) su_cmp <= 1'b1;
 		else if (su_cmp) begin
 			su_cmp <= 1'b0;
-			if (!su_part && su_two) su_part <= 1'b1;
+			if (su_fill) ;                                   // looked up again once its line is in
+			else if (su_miss) su_post <= 1'b1;               // allocates nothing: to the bus
+			else if (!su_part && su_two) su_part <= 1'b1;
 			else begin su_v <= 1'b0; su_part <= 1'b0; end
+		end else if (su_post && su_pw) begin
+			su_post <= 1'b0;
+			su_v    <= 1'b0;
 		end
-		// the counter: every read looked up, every write sent, and once more
-		// after naming a way to replace
-		rep <= rep + {1'b0, rd_lk} + {1'b0, dc_en && m_wr} + {1'b0, fl_start && (&ck_vrow)};
+		// the counter: every read looked up, every write sent or put in a
+		// copyback line, and once more after naming a way to replace
+		rep <= rep + {1'b0, rd_lk} + {1'b0, dc_en && (s_post || w_thru)} +
+		       {1'b0, su_rd && (su_md == SU_CB)} + {1'b0, fl_start && (&ck_vrow)};
 
 		// ---- a miss: its line ----
 		if (fl_start) begin
 			fl_act  <= 1'b1;
-			fl_line <= r_pa1[31:4];
-			fl_fc   <= r_fcb;
-			fl_st   <= r_pa1[3:2];
-			fl_iss  <= 3'd0;
+			fl_line <= fl_spa[29:2];
+			fl_fc   <= su_cmp ? {su_s, 2'b01} : r_fcb;
+			fl_st   <= fl_spa[1:0];
+			fl_iss  <= 3'd1;                     // its first read goes now
 			fl_arr  <= 2'd0;
 			fl_have <= 4'd0;
 			fl_way  <= fl_vict;
 			fl_tags <= a_tags;
 			fl_nov  <= 1'b0;
-		end
-		if (fl_start) begin fl_out <= 1'b1; fl_iss <= 3'd1; end   // its first read goes now
-		else if (fl_rq) begin fl_out <= 1'b1; fl_iss <= fl_iss + 3'd1; end
+			fl_su   <= su_cmp;
+			fl_out  <= 1'b1;
+		end else if (fl_rq) begin fl_out <= 1'b1; fl_iss <= fl_iss + 3'd1; end
 		if (fl_ack) begin
 			fl_out           <= 1'b0;
 			fl_arr           <= fl_arr + 2'd1;
@@ -628,30 +805,82 @@ always @(posedge clk) begin
 			if (fl_arr == 2'd3) fl_act <= 1'b0;       // valid (below), its tag written now
 		end
 		if (fl_flt) begin
-			// the line is abandoned; its way stays invalid
+			// the line is abandoned; its way stays invalid (a dirty line it
+			// was to replace is pushed all the same). A copyback write it was
+			// read for goes to the bus alone: looked up again it would miss,
+			// and read the line again, for as long as the memory errs.
 			fl_out <= 1'b0;
 			fl_act <= 1'b0;
+			if (fl_su) su_post <= 1'b1;
 		end
+
+		// ---- the push engine ----
+		if (pb_start) begin
+			pb_act  <= 1'b1;
+			pb_rd   <= 1'b1;
+			pb_i    <= pb_si;
+			pb_n    <= 3'd0;
+			pb_line <= pb_sline;
+			pb_way  <= pb_sway;
+			pb_dty  <= pb_sdty;
+		end else begin
+			if (pb_rd) begin
+				pb_i <= pb_i + 2'd1;
+				pb_n <= pb_n + 3'd1;
+				if (pb_n == 3'd3) pb_rd <= 1'b0;
+			end
+			if (pb_wr) begin
+				pb_dty[pb_wi] <= 1'b0;
+				if ((pb_dty & ~(4'd1 << pb_wi)) == 4'd0) pb_act <= 1'b0;
+			end
+		end
+		pb_rv <= pb_rd && !pb_start;
+		pb_ri <= pb_i;
+		if (pb_rv) pb_d[pb_ri] <= a_data[pb_way*32 +: 32];
+
+		// ---- the walker ----
+		if (!wk_req) wk_seen <= 1'b0;
+		case (wk_st)
+		WK_IDLE: if (wk_lk) wk_st <= WK_CMP;
+		WK_CMP: begin
+			// a read that hits is answered; a write that hits updates the line
+			// (above: a_we), then goes to memory too; a miss goes to the port
+			wk_q <= ck_hlw; wk_eber <= 1'b0;
+			wk_st <= (ck_hit && !wk_we) ? WK_ACK : WK_EXT;
+		end
+		WK_EXT: if (walker_ack || walker_berr) begin
+			wk_q <= walker_data; wk_eber <= walker_berr; wk_st <= WK_ACK;
+		end
+		default: begin wk_st <= WK_IDLE; wk_seen <= 1'b1; end   // WK_ACK
+		endcase
 
 		// ---- CINV/CPUSH ----
 		if (!cm_req) cm_seen <= 1'b0;
-		cm_rdv  <= cm_rd;
 		cm_rset <= cm_set;
 		if (cm_go) begin
-			if (!cm_dc) begin cm_done <= 1'b1; cm_seen <= 1'b1; end
-			else case (cm_scope)
-			2'b01: begin cm_st <= CM_LINE; cm_set <= cm_addr[9:4]; cm_more <= 1'b1; end
-			2'b10: begin cm_st <= CM_PAGE; cm_set <= 6'd0;         cm_more <= 1'b1; end
-			default: begin cm_done <= 1'b1; cm_seen <= 1'b1; end   // all ways: cm_all
-			endcase
+			if (!cm_dc || cm_all) begin cm_done <= 1'b1; cm_seen <= 1'b1; end   // all ways, no push: cm_all
+			else begin
+				cm_st   <= CM_RD;
+				cm_line <= (cm_scope == 2'b01);
+				cm_allw <= (cm_scope == 2'b11);
+				cm_push <= cm_push_in;
+				cm_set  <= (cm_scope == 2'b01) ? cm_addr[9:4] : 6'd0;
+			end
 		end
-		if (cm_rd) begin
-			if (cm_st == CM_PAGE && cm_set != 6'd63) cm_set <= cm_set + 6'd1;
-			else cm_more <= 1'b0;
+		case (cm_st)
+		CM_RD:  cm_st <= CM_CMP;                        // cm_set's row read now
+		CM_CMP: begin
+			cm_row  <= b_tags;
+			cm_pend <= cm_topush;
+			cm_st   <= (cm_topush != 4'd0) ? CM_PUSH : CM_PUSH;
 		end
-		if (cm_rdv && (cm_st == CM_LINE || cm_rset == 6'd63)) begin
-			cm_st <= CM_IDLE; cm_done <= 1'b1; cm_seen <= 1'b1;
+		CM_PUSH: if (cm_push1) cm_pend[cm_pway] <= 1'b0;
+		         else if ((cm_pend == 4'd0) && !pb_act) begin
+			if (cm_line || (cm_rset == 6'd63)) begin cm_st <= CM_IDLE; cm_done <= 1'b1; cm_seen <= 1'b1; end
+			else begin cm_set <= cm_set + 6'd1; cm_st <= CM_RD; end
 		end
+		default: ;
+		endcase
 
 		// ---- snoops ----
 		sn_v1    <= sn_req;
@@ -661,13 +890,20 @@ always @(posedge clk) begin
 		sn_junk2 <= sn_v1 && fl_done && (fl_line[5:0] == sn_l1[5:0]);
 		if (sn_fill) fl_nov <= 1'b1;
 
-		// ---- the valid bits ----
-		if (cm_all) for (i = 0; i < 64; i = i + 1) vld[i] <= 4'd0;
-		else if (o_v && sn_v2 && (o_set == sn_l2[5:0]))
-			vld[o_set] <= ((vld[o_set] & o_and) | o_or) & ~sn_clr;
-		else begin
-			if (o_v)   vld[o_set]       <= (vld[o_set] & o_and) | o_or;
-			if (sn_v2) vld[sn_l2[5:0]] <= vld[sn_l2[5:0]] & ~sn_clr;
+		// ---- the valid and dirty bits ----
+		if (cm_all) for (i = 0; i < 64; i = i + 1) begin vld[i] <= 4'd0; dty[i] <= 16'd0; end
+		else if (o_v && sn_v2 && (o_set == sn_l2[5:0])) begin
+			vld[o_set] <= ((vld[o_set] & o_vand) | o_vor) & ~sn_clr;
+			dty[o_set] <= ((dty[o_set] & o_dand) | o_dor) & ~sn_dclr;
+		end else begin
+			if (o_v) begin
+				vld[o_set] <= (vld[o_set] & o_vand) | o_vor;
+				dty[o_set] <= (dty[o_set] & o_dand) | o_dor;
+			end
+			if (sn_v2) begin
+				vld[sn_l2[5:0]] <= vld[sn_l2[5:0]] & ~sn_clr;
+				dty[sn_l2[5:0]] <= dty[sn_l2[5:0]] & ~sn_dclr;
+			end
 		end
 	end
 end
@@ -686,14 +922,16 @@ assign c_flt_ma    = fsrc ? flt_ma_r  : m_flt_ma;
 // appears until it is accepted, free that one cycle; untranslated, the bus
 // controller's own.
 assign c_wr_busy_w = xlat ? (w_block || (!w_receipt && !w_acc))
-                          : (m_wr_busy_w || w_slot || su_v);
-assign c_idle      = m_idle && !w_slot && (rs == RS_IDLE) && !fl_act && !su_v;
-assign wr_pend     = (ws == WS_POST) || m_wr_busy_w;
+                          : (m_wr_busy_w || w_slot || su_v || pb_act);
+assign c_idle      = m_idle && !w_slot && (rs == RS_IDLE) && !fl_act && !su_v && !pb_act;
+// A write accepted has not reached memory: a push's too (its line is in
+// neither the cache nor memory until it lands).
+assign wr_pend     = (ws == WS_POST) || m_wr_busy_w || pb_act;
 
 always @(posedge clk) begin
 	if (!nreset) begin
 		ws <= WS_FREE; w_la <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
-		w_cm <= 2'b00; w_m16 <= 1'b0; w_lk <= 1'b0;
+		w_cm <= 2'b00; w_m16 <= 1'b0; w_lk <= 1'b0; w_na <= 1'b0;
 		w_sup <= 1'b1; w_ovr <= 1'b0; w_fcv <= 3'd0;
 		w_pa1 <= 32'd0; w_pa2 <= 32'd0; w_bi <= 2'd0; w_last <= 2'd0;
 		w_block <= 1'b0; w_receipt <= 1'b0; w_acc <= 1'b0;
@@ -726,6 +964,7 @@ always @(posedge clk) begin
 			w_last <= last_of(c_size);
 			w_m16  <= c_m16;
 			w_lk   <= c_lock;
+			w_na   <= c_nalloc;
 			if (c_alt) begin w_pa1 <= c_addr; w_cm <= 2'b10; ws <= WS_POST; end
 			else ws <= WS_CHK1;
 		end
@@ -756,7 +995,7 @@ always @(posedge clk) begin
 		WS_POST: if (s_post) begin
 			if (w_x && (w_bi != w_last)) w_bi <= w_bi + 2'd1;
 			else ws <= WS_FREE;
-		end
+		end else if (s_cb) ws <= WS_FREE;
 		default: ;
 		endcase
 
@@ -823,7 +1062,7 @@ always @(posedge clk) begin
 		end else if (rd_lk) rs <= RS_CMP;
 		RS_CMP: if (dc_hit && !r_ci) begin
 			rs <= RS_IDLE; own_v <= 1'b1; own_flt <= 1'b0;
-			own_q <= ext_of(dc_hlw, r_pa1[1:0], r_size);
+			own_q <= ext_of(ck_hlw, r_pa1[1:0], r_size);
 		end else if (dc_hit || r_ci || r_na) rs <= RS_RDY;   // (a hit not cached: invalidated below)
 		else rs <= RS_FW;                                     // the line is read (below)
 		RS_FW: if (fl_ack && (fl_arr == 2'd0)) begin

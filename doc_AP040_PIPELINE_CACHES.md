@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review; stages A, B and C
-built (below, "Stage A as built", "Stage B as built", "Stage C as built"). Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stages A-D built
+(below, "Stage A as built" through "Stage D as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -558,6 +558,104 @@ Tests:
   - replacement against the counter model;
   - DE cleared under a fill, with a read at once;
   - a page's CM.
+
+## Stage D as built
+
+Copyback, in the DMU; dirty bits a longword each, in flops.
+
+- Where it applies. A page or data TTR with CM 01. Only the translating
+  write slot reaches it (TC.E or a data TTR enabled). With neither, every
+  access is write-through by the manual's default (4.3), and writes keep
+  their straight path and stage C's ordering.
+- Copyback writes. The slot's aligned write -- not MOVE16, locked or to an
+  alternate space, and spanning neither longwords nor pages -- goes to the
+  cache instead of the bus.
+  - A hit updates the line and marks its longword dirty.
+  - A miss reads the line, the written longword first, and then does the
+    same.
+  - A miss that allocates nothing (an exception frame) goes to the bus
+    alone, and so does one whose line read errs, whichever longword errs.
+  - A copyback write spanning longwords or pages is written through: lines
+    it hits are updated and keep their dirty bits.
+- Write-through writes update a line holding them and leave its dirty bits
+  as they were (Table 4-4).
+- Replacement of a dirty line.
+  - Its four longwords are read out of the way through the lookup port,
+    from the longword the fill reads first, one a cycle, while the fill
+    lands on the other port. Each is out before the fill's longword lands
+    on it (tb_ap040_pipe_dcache.v test 13 sweeps memory latency and the
+    first longword).
+  - Its dirty longwords are then written, ahead of any CPU write. Only the
+    dirty longwords are written; memory ends as after the 68040's
+    four-longword push.
+  - No line is read and no read goes to the bus until they are written:
+    memory has the line first.
+  - A fill that errs pushes the victim all the same. The 68040 returns it to
+    its place (4.6.2); either way no data is lost.
+- Not cached (inhibited, locked, alternate space, MOVE16). A hit on a dirty
+  line pushes it and then invalidates it (4.3.2, 7.4.5). For a write, the
+  write is merged into the line first, so the push carries it after the
+  write itself is in memory.
+- CPUSH pushes each dirty line in its scope (a line, a page, or all), one
+  at a time, then invalidates. CINV drops dirty data.
+- Table searches go through the cache. The walker's port passes through the
+  DMU (4.3.3):
+  - a read uses a hit;
+  - a write (U, M) updates a line holding the descriptor and goes to memory,
+    leaving that longword clean;
+  - the walker still waits for writes on their way to memory, and now for
+    pushes: with DE clear its reads go straight to memory, and a CPUSHA
+    after clearing DE may be pushing the line holding a descriptor.
+  t_copyback.s's search reads a descriptor that is dirty in the cache,
+  where memory still says invalid.
+- Snoops invalidate, and a dirty line snooped loses its data. This is the
+  platform boundary: the chipset cannot take dirty data.
+- Push bus errors are dropped with the push, as the bus controller drops
+  any posted write's. The 68040's access error with the push data (8.4.6)
+  is stage R's.
+- The counter also counts copyback write lookups.
+- Fit at 25 ns, bus16 top: 42.14 MHz, +1.271 ns, 23,840 ALMs, 35 RAM
+  blocks (C: 40.31 MHz, +0.190, 22,561, 38). The three fewer blocks are the
+  data cache's snoop tag copy: stage C drove it from the walker's writes;
+  with the walker through the cache nothing on this top snoops, so it is
+  pruned until stage F wires the snoop inputs. The worst paths are
+  EA-fetch's (cm_resume, the destination register) into the CPU's sq_a and,
+  through the DMU's straight path, the bus controller's read address; none
+  goes through the cache's logic.
+
+Tests:
+- t_copyback.s (pipelined core only). It sees memory through the program
+  bench's new peek registers ($F138/$F13A) and the cache through reads. It
+  covers:
+  - copyback write misses and hits staying in the cache, and a byte miss
+    landing in the longword the line read brought;
+  - CPUSHL, and CINVL dropping dirty data;
+  - an inhibited read and an inhibited write pushing a dirty line first,
+    the write merged;
+  - a write-through alias leaving the other dirty longwords;
+  - a dirty victim pushed;
+  - CPUSHP and CPUSHA;
+  - TAS pushing first;
+  - MOVE16 writing past a cached line to memory and invalidating it;
+  - the table walker reading a dirty descriptor and its U update reaching
+    both the line and memory.
+- tb_ap040_pipe_dcache.v tests 12-19 cover:
+  - the push's longwords exactly;
+  - the victim readout race, swept over memory latency and the first
+    longword, with the line read back at once;
+  - CPUSH over mixed dirty and clean ways and pages;
+  - the walker's read hits, misses and write hits;
+  - a no-allocate copyback miss as one bus write;
+  - the push before an inhibited read;
+  - a copyback write meeting its line's fill;
+  - a copyback write whose line read errs, on either longword;
+  - a write-through write racing the push of its longword, swept;
+  - with DE clear, CPUSHA pushing a dirty page-table line while an
+    instruction-side translation walks: the walk waits for the push
+    (DE clear, then CPUSHA, is how a system turns the cache off).
+- tb_ap040_pipe_program.v's write-ordering monitor counts a copyback
+  write as landed when the cache takes it, and a push when handed to the
+  bus controller.
 
 ## Tests
 

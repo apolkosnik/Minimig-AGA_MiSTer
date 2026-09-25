@@ -14,6 +14,8 @@
 //   $F120    writes must carry FC=1    $F130 w  DMA-style poke of $3500   //
 //   $F134 w  a poke's address          $F136 w  poke the word there,      //
 //            behind the CPU (the data cache's tests; caches stage C)      //
+//   $F138 w  a peek's address          $F13A r  memory's word there,      //
+//            whatever the data cache holds (copyback; caches stage D)     //
 //   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N  //
 //   $F150 w  two devices: level, then a lower one after N cycles          //
 //   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has //
@@ -68,6 +70,7 @@ reg         wberr_arm = 0;
 reg         berr_armed;
 reg         fberr_armed = 0;
 reg  [15:0] poke_addr = 0;
+reg  [15:0] peek_addr = 0;
 reg  [15:0] fberr_addr = 0;
 wire        berr_d = berr_armed && nreset && (busstate != 2'b01) &&
                      (addr_out[15:0] == 16'hF140);
@@ -130,7 +133,8 @@ reg [15:0] mem [0:32767];
 reg        lvl_hold;
 reg [15:0] lvl_data;
 integer errors, phase, result;
-assign data_in = (phase == 2 && lvl_hold) ? lvl_data : mem[addr_out[15:1]];
+assign data_in = (phase == 2 && lvl_hold) ? lvl_data :
+                 (addr_out[15:0] == 16'hF13A) ? mem[peek_addr[15:1]] : mem[addr_out[15:1]];
 reg [1023:0] prog_file;
 integer prog_fd;
 
@@ -163,7 +167,8 @@ always @(posedge clk) begin
 		if (busstate == 2'b01) begin mem_ready <= 0; lvl_hold <= 0; end
 		else if (!lvl_hold) begin
 			if (lat_cnt == 0) begin
-				mem_ready <= 1; lvl_hold <= 1; lvl_data <= mem[addr_out[15:1]];
+				mem_ready <= 1; lvl_hold <= 1;
+				lvl_data  <= (addr_out[15:0] == 16'hF13A) ? mem[peek_addr[15:1]] : mem[addr_out[15:1]];
 				lat_cnt <= latency(phase, lat_idx); lat_idx <= lat_idx + 1;
 			end
 			else lat_cnt <= lat_cnt - 1'd1;
@@ -246,7 +251,11 @@ always @(posedge clk)
 // controller -- until they land on the 16-bit bus, and the walker may start
 // an access only with none outstanding. A write a bus error aborted never
 // lands: the count is cleared once the memory side holds no write, and at
-// that point it must be zero unless such an abort happened.
+// that point it must be zero unless such an abort happened. Copyback
+// (caches stage D): a write the data cache takes instead of sending has
+// landed there -- the walker searches through that cache -- and a push, or
+// a copyback write sent alone, is counted from the cycle the DMU hands it
+// to the bus controller.
 reg        walker_pending, walker_armed, walker_we_latch;
 reg [31:0] walker_addr_latch, walker_wdat_latch;
 integer    wo_pend = 0;         // committed write bytes not yet landed
@@ -262,7 +271,10 @@ endfunction
 // controller as it takes it.
 wire wo_commit_t = dut.u_dmu.w_acc;
 wire wo_commit_u = dut.u_dmu.w_thru && !dut.u_dmu.m_wr_busy_w;
-wire wo_holds    = (dut.u_dmu.ws == 3'd5) || dut.u_bus.w_pend;   // WS_POST, or with membus
+wire wo_cb       = dut.u_dmu.s_cb;                              // into the cache, not the bus
+wire wo_push     = dut.u_dmu.pb_wr || dut.u_dmu.su_pw;          // the cache's own writes
+wire wo_holds    = (dut.u_dmu.ws == 3'd5) || dut.u_bus.w_pend ||  // WS_POST, or with membus,
+                   dut.u_dmu.pb_act || dut.u_dmu.su_post;       // or the cache's to send
 always @(posedge clk) begin
 	if (!nreset) begin
 		wo_pend = 0; wo_lost = 0;
@@ -277,9 +289,11 @@ always @(posedge clk) begin
 		end
 		if (wo_commit_t) wo_pend = wo_pend + sz_bytes(dut.u_dmu.w_size);
 		if (wo_commit_u) wo_pend = wo_pend + sz_bytes(dut.l1_size_b);
+		if (wo_cb)       wo_pend = wo_pend - sz_bytes(dut.u_dmu.w_size);
+		if (wo_push)     wo_pend = wo_pend + (dut.u_dmu.pb_wr ? 4 : sz_bytes(dut.u_dmu.su_size));
 		if (mem_ready && busstate == 2'b11) wo_pend = wo_pend - (!nuds ? 1 : 0) - (!nlds ? 1 : 0);
 		if (berr && busstate == 2'b11) wo_lost = 1;
-		if (!wo_commit_t && !wo_commit_u && !wo_holds) begin
+		if (!wo_commit_t && !wo_commit_u && !wo_push && !wo_holds) begin
 			if (wo_pend != 0 && !wo_lost) begin
 				errors = errors + 1;
 				$display("FAIL: %0d write bytes committed but never written on the bus (pc=%h)", wo_pend, dbg_pc);
@@ -419,6 +433,7 @@ always @(posedge clk) begin
 				mem[15'h1A81] = 16'h0000;
 			end
 			if (addr_out[15:0] == 16'hF134) poke_addr = data_write;
+			if (addr_out[15:0] == 16'hF138) peek_addr = data_write;
 			if (addr_out[15:0] == 16'hF136) mem[poke_addr[15:1]] = data_write;
 		end
 	end

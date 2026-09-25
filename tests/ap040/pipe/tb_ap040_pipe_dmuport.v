@@ -136,6 +136,8 @@ wire  [2:0] mem_fc;
 reg         mem_ack = 1'b0;
 reg  [31:0] mem_rdata = 32'd0;
 wire        walker_req, walker_we;
+wire        mw_req, mw_we, mw_ack, mw_berr;
+wire [31:0] mw_addr, mw_wdat, mw_data;
 wire [31:0] walker_addr, walker_wdat;
 reg         walker_ack = 1'b0;
 reg  [31:0] walker_data = 32'd0;
@@ -148,8 +150,13 @@ ap040_pipe_dmu u_dmu
 	.c_sup (c_sup), .c_fc_ovr (c_fc_ovr), .c_fc_val (c_fc_val), .c_wr_drop (c_wr_drop),
 	.c_nalloc (1'b0), .c_m16 (1'b0), .c_lock (1'b0),
 	.dc_en (1'b0), .dtt0 (ttr0), .dtt1 (ttr0),
-	.cm_req (1'b0), .cm_dc (1'b0), .cm_scope (2'd0), .cm_addr (32'd0), .cm_done (),
+	.cm_req (1'b0), .cm_dc (1'b0), .cm_push_in (1'b0), .cm_scope (2'd0), .cm_addr (32'd0), .cm_done (),
 	.sn_req (1'b0), .sn_addr (32'd0),
+	.wk_req (mw_req), .wk_we (mw_we), .wk_addr (mw_addr), .wk_wdat (mw_wdat),
+	.wk_ack (mw_ack), .wk_data (mw_data), .wk_berr (mw_berr),
+	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
+	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
+	.walker_berr (1'b0),
 	.c_q (c_q), .c_rvalid (c_rvalid), .c_wr_busy_w (c_wr_busy_w), .c_rflt (c_rflt),
 	.c_wflt (c_wflt), .c_flt_bus (c_flt_bus), .c_flt_ma (c_flt_ma), .c_idle (c_idle),
 	.wr_pend (wr_pend),
@@ -174,9 +181,9 @@ ap040_pipe_mmu u_mmu
 	.pt_done (), .pt_mmusr (),
 	.pf_req (1'b0), .pf_mode (2'd0), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (),
 	.walk_hold (wr_pend),
-	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
-	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
-	.walker_berr (1'b0)
+	.walker_req (mw_req), .walker_we (mw_we), .walker_addr (mw_addr),
+	.walker_wdat (mw_wdat), .walker_ack (mw_ack), .walker_data (mw_data),
+	.walker_berr (mw_berr)
 );
 
 wire        ib_req, ib_sup, ib_free, ib_ack, ib_flt, ib_flt_bus, ib_w_accept;
