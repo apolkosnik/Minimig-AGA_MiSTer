@@ -1,7 +1,7 @@
 {
  "wait": 0,
- "rtl": "1ae2d523fd0c530899aadbcc12dd99feeaede8e8",
- "dirty": true,
+ "rtl": "d1373fc6c4c110b8699d3391812463da9fce748c",
+ "dirty": false,
  "cases": [
   {
    "name": "nop",
@@ -381,8 +381,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 5.0,
-    "cpi": 5.0,
+    "cycles_per_block": 5.25,
+    "cpi": 5.25,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1281,8 +1281,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 10.0,
-    "cpi": 10.0,
+    "cycles_per_block": 10.5,
+    "cpi": 10.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1296,7 +1296,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 768,
+     "movem": 624,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1331,8 +1331,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 34.0,
-    "cpi": 34.0,
+    "cycles_per_block": 34.5,
+    "cpi": 34.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -1346,7 +1346,7 @@
      "addr": 0,
      "port": 0,
      "bf": 0,
-     "movem": 3072,
+     "movem": 2928,
      "fp": 0,
      "mul": 0,
      "div": 0
@@ -1431,8 +1431,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 18.0,
-    "cpi": 18.0,
+    "cycles_per_block": 18.5,
+    "cpi": 18.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3131,8 +3131,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 3.0,
+    "cycles_per_block": 7.0,
+    "cpi": 3.5,
     "counts": {
      "retired": 192,
      "rd": 0,
@@ -3181,8 +3181,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 3.0,
+    "cycles_per_block": 6.666666666666667,
+    "cpi": 3.3333333333333335,
     "counts": {
      "retired": 192,
      "rd": 0,
@@ -3481,8 +3481,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 5.0,
-    "cpi": 5.0,
+    "cycles_per_block": 5.5,
+    "cpi": 5.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3494,7 +3494,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 384,
+     "port": 216,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3531,8 +3531,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 5.0,
-    "cpi": 5.0,
+    "cycles_per_block": 5.5,
+    "cpi": 5.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3544,7 +3544,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 384,
+     "port": 216,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3631,8 +3631,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 6.666666666666667,
+    "cpi": 6.666666666666667,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3644,7 +3644,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 288,
+     "port": 160,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3681,8 +3681,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 5.0,
-    "cpi": 5.0,
+    "cycles_per_block": 5.5,
+    "cpi": 5.5,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3694,7 +3694,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 384,
+     "port": 216,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3731,8 +3731,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.5,
-    "cpi": 7.5,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3744,7 +3744,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 120,
+     "port": 96,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3781,8 +3781,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 6.0,
-    "cpi": 6.0,
+    "cycles_per_block": 6.666666666666667,
+    "cpi": 6.666666666666667,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3794,7 +3794,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 288,
+     "port": 160,
      "bf": 0,
      "movem": 0,
      "fp": 0,
@@ -3831,8 +3831,8 @@
     }
    },
    "bus": {
-    "cycles_per_block": 7.5,
-    "cpi": 7.5,
+    "cycles_per_block": 8.0,
+    "cpi": 8.0,
     "counts": {
      "retired": 96,
      "rd": 0,
@@ -3844,7 +3844,7 @@
     "stalls": {
      "mem": 0,
      "addr": 0,
-     "port": 120,
+     "port": 96,
      "bf": 0,
      "movem": 0,
      "fp": 0,
