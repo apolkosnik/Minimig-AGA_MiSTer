@@ -17,8 +17,9 @@
 // Reported, and checked by run_pipe_perf.py:                               //
 //   RESULT  cycles over the 96 intervals                                   //
 //   COUNT   instructions retired in them (must be 96 x the block's),       //
-//           port-B reads issued and writes accepted, and on the bus the    //
-//           fetch, read and write transactions                             //
+//           port-B reads issued and writes accepted, on the bus the fetch, //
+//           read and write transactions, and the instructions that left    //
+//           EA-fetch with an address EA-calculate formed (agu)             //
 //   STALL   cycles each hold was up in them (they overlap; not exclusive)  //
 //   EXC     exceptions taken anywhere in the run (must be 0)               //
 // It is a throughput probe, not a correctness test: the dual and program   //
@@ -63,7 +64,7 @@ wire [31:0] op_pc    = dut.u_cpu.exe_pc;
 wire        in_win   = nreset && (first >= 0) && (last < 0);
 
 integer w_mem = 0, w_addr = 0, w_port = 0, w_bf = 0, w_mvm = 0, w_fp = 0, w_mul = 0, w_div = 0;
-integer retired = 0, rd_b = 0, wr_b = 0, bus_f = 0, bus_r = 0, bus_w = 0, excs = 0;
+integer retired = 0, rd_b = 0, wr_b = 0, bus_f = 0, bus_r = 0, bus_w = 0, excs = 0, agu = 0;
 reg     exc_q = 0;
 always @(posedge clk) begin
 	if (in_win) begin
@@ -78,6 +79,7 @@ always @(posedge clk) begin
 		rd_b   = rd_b   + dut.u_cpu.l1_rd_b;
 		wr_b   = wr_b   + (dut.u_cpu.l1_wren_b && !dut.u_cpu.l1_wr_busy);
 		retired = retired + boundary;
+		agu    = agu    + (dut.u_cpu.u_eaf.eaf_departs && dut.u_cpu.eac_agu_ok);
 `ifdef AP040_PERF_BUS
 		if (req && ack) begin
 			if (instr)   bus_f = bus_f + 1;
@@ -157,8 +159,8 @@ initial begin
 		$display("FAIL: first=%0d last=%0d boundaries=%0d (want 97)", first, last, seen);
 	else
 		$display("RESULT cycles=%0d intervals=96", last - first);
-	$display("COUNT retired=%0d rd=%0d wr=%0d bus_fetch=%0d bus_read=%0d bus_write=%0d",
-	         retired, rd_b, wr_b, bus_f, bus_r, bus_w);
+	$display("COUNT retired=%0d rd=%0d wr=%0d bus_fetch=%0d bus_read=%0d bus_write=%0d agu=%0d",
+	         retired, rd_b, wr_b, bus_f, bus_r, bus_w, agu);
 	$display("STALL mem=%0d addr=%0d port=%0d bf=%0d movem=%0d fp=%0d mul=%0d div=%0d",
 	         w_mem, w_addr, w_port, w_bf, w_mvm, w_fp, w_mul, w_div);
 	$display("EXC %0d", excs);

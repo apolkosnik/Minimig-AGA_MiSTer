@@ -35,7 +35,7 @@ CORE = [RTL / n for n in (
 # exclusions as well (run_verilator.py): this core has no internal caches.
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
-                     "t_movem_restart", "t_fault_edges"]
+                     "t_movem_restart", "t_fault_edges", "t_agu"]
 PROGRAMS_OPEN = {}
 VASM = Path(os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"))
 

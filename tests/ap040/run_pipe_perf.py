@@ -10,7 +10,10 @@ A case fails -- and the run exits non-zero -- if its image is missing or
 does not assemble, if the bench did not see all 97 block boundaries, if any
 exception was taken, or if fewer or more instructions retired in the window
 than 96 blocks hold. With --baseline, every case is compared against a
-stored result, and --check also fails on a case that got slower.
+stored result, and --check also fails on a case that got slower -- or
+that had fewer of its instructions' addresses formed by EA-calculate (the
+agu count): EA-fetch still forms any it is not given, correctly, so a
+classification that loses an instruction shows nowhere else.
 
   python3 tests/ap040/run_pipe_perf.py --work /home/adam/ap040-audit4/perf
   python3 tests/ap040/run_pipe_perf.py --work W --baseline tests/ap040/perf/baseline.json --check
@@ -176,10 +179,12 @@ def main():
             if not b or "error" in row or any("error" in row.get(m, {}) or "error" in b.get(m, {}) for m in ("local", "bus")):
                 continue
             d = [row[m]["cycles_per_block"] - b[m]["cycles_per_block"] for m in ("local", "bus")]
-            if any(abs(x) > 1e-9 for x in d):
-                print("%-22s %+13.2f %+13.2f" % (row["name"], d[0], d[1]))
-            worse += any(x > 1e-9 for x in d)
-    print("\n%d cases, %d failed%s" % (len(rows), bad, (", %d slower than the baseline" % worse) if args.baseline else ""))
+            lost = [m for m in ("local", "bus") if row[m]["counts"].get("agu", 0) < b[m]["counts"].get("agu", 0)]
+            if any(abs(x) > 1e-9 for x in d) or lost:
+                print("%-22s %+13.2f %+13.2f%s" % (row["name"], d[0], d[1],
+                      "  fewer addresses from EA-calculate: " + ", ".join(lost) if lost else ""))
+            worse += any(x > 1e-9 for x in d) or bool(lost)
+    print("\n%d cases, %d failed%s" % (len(rows), bad, (", %d slower than the baseline or losing addresses" % worse) if args.baseline else ""))
     sys.exit(1 if bad or (args.check and worse) else 0)
 
 

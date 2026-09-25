@@ -521,9 +521,9 @@ module ap040_ea_fetch
 	// The registers this stage's instruction may write, one bit each
 	// (restructuring plan, phase 4): conservative, and from its fields.
 	output     [15:0] wr_mask,
-	output            mvm_tail,     // a MOVEM load's last read is still out
 	input             eac_agu_ok,   // EA-calculate formed this instruction's address (phase 4)
 	input      [31:0] eac_agu_ea,
+	input      [31:0] eac_agu_an,   // ...and, with (An)+/-(An), An's new value
 	output      [3:0] rf3_addr,
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
@@ -739,16 +739,23 @@ wire [31:0] fx_base_s = (fx_src && fx_bs) ? 32'd0 : ea_base;
 wire [31:0] fx_idx_s  = (fx_src && fx_is) ? 32'd0 : idx_val;
 wire [31:0] fx_disp_s = fx_src ? eac_fx_bd : idx_disp;
 wire [31:0] ea_disp   = ea_ext;
-wire [31:0] ea_target = eac_is_abs     ? ea_ext             :
-                        eac_is_predec  ? (an_base - an_step) :
-                        eac_ea_indexed ? ((fx_src && fx_ind) ? fxi_ea : (fx_base_s + fx_idx_s + fx_disp_s)) :
-                                         (ea_base + ea_disp);
+wire [31:0] ea_target_v = eac_is_abs     ? ea_ext             :
+                          eac_is_predec  ? (an_base - an_step) :
+                          eac_ea_indexed ? ((fx_src && fx_ind) ? fxi_ea : (fx_base_s + fx_idx_s + fx_disp_s)) :
+                                           (ea_base + ea_disp);
+// The simple forms' address comes from EA-calculate, a register (restructuring
+// plan, phase 4); the views above form it for everything else, and for the
+// check below. A plain store's goes by the store branch of the L1 address.
+wire        agu_use   = eac_agu_ok && !(eac_is_store && !eac_st_disp);
+wire [31:0] ea_target = agu_use ? eac_agu_ea : ea_target_v;
 
 // The value An takes afterwards. Both modes leave An at the same place --
 // just past the longword for (An)+, at the start of it for -(An) -- which is
 // why one expression covers both.
-wire [31:0] an_new = eac_is_postinc ? (an_base + an_step) :
-                                      (an_base - an_step);
+wire [31:0] an_new_v = eac_is_postinc ? (an_base + an_step) :
+                                        (an_base - an_step);
+wire        agu_an   = eac_agu_ok && (eac_is_postinc || eac_is_predec);
+wire [31:0] an_new   = agu_an ? eac_agu_an : an_new_v;
 
 // MOVE memory-to-memory (milestone 114) -- see ap040_decode.v. The load is
 // the ordinary one above; this is the destination, formed when it completes
@@ -1302,7 +1309,9 @@ ap040_pipe_fpu u_fpu (
 	.bg_busy   (fp_bg)
 );
 
-assign rf3_we   = mvm_rd_pend && l1_rvalid_b;
+// Not a beat that faulted: its register keeps what it had, and the
+// instruction is abandoned (the access error below).
+assign rf3_we   = mvm_rd_pend && l1_rvalid_b && !l1_rflt_b;
 assign rf3_addr = mvm_rd_reg;
 // A Word load SIGN-EXTENDS into the whole register: MOVEM.W does not
 // preserve the upper half, it replaces it with the sign. That is the one
@@ -1784,18 +1793,35 @@ assign wr_mask = !eac_valid ? 16'd0 :
                    eac_is_movec || exc_go || exc_active) ? rbit(4'd15) : 16'd0) |
                  (eac_is_movec ? rbit(eac_dest_reg) : 16'd0);
 
-assign mvm_tail = mvm_rd_pend;
-// The address stage's check (phase 4, step 1): wherever EA-calculate formed
-// the address, it must be the one this stage forms -- on every load issued
-// and every plain store's write accepted, from views this stage trusts
-// (no hold up).
+// A MOVEM read is only ever outstanding for the MOVEM in this stage: the
+// access error that abandons one clears it with the sequencer. Left up, it
+// took rf3_we on every l1_rvalid_b after -- l1_rvalid_b is a level -- and
+// wrote the faulted beat's register with the frame's vector and then the
+// handler's own loads, until the next flush. EA-calculate relies on this.
 `ifdef VERILATOR
 always @(posedge clk)
-	if (nreset && ce && live && eac_agu_ok && !hold_hazard) begin
-		if (mem_issue && !eac_is_store && (l1_addr_b != eac_agu_ea))
-			$error("agu: load at %h went to %h, EA-calculate formed %h", eac_pc, l1_addr_b, eac_agu_ea);
-		if (store_now && !eac_st_disp && l1_wren_b && !l1_wr_busy && (l1_addr_b != eac_agu_ea))
-			$error("agu: store at %h went to %h, EA-calculate formed %h", eac_pc, l1_addr_b, eac_agu_ea);
+	if (nreset && ce && mvm_rd_pend && !(eac_valid && eac_is_movem && mvm_active))
+		$error("ap040_ea_fetch: a MOVEM read outstanding with no MOVEM here (at %h)", eac_pc);
+`endif
+// The address stage's check (phase 4): wherever EA-calculate formed the
+// address, it must be the one this stage's views form -- on every load
+// issued, every plain store's write accepted and every write-only
+// CLR/Scc leaving, whenever the views are the registers' values (no long
+// forward on them) -- and An's new value with it.
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live && eac_agu_ok && !addr_hz_v) begin
+		if (mem_issue && !eac_is_store && (ea_target_v != eac_agu_ea))
+			$error("agu: load at %h: the views form %h, EA-calculate formed %h", eac_pc, ea_target_v, eac_agu_ea);
+		if (store_now && !eac_st_disp && l1_wren_b && !l1_wr_busy && (st_addr_v != eac_agu_ea))
+			$error("agu: store at %h: the views form %h, EA-calculate formed %h", eac_pc, st_addr_v, eac_agu_ea);
+		if (store_now && eac_st_disp && l1_wren_b && !l1_wr_busy && (ea_target_v != eac_agu_ea))
+			$error("agu: displacement store at %h: the views form %h, EA-calculate formed %h", eac_pc, ea_target_v, eac_agu_ea);
+		if (eac_st_only && eaf_departs && (ea_target_v != eac_agu_ea))
+			$error("agu: write-only at %h: the views form %h, EA-calculate formed %h", eac_pc, ea_target_v, eac_agu_ea);
+		if (agu_an && ((mem_issue && !eac_is_store) || (store_now && l1_wren_b && !l1_wr_busy) ||
+		               (eac_st_only && eaf_departs)) && (an_new_v != eac_agu_an))
+			$error("agu: An step at %h: the views form %h, EA-calculate formed %h", eac_pc, an_new_v, eac_agu_an);
 	end
 `endif
 
@@ -1850,7 +1876,14 @@ wire addr_use_a   = (eac_uses_ea || eac_is_chk || eac_is_div) && !st_base_b;
 wire addr_use_b   = (eac_uses_ea || eac_is_chk) &&
                     (st_base_b || eac_is_bsr || eac_is_jsr || eac_is_pea || eac_is_link ||
                      mm || ck || cas || eac_is_chk);
-wire addr_hz      = live && ((addr_use_a && lf_a) || (addr_use_b && lf_b));
+// The views are not yet the registers' values...
+wire addr_hz_v    = live && ((addr_use_a && lf_a) || (addr_use_b && lf_b));
+// ...which matters only where they are used: not for a base EA-calculate
+// has formed the address from (phase 4). A load's port A is only its base;
+// a plain store's port B is only its base. CHK's port B is its verdict and
+// still waits.
+wire addr_hz      = live && ((addr_use_a && lf_a && !agu_use) ||
+                             (addr_use_b && lf_b && !(eac_agu_ok && st_base_b)));
 // Three holds the lists above leave out on purpose, each covered some other
 // way; the mutations dropping them survived every bench, so the reasons are
 // checked here instead of trusted. CHK2/CMP2's and CAS's verdict operands
@@ -2608,6 +2641,12 @@ wire [31:0] exc_vec_addr = exc_vbase_r + {22'd0, exc_vec_r, 2'b00};
 wire [31:0] ret_addr = ret_f1 ? ((ret_ph == RET_BEAT1) ? ret_base2_4 : ret_base2) :
                       (ret_ph == RET_BEAT1) ? (operand_a_ea + 32'd4) : operand_a_ea;
 
+// A plain store's address from the views; EA-calculate's replaces it
+// wherever it formed one (phase 4), which is every plain store it can
+// reach -- this is left for the check below until the views go.
+wire [31:0] st_addr_v = eac_is_abs    ? eac_imm :
+                        eac_is_predec ? (an_base - an_step) : an_base;
+
 // Driven unconditionally, same "compute always, gate consumption" precedent
 // as raddr_b -- harmless when none of eac_is_mem_src/eac_is_jmp/eac_is_push/
 // eac_is_exc/eac_is_rte_active is set, nothing reads l1_q_b or l1_wr_busy
@@ -2639,9 +2678,7 @@ wire [31:0] l1_addr_word = cmr_busy     ? cmr_addr     :
                             // on this branch cost 0.97 ns, and an adder
                             // shared by way of a mux on ea_base cost 0.65.
                             (store_now && !eac_st_disp)
-                                      ? (eac_is_abs    ? eac_imm :
-                                         eac_is_predec ? (an_base - an_step)
-                                                       : an_base) :
+                                      ? (eac_agu_ok ? eac_agu_ea : st_addr_v) :
                             eac_is_push  ? push_addr :
                             exc_writing ? exc_beat_addr :
                             (exc_vec_issue || exc_vec_pending) ? exc_vec_addr :
@@ -3084,7 +3121,9 @@ always @(posedge clk) begin
 			                       aer_now_16 ? 2'b11 : aer_size_f, aer_now_16 ? 2'b01 : aer_tt_f, aer_tm_f}) |
 			           {3'b000, mvm_active || cm_resume, 12'h000};
 			mvm_active <= 1'b0;
+			mvm_rd_pend <= 1'b0;
 			mvp_active <= 1'b0;
+			mvp_rd_pend <= 1'b0;
 			bf_active  <= 1'b0;
 			bf_ph      <= BF_EA;
 			ck_active  <= 1'b0;

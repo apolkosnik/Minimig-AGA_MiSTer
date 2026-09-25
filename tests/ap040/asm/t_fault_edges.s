@@ -24,6 +24,11 @@
 ;        immediate -- the other store route on a pipelined core.
 ; 30-37  CLR and Scc on a write-protected page: written without being read,
 ;        refused, restarted -- once. ST (A0)+ leaves A0 one byte on, not two.
+; 38-45  MOVEM.L (A0),D1-D4 with D3's longword on an invalid page. The
+;        handler finds D1 and D2 loaded and D3 and D4 as they were: the
+;        faulted beat writes nothing, and nothing the exception reads after
+;        it lands in a register either. The RTE restarts the MOVEM (CM),
+;        which then loads all four.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -38,6 +43,9 @@ last_ssw	equ	$360C
 fix_addr	equ	$3610
 fix_val		equ	$3614
 pre_wr		equ	$3618		; ($CFFC).l as the access-error handler found it
+h_d2		equ	$361C		; D2-D4 as the access-error handler found them
+h_d3		equ	$3620
+h_d4		equ	$3624
 
 failt	macro
 	move.w	#\1,d7
@@ -244,6 +252,39 @@ tloop:
 	move.w	(last_ssw).l,d0
 	chkl	d0,$0425,37		; ATC + byte write + supervisor data
 
+;------------ 38-45: a MOVEM load faults on its third register, and restarts
+	move.l	#$11111111,($5FF8).l
+	move.l	#$22222222,($5FFC).l
+	move.l	#$33333333,($6000).l
+	move.l	#$44444444,($6004).l
+	move.l	#$4418,(fix_addr).l	; page 6
+	move.l	#$6003,(fix_val).l
+	move.l	#0,($4418).l		; page 6 invalid
+	pflusha
+	move.l	#$D1D1D1D1,d1
+	move.l	#$D2D2D2D2,d2
+	move.l	#$D3D3D3D3,d3
+	move.l	#$D4D4D4D4,d4
+	lea	($5FF8).l,a0
+	movem.l	(a0),d1-d4
+	chkl	d1,$11111111,38
+	chkl	d4,$44444444,39
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,8,40
+	move.l	(last_fa).l,d0
+	chkl	d0,$6000,41
+	move.l	(h_d2).l,d0
+	chkl	d0,$22222222,42		; loaded before the fault
+	move.l	(h_d3).l,d0
+	chkl	d0,$D3D3D3D3,43		; the faulted beat's: untouched
+	move.l	(h_d4).l,d0
+	chkl	d0,$D4D4D4D4,44
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	and.l	#$FF9F,d0		; SIZE is how the core read: not judged
+	chkl	d0,$1505,45		; CM + ATC + read + supervisor data
+
 	moveq	#0,d0
 	movec	d0,tc
 	pflusha
@@ -264,6 +305,9 @@ halt2:
 
 ; The access error: record the frame, apply the test's fix, run it again.
 h_aerr:
+	move.l	d2,(h_d2).l
+	move.l	d3,(h_d3).l
+	move.l	d4,(h_d4).l
 	movem.l	d0/a0,-(sp)
 	cmpi.w	#$7008,14(sp)		; format $7, vector 2
 	bne	unexpected

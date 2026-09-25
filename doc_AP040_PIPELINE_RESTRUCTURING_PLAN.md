@@ -213,6 +213,48 @@ run over every suite and the corpus:
 Steps 1 and 2 are in: both suites, fast and with a random clock enable and
 the slow L1, ran with neither check firing.
 
+Step 3 is in, and step 4 in part. EA-calculate takes the base from the
+youngest producer: the instruction ahead's (An)+/-(An) step (formed there a
+cycle earlier, a register, and its only write to that register), EX's
+result (taken only in a cycle EX advances, so it is final, and only into a
+register), EX's An step, or the register file. It waits for anything else:
+another write from the instruction ahead, a write EX makes that is not
+forwarded, a MOVEM load still landing. EA-fetch uses the registered address
+and An value for (An), (An)+, -(An), (d16,An), (d16,PC) and absolute loads,
+read-modify-writes, CLR/Scc and stores, displacement stores included; its
+own views remain only to check them (`agu:`), and an invariant checks that
+no such instruction reaches EA-fetch without its address. The waits moved
+rather than grew: the 77 perf cases are unchanged, cycle for cycle. The
+core top fits at 43.33 MHz (+1.921 ns at 25 ns, 18,355 ALMs, +654 for the
+fourth port and the stage) with EA-calculate in none of the 40 worst paths.
+`t_agu.s` puts an access straight behind the producer of its base from each
+source, on both cores.
+
+Two things the checks could not see, found by a mutation that should have
+cost cycles and did not. EA-fetch still forms, correctly, any address it is
+not given, so an instruction the stage wrongly passes over fails nothing:
+the classification took MOVE from SR/CCR's CCR bit -- opcode bit 9, decoded
+for every instruction -- as a MOVE from SR, and every access with bit 9 set
+(any load into D1, D3, D5 or D7, among others) had been going the old way.
+The perf harness now counts the instructions that leave EA-fetch with an
+address from EA-calculate, and `--check` fails a case that has fewer than
+its baseline. And a MOVEM load whose beat faulted left its read marked
+outstanding through the exception: since `l1_rvalid_b` is a level, every
+read after it -- the vector, then the handler's own loads -- was written
+into the faulted beat's register until the next flush, which a handler
+could see, though the restart then reloaded it. `t_fault_edges.s` 38-45
+check the handler's view on both cores; the MOVEM port now only ever
+writes for the MOVEM in EA-fetch, which the write-set check holds, and so
+EA-calculate needs no wait of its own for a MOVEM's last load.
+
+Left for later, on the evidence of the fits: pushes, pops, the indexed and
+full-format forms and the sequencers' starting addresses. The L1 address
+adders are not what limits either top -- the core's worst path is EX's
+result into EA-fetch's operand registers, and bus16's is EA-fetch's
+sequencer selects into membus's prefetch-window snoop, which phase 5's
+request storage removes -- so moving them buys structure, not time. They
+move when phase 5 wants every request's address from a register.
+
 Primary files: CPU, decode, EA-calculate, EA-fetch, execute and register file.
 
 - [ ] Define a documented instruction metadata bundle compatible with the

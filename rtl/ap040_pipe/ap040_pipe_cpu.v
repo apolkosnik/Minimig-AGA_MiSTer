@@ -365,7 +365,9 @@ wire  [3:0] agu_reg;       // EA-calculate's base register (phase 4), port D
 wire [31:0] agu_rdata;
 wire        eac_agu_ok;
 wire [31:0] eac_agu_ea;
-wire        eaf_mvm_tail;  // a MOVEM load's last read is still out
+wire [31:0] eac_agu_an;
+wire        eac_agu_anfw;
+wire  [3:0] eac_agu_reg;
 wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
 wire        eaf_is_rmw, eaf_is_link, eaf_is_mm, eaf_is_xm, eaf_bnt;
@@ -567,8 +569,7 @@ end
 // EX's and WB's registers do: taken on every advance, as those registers
 // are, since not every way out of EA-fetch is an eaf_departs (an entry
 // leaving behind a held RTE is not), and a bubble's mask is never used.
-// MOVEM's last load can land after the MOVEM has left EA-fetch, so its
-// port is checked against the instruction in EX as well.
+// MOVEM's port writes only while the MOVEM is in EA-fetch.
 // EX's copy is a register the address stage uses; WB's is for the check.
 reg [15:0] ex_wr_mask;
 always @(posedge clk)
@@ -588,8 +589,8 @@ always @(posedge clk)
 			$error("wr_mask: %h wrote register %0d on port 2 in WB, outside its mask %h", exe_pc, exe_dest_reg2, wm_wb);
 		if (ex_an_early_we && !wm_ex[ex_an_early_reg])
 			$error("wr_mask: EX's early An step wrote register %0d, outside its mask %h", ex_an_early_reg, wm_ex);
-		if (rf3_we && !eaf_wr_mask[rf3_addr] && !wm_ex[rf3_addr])
-			$error("wr_mask: EA-fetch's MOVEM port wrote register %0d, outside the masks %h/%h", rf3_addr, eaf_wr_mask, wm_ex);
+		if (rf3_we && !eaf_wr_mask[rf3_addr])
+			$error("wr_mask: EA-fetch's MOVEM port wrote register %0d, outside the mask %h", rf3_addr, eaf_wr_mask);
 		if (aux_we && !rv_isp_we && !wm_wb[15])
 			$error("wr_mask: %h wrote a stack pointer, outside its mask %h", exe_pc, wm_wb);
 	end
@@ -1151,12 +1152,15 @@ ap040_ea_calc u_eac
 	.ahead2_wr_mask   (ex_wr_mask),
 	.ex_fwd_valid     (ex_fwd_valid),
 	.ex_fwd_dest      (ex_fwd_dest),
+	.ex_fwd_data      (ex_fwd_data),
 	.ex_an_valid      (eaf_valid && eaf_writes_an && !ex_fwd2_slow),
 	.ex_an_reg        (eaf_an_reg),
 	.ex_an_data       (eaf_an_data),
-	.mvm_tail         (eaf_mvm_tail),
 	.eac_agu_ok       (eac_agu_ok),
 	.eac_agu_ea       (eac_agu_ea),
+	.eac_agu_an       (eac_agu_an),
+	.eac_agu_anfw     (eac_agu_anfw),
+	.eac_agu_reg      (eac_agu_reg),
 	.id_st_disp       (id_st_disp),
 	.id_chk_long      (id_chk_long),
 	.id_is_chk        (id_is_chk),
@@ -1364,9 +1368,9 @@ ap040_ea_fetch #(
 	.eaf_div_signed   (eaf_div_signed),
 	.rf3_we           (rf3_we),
 	.wr_mask          (eaf_wr_mask),
-	.mvm_tail         (eaf_mvm_tail),
 	.eac_agu_ok       (eac_agu_ok),
 	.eac_agu_ea       (eac_agu_ea),
+	.eac_agu_an       (eac_agu_an),
 	.rf3_addr         (rf3_addr),
 	.rf3_data         (rf3_data),
 	.eaf_is_link      (eaf_is_link),
