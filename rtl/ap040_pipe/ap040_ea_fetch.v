@@ -518,6 +518,12 @@ module ap040_ea_fetch
 	output reg  [5:0] eaf_rtr_ccr,  // RTR: {it is one, the popped X N Z V C}
 	// MOVEM's third register write port -- see ap040_pipe_regfile.v.
 	output            rf3_we,
+	// The registers this stage's instruction may write, one bit each
+	// (restructuring plan, phase 4): conservative, and from its fields.
+	output     [15:0] wr_mask,
+	output            mvm_tail,     // a MOVEM load's last read is still out
+	input             eac_agu_ok,   // EA-calculate formed this instruction's address (phase 4)
+	input      [31:0] eac_agu_ea,
 	output      [3:0] rf3_addr,
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
@@ -1753,6 +1759,45 @@ assign pf_addr   = pm_addr;
 assign pf_fc     = dfc_in3;
 assign mmusr_we  = (pm_ph == PM_REQ) && pm_ptest && pm_ack;
 assign mmusr_val = pm_mmusr;
+
+// The registers the instruction here may write (restructuring plan, phase
+// 4): its destination, its An step -- either register named, to be safe --
+// the second results of EXG, LINK/UNLK and MULL/DIVL, CAS's compare
+// register, A7 for everything that pushes, pops or takes an exception, and
+// all sixteen for the multi-register writers (a MOVEM load, CAS2, the FPU,
+// a memory-to-memory MOVE, MOVE16, RTE/RTR). From the fields alone, so an
+// earlier stage can compare against it without this stage's logic in the
+// way; ap040_pipe_cpu.v checks it covers every write the core makes.
+function [15:0] rbit;
+	input [3:0] r;
+	begin rbit = 16'd1 << r; end
+endfunction
+assign wr_mask = !eac_valid ? 16'd0 :
+                 ((cas2 || fp || mm || m16 || (eac_is_movem && eac_movem_dir) || eac_is_rte || eac_is_rtr)
+                  ? 16'hFFFF : 16'd0) |
+                 ((eac_writes_reg || eac_is_dbcc) ? rbit(eac_dest_reg) : 16'd0) |   // DBcc: EX decides
+                 ((eac_is_postinc || eac_is_predec || eac_is_link || eac_is_unlk || eac_is_exgop || eac_is_movem)
+                  ? (rbit(eac_src_reg) | rbit(eac_dest_reg)) : 16'd0) |
+                 (eac_ml[6] ? (rbit(eac_dest_reg) | rbit(eac_src_reg) | rbit({1'b0, eac_ml[2:0]})) : 16'd0) |
+                 (cas ? rbit({1'b0, eac_cas[2:0]}) : 16'd0) |
+                 ((eac_is_bsr || eac_is_jsr || eac_is_pea || eac_is_link || eac_is_unlk || eac_is_rts ||
+                   eac_is_movec || exc_go || exc_active) ? rbit(4'd15) : 16'd0) |
+                 (eac_is_movec ? rbit(eac_dest_reg) : 16'd0);
+
+assign mvm_tail = mvm_rd_pend;
+// The address stage's check (phase 4, step 1): wherever EA-calculate formed
+// the address, it must be the one this stage forms -- on every load issued
+// and every plain store's write accepted, from views this stage trusts
+// (no hold up).
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && live && eac_agu_ok && !hold_hazard) begin
+		if (mem_issue && !eac_is_store && (l1_addr_b != eac_agu_ea))
+			$error("agu: load at %h went to %h, EA-calculate formed %h", eac_pc, l1_addr_b, eac_agu_ea);
+		if (store_now && !eac_st_disp && l1_wren_b && !l1_wr_busy && (l1_addr_b != eac_agu_ea))
+			$error("agu: store at %h went to %h, EA-calculate formed %h", eac_pc, l1_addr_b, eac_agu_ea);
+	end
+`endif
 
 // The store snoop, kept until the instruction departs: MOVEM's beats span
 // cycles, and the refetch belongs to the whole instruction.

@@ -74,6 +74,10 @@ module ap040_pipe_regfile
 
 	input       [3:0] raddr_b,
 	output     [31:0] rdata_b,
+	// EA-calculate's own read (restructuring plan, phase 4): the base of an
+	// address it forms a stage early. The same bypasses as the others.
+	input       [3:0] raddr_d,
+	output     [31:0] rdata_d,
 
 	// direct stack pointer access for MOVEC/MOVE USP, independent of the
 	// currently active bank (never asserted together with the main write)
@@ -173,6 +177,12 @@ assign rdata_b = (we_fwd  && (waddr  == raddr_b)) ? wdata  :
                  (we2_fwd && (waddr2 == raddr_b)) ? wdata2 :
                  !raddr_b[3]            ? dreg[raddr_b[2:0]] :
                  (raddr_b[2:0] == 3'd7) ? sp_read : areg[raddr_b[2:0]];
+
+assign rdata_d = (we_fwd  && (waddr  == raddr_d)) ? wdata  :
+                 (we3 && (waddr3 == raddr_d)) ? wdata3 :
+                 (we2_fwd && (waddr2 == raddr_d)) ? wdata2 :
+                 !raddr_d[3]            ? dreg[raddr_d[2:0]] :
+                 (raddr_d[2:0] == 3'd7) ? sp_read : areg[raddr_d[2:0]];
 
 integer i;
 always @(posedge clk) begin

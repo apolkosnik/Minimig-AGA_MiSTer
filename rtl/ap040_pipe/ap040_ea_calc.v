@@ -64,6 +64,8 @@
 // of holding.                                                              //
 //--------------------------------------------------------------------------//
 
+`include "ap040_pipe_defs.svh"
+
 module ap040_ea_calc
 (
 	input             clk,
@@ -119,6 +121,19 @@ module ap040_ea_calc
 	input             id_is_rmw,
 	input             id_immrmw,
 	input             id_st_only,
+	// The address stage (restructuring plan, phase 4): the base's value from
+	// the register file's port D (agu_reg names it), EX's An step, and what
+	// the two instructions ahead may still write.
+	output      [3:0] agu_reg,
+	input      [31:0] agu_rdata,
+	input      [15:0] ahead1_wr_mask,   // the instruction in EA-fetch
+	input      [15:0] ahead2_wr_mask,   // ...and in EX
+	input             ex_fwd_valid,
+	input       [3:0] ex_fwd_dest,
+	input             ex_an_valid,      // EX's An step, a register: eaf_an_data
+	input       [3:0] ex_an_reg,
+	input      [31:0] ex_an_data,
+	input             mvm_tail,         // a MOVEM load's last read is still out
 	input             id_st_disp,
 	input             id_is_div,
 	input             id_div_signed,
@@ -210,6 +225,8 @@ module ap040_ea_calc
 	output reg        eac_is_rmw,
 	output reg        eac_immrmw,
 	output reg        eac_st_only,   // written, not read: no load, and an EX store all the same
+	output reg        eac_agu_ok,    // eac_agu_ea is this instruction's address
+	output reg [31:0] eac_agu_ea,
 	output reg        eac_st_disp,
 	output reg        eac_is_div,
 	output reg        eac_div_signed,
@@ -250,6 +267,38 @@ module ap040_ea_calc
 );
 
 assign ea_stall = stall_in;
+
+// ---- the address stage (restructuring plan, phase 4, step 1) ----
+// For the simple forms -- (An), (An)+, -(An), (d16,An), absolute -- of a
+// load, a read-modify-write (CLR/Scc's write-only store included) and a
+// plain store, the address is formed here, a stage early, and registered
+// for EA-fetch. The base comes from the register file (WB's commit is
+// bypassed there) or EX's An step (a register); if EX or EA-fetch ahead may
+// still change it any other way, or a MOVEM load's last register is still
+// on its way, agu_ok is low and EA-fetch forms the address itself, as it
+// always has. Step 1 changes nothing: EA-fetch checks every address it
+// forms against this one.
+wire        agu_special = id_mm[5] || id_mm[6] || id_moves[2] || id_movep[2] || id_ml[6] || id_bf[4] ||
+                          id_ck2[2] || id_cas[3] || id_cas[4] || id_m16[3] || id_fp || id_fx[5] ||
+                          id_is_movem || id_is_rts || id_is_rte || id_is_rtr || id_cinv[2] || id_pmmu[4] ||
+                          id_fflt[5] || (id_mvfsr != 2'd0) || id_ea_indexed || id_ea_pcrel;
+wire        agu_st     = id_is_store && !id_st_disp;
+wire        agu_ld     = (id_is_mem_src || id_st_only) && !id_is_store;
+wire        agu_class  = (agu_st || agu_ld) && !agu_special;
+assign      agu_reg    = agu_st ? id_dest_reg : id_src_reg;
+wire  [1:0] agu_size   = id_sxt_w ? `AP040_SZ_W : id_size;
+wire [31:0] agu_step   = (agu_size == `AP040_SZ_L) ? 32'd4 :
+                         (agu_size == `AP040_SZ_W) ? 32'd2 :
+                         (agu_reg == 4'd15)        ? 32'd2 : 32'd1;
+wire        agu_an_hit = ex_an_valid && (ex_an_reg == agu_reg);
+wire [31:0] agu_base   = agu_an_hit ? ex_an_data : agu_rdata;
+wire [31:0] agu_ext    = id_immrmw ? id_ea_ext : id_imm;
+wire        agu_hz     = ahead1_wr_mask[agu_reg] || mvm_tail ||
+                         (ex_fwd_valid && (ex_fwd_dest == agu_reg)) ||
+                         (ahead2_wr_mask[agu_reg] && !agu_an_hit);
+wire        agu_ok     = agu_class && (id_is_abs || !agu_hz);
+wire [31:0] agu_ea     = agu_st ? (id_is_abs ? id_imm : id_is_predec ? (agu_base - agu_step) : agu_base)
+                                : (id_is_abs ? agu_ext : id_is_predec ? (agu_base - agu_step) : (agu_base + agu_ext));
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -300,6 +349,8 @@ always @(posedge clk) begin
 		eac_is_rmw       <= 1'b0;
 		eac_immrmw       <= 1'b0;
 		eac_st_only      <= 1'b0;
+		eac_agu_ok       <= 1'b0;
+		eac_agu_ea       <= 32'h0;
 		eac_st_disp      <= 1'b0;
 		eac_is_div       <= 1'b0;
 		eac_div_signed   <= 1'b0;
@@ -388,6 +439,8 @@ always @(posedge clk) begin
 			eac_is_rmw       <= id_is_rmw;
 			eac_immrmw       <= id_immrmw;
 			eac_st_only      <= id_st_only;
+			eac_agu_ok       <= id_valid && agu_ok;
+			eac_agu_ea       <= agu_ea;
 			eac_st_disp      <= id_st_disp;
 			eac_is_div       <= id_is_div;
 			eac_div_signed   <= id_div_signed;

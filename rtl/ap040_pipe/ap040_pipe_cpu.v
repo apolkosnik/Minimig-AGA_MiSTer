@@ -360,6 +360,12 @@ wire        eaf_is_pea;
 wire        eac_is_movem, eac_movem_dir, eac_movem_word, eac_movem_down, eac_movem_wb, eac_movem_pcrel, eac_movem_abs, eac_is_div, eac_div_signed;
 wire        eaf_is_div, eaf_div_signed, eaf_is_divzero;
 wire        rf3_we;
+wire [15:0] eaf_wr_mask;   // the registers EA-fetch's instruction may write (phase 4)
+wire  [3:0] agu_reg;       // EA-calculate's base register (phase 4), port D
+wire [31:0] agu_rdata;
+wire        eac_agu_ok;
+wire [31:0] eac_agu_ea;
+wire        eaf_mvm_tail;  // a MOVEM load's last read is still out
 wire  [3:0] rf3_addr;
 wire [31:0] rf3_data;
 wire        eaf_is_rmw, eaf_is_link, eaf_is_mm, eaf_is_xm, eaf_bnt;
@@ -552,6 +558,42 @@ always @(posedge clk) begin
 	if (!nreset)                         halted <= 1'b0;
 	else if (ce && stop_now && eaf_halt) halted <= 1'b1;
 end
+
+// The write mask's check (restructuring plan, phase 4): EA-fetch's wr_mask
+// is what an earlier stage may compare its operands against, so it has to
+// cover every register the instruction really writes -- the main and second
+// commit ports in WB, EX's early An step, EA-fetch's MOVEM port, and the
+// stack-pointer banks. Shadows of the mask ride with the instruction as
+// EX's and WB's registers do: taken on every advance, as those registers
+// are, since not every way out of EA-fetch is an eaf_departs (an entry
+// leaving behind a held RTE is not), and a bubble's mask is never used.
+// MOVEM's last load can land after the MOVEM has left EA-fetch, so its
+// port is checked against the instruction in EX as well.
+// EX's copy is a register the address stage uses; WB's is for the check.
+reg [15:0] ex_wr_mask;
+always @(posedge clk)
+	if (!nreset)                 ex_wr_mask <= 16'd0;
+	else if (ce && !ex_stall)    ex_wr_mask <= eaf_wr_mask;
+`ifdef VERILATOR
+wire [15:0] wm_ex = ex_wr_mask;
+reg  [15:0] wm_wb = 16'd0;
+always @(posedge clk)
+	if (!nreset) begin
+		wm_wb <= 16'd0;
+	end else if (ce) begin
+		if (!ex_stall) wm_wb <= wm_ex;
+		if (commit_reg && !wm_wb[exe_dest_reg])
+			$error("wr_mask: %h wrote register %0d in WB, outside its mask %h", exe_pc, exe_dest_reg, wm_wb);
+		if (commit_reg2 && !wm_wb[exe_dest_reg2])
+			$error("wr_mask: %h wrote register %0d on port 2 in WB, outside its mask %h", exe_pc, exe_dest_reg2, wm_wb);
+		if (ex_an_early_we && !wm_ex[ex_an_early_reg])
+			$error("wr_mask: EX's early An step wrote register %0d, outside its mask %h", ex_an_early_reg, wm_ex);
+		if (rf3_we && !eaf_wr_mask[rf3_addr] && !wm_ex[rf3_addr])
+			$error("wr_mask: EA-fetch's MOVEM port wrote register %0d, outside the masks %h/%h", rf3_addr, eaf_wr_mask, wm_ex);
+		if (aux_we && !rv_isp_we && !wm_wb[15])
+			$error("wr_mask: %h wrote a stack pointer, outside its mask %h", exe_pc, wm_wb);
+	end
+`endif
 
 // Debug-only: how many register commits have happened. Idempotence hides a
 // multiple commit from every value check, so a bench that cares counts.
@@ -786,6 +828,8 @@ ap040_pipe_regfile u_regfile
 	.rdata_c  (rdata_c),
 	.raddr_b  (raddr_b),
 	.rdata_b  (rdata_b),
+	.raddr_d  (agu_reg),
+	.rdata_d  (agu_rdata),
 
 	.we3      (rf3_we),
 	.waddr3   (rf3_addr),
@@ -1101,6 +1145,18 @@ ap040_ea_calc u_eac
 	.id_is_rmw        (id_is_rmw),
 	.id_immrmw        (id_immrmw),
 	.id_st_only       (id_st_only),
+	.agu_reg          (agu_reg),
+	.agu_rdata        (agu_rdata),
+	.ahead1_wr_mask   (eaf_wr_mask),
+	.ahead2_wr_mask   (ex_wr_mask),
+	.ex_fwd_valid     (ex_fwd_valid),
+	.ex_fwd_dest      (ex_fwd_dest),
+	.ex_an_valid      (eaf_valid && eaf_writes_an && !ex_fwd2_slow),
+	.ex_an_reg        (eaf_an_reg),
+	.ex_an_data       (eaf_an_data),
+	.mvm_tail         (eaf_mvm_tail),
+	.eac_agu_ok       (eac_agu_ok),
+	.eac_agu_ea       (eac_agu_ea),
 	.id_st_disp       (id_st_disp),
 	.id_chk_long      (id_chk_long),
 	.id_is_chk        (id_is_chk),
@@ -1307,6 +1363,10 @@ ap040_ea_fetch #(
 	.eaf_is_div       (eaf_is_div),
 	.eaf_div_signed   (eaf_div_signed),
 	.rf3_we           (rf3_we),
+	.wr_mask          (eaf_wr_mask),
+	.mvm_tail         (eaf_mvm_tail),
+	.eac_agu_ok       (eac_agu_ok),
+	.eac_agu_ea       (eac_agu_ea),
 	.rf3_addr         (rf3_addr),
 	.rf3_data         (rf3_data),
 	.eaf_is_link      (eaf_is_link),

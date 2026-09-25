@@ -190,6 +190,29 @@ claim an overlapping bitfield execution unit.
 
 ## Phase 4 — Establish stage and completion ownership
 
+Approach taken (2026-09-24), each step behaviour-neutral until its check has
+run over every suite and the corpus:
+
+1. A conservative write set per instruction (`ap040_ea_fetch.v` `wr_mask`,
+   from the instruction's fields) and a Verilator check at every register
+   write port -- WB's two, EX's early An step, EA-fetch's MOVEM port, the
+   stack-pointer banks -- that the set covered it. (Found at once: DBcc's
+   counter is decided in EX and was in no field; MOVEM's last load lands
+   after the MOVEM has left EA-fetch.)
+2. EA-calculate forms the address of the simple loads, read-modify-writes
+   and plain stores ((An), (An)+, -(An), (d16,An), absolute) from a fourth
+   register-file port and EX's An step, when neither instruction ahead may
+   still change the base; EA-fetch asserts every address it forms equals it.
+3. EA-calculate holds such an instruction until its base is resolvable (EX's
+   forward admitted, into a register), and EA-fetch uses the registered
+   address for it alone.
+4. The same for pushes, RTS/RTE pops and the indexed forms. Only when every
+   L1 address source is a register does the adder leave the L1 address path
+   -- the bus16 top's timing (33.43 -> 35.84 MHz so far) and phase 5's base.
+
+Steps 1 and 2 are in: both suites, fast and with a random clock enable and
+the slow L1, ran with neither check firing.
+
 Primary files: CPU, decode, EA-calculate, EA-fetch, execute and register file.
 
 - [ ] Define a documented instruction metadata bundle compatible with the
