@@ -89,7 +89,7 @@ module ap040_pipe_fpu
 	input      [31:0] mem_rdata,
 
 	output            active,       // started and not finished
-	output reg        fin,          // finished: the outcome below stands until clear
+	output            fin,          // finished: the outcome below stands until clear
 	output reg        exc,
 	output reg  [7:0] exc_vec,
 	output reg  [1:0] exc_fmt,      // 0, 2 or 3
@@ -103,7 +103,7 @@ module ap040_pipe_fpu
 	output reg [31:0] w2_val,
 	output reg        redirect,
 	output reg [31:0] target,
-	output reg        t0_flow,      // a change of flow for T0 tracing
+	output            t0_flow,      // a change of flow for T0 tracing
 	output            bg_busy       // a released operation is still running
 );
 
@@ -157,6 +157,14 @@ localparam [5:0] S_IDLE     = 6'd0,
                  S_FREST_EA = 6'd40;
 
 reg  [5:0] state, m_ret;
+// Finished as S_FIN is entered (restructuring plan, phase 6B): everything
+// the outcome is made of -- exc, w1/w2, the redirect -- is registered on the
+// way in, and fin and a forced T0 flow were one more cycle, set in S_FIN
+// itself, for nothing. The registers keep them up for as long as the state
+// stands (until clear).
+reg        fin_q, t0_flow_q;
+assign fin     = fin_q || (state == S_FIN);
+assign t0_flow = t0_flow_q || ((state == S_FIN) && t0_force);
 reg [31:0] m_addr, m_wdata, m_val;
 reg  [1:0] m_size;
 
@@ -481,7 +489,7 @@ endtask
 
 task go_pc;
 	input [31:0] t;
-	begin redirect <= 1'b1; target <= t; t0_flow <= 1'b1; state <= S_FIN; end
+	begin redirect <= 1'b1; target <= t; t0_flow_q <= 1'b1; state <= S_FIN; end
 endtask
 
 // The (An)+/-(An) step, committed with the outcome.
@@ -520,11 +528,11 @@ always @(posedge clk) begin
 	if (!nreset) begin
 		state <= S_IDLE; m_ret <= S_IDLE;
 		m_addr <= 32'd0; m_wdata <= 32'd0; m_val <= 32'd0; m_size <= `AP040_SZ_L;
-		fin <= 1'b0; exc <= 1'b0; exc_vec <= 8'd0; exc_fmt <= 2'd0;
+		fin_q <= 1'b0; exc <= 1'b0; exc_vec <= 8'd0; exc_fmt <= 2'd0;
 		exc_pc <= 32'd0; exc_addr <= 32'd0;
 		w1_en <= 1'b0; w1_reg <= 4'd0; w1_val <= 32'd0;
 		w2_en <= 1'b0; w2_reg <= 4'd0; w2_val <= 32'd0;
-		redirect <= 1'b0; target <= 32'd0; t0_flow <= 1'b0; t0_force <= 1'b0;
+		redirect <= 1'b0; target <= 32'd0; t0_flow_q <= 1'b0; t0_force <= 1'b0;
 		rreg <= 4'd0;
 		fpu_req <= 1'b0; fpu_class <= 3'd0; fpu_opm <= 7'd0; fpu_fmt <= 3'd0;
 		fpu_srcr <= 3'd0; fpu_dstr <= 3'd0; fpb <= 96'd0;
@@ -563,14 +571,22 @@ always @(posedge clk) begin
 
 		if (clear) begin
 			state <= S_IDLE;
-			fin   <= 1'b0;
+			fin_q <= 1'b0;
 		end else case (state)
 		S_IDLE: if (start) begin
 			exc <= 1'b0; w1_en <= 1'b0; w2_en <= 1'b0; redirect <= 1'b0;
-			t0_flow <= 1'b0; t0_force <= 1'b0;
+			t0_flow_q <= 1'b0; t0_force <= 1'b0;
 			fp_ea_v <= 1'b0; fp_ea_pd <= 1'b0; fp_ea_pi <= 1'b0;
 			rreg <= {1'b1, d_rn};   // An, for the modes that step it
-			state <= S_DISPATCH;
+			// A general operation whose EA is not An's own -- (An), (An)+,
+			// -(An), which read an_val -- needs nothing DISPATCH captures, and
+			// DISPATCH would only send it to S_FPU_DEC (phase 6B): straight
+			// there. The F-line forms go through DISPATCH as ever.
+			if (op[8:6] == 3'b000 && d_mode != 3'b010 && d_mode != 3'b011 && d_mode != 3'b100 &&
+			    !(d_mode == 3'b111 && d_rn > 3'b100))
+				state <= S_FPU_DEC;
+			else
+				state <= S_DISPATCH;
 		end
 
 		// ap040_core.v's F-line decode for cpID 1 (its S_FETCH case
@@ -1381,8 +1397,8 @@ always @(posedge clk) begin
 		S_POST: state <= S_FIN;
 
 		S_FIN: begin
-			fin <= 1'b1;
-			if (t0_force) t0_flow <= 1'b1;
+			fin_q <= 1'b1;
+			if (t0_force) t0_flow_q <= 1'b1;
 		end
 
 		default: state <= S_IDLE;

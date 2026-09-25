@@ -255,6 +255,27 @@ sequencer selects into membus's prefetch-window snoop, which phase 5's
 request storage removes -- so moving them buys structure, not time. They
 move when phase 5 wants every request's address from a register.
 
+Step 4, the indexed forms: EA-calculate forms (d8,An,Xn) and (d8,PC,Xn)
+too, reading the index through a fifth register-file port and resolving it
+from the same places as a base (the instruction ahead's An step, EX's
+result, EX's An step, the register file). It was meant to take the index
+register, its scale and two adders off the L1 address -- the bus16 top's
+worst path once pipelined loads were in (-0.169 ns at 25 ns). It did take
+them off, and the slack did not improve (-0.590): the path came back
+through EA-fetch's other address views, the same shape as before, which
+is what the membus change below addresses. The full format stays with
+EA-fetch. Indexed loads and stores now count in the perf harness
+(load_index, store_index), all their addresses from EA-calculate.
+
+- "the index hazard ignored" and "the step ahead not taken for the index"
+  survive, and are equivalent while decode gathers: every writer EX does not
+  forward -- MULL/DIVL's second result, a MOVEM load, MOVEC to a stack
+  pointer -- is itself a multi-word instruction, and so is every indexed
+  consumer, so the consumer is delivered only once its producer is past EX
+  (t_agu.s 88-89 put MULL's high word and DIVL's remainder straight in as
+  the index, and pass with and without the term). Both stay for phase 8,
+  whose wider decode takes that spacing away.
+
 Primary files: CPU, decode, EA-calculate, EA-fetch, execute and register file.
 
 - [ ] Define a documented instruction metadata bundle compatible with the
@@ -391,6 +412,21 @@ Deliver these as separate changes, preserving ordered completion.
   current word-at-a-time decoder may still limit instruction-level throughput.
 
 ### 6B. FPU dispatch and transfers
+
+6B, first step (2026-09-24): register FMOVE 9 -> 7 cycles, FADD 11 -> 9,
+and one cycle off every F-line instruction. The wrapper's outcome was
+complete as it entered S_FIN -- exc, w1/w2 and the redirect are registered
+on the way in -- but fin and a forced T0 flow were set in S_FIN itself, a
+cycle later; they are seen on entry now. And a general operation whose EA
+is not An's own skips DISPATCH, which only captured An and passed it on to
+S_FPU_DEC. The engine's own cycles and the wait for EX to empty remain.
+Its mutations: DISPATCH skipped for (An), (An)+ or -(An) is caught (fpudual,
+the programs); fin or the DISPATCH skip undone is caught as a slowdown; a
+forced T0 flow not seen on entry is caught by t_fault_edges.s 64-67, FSAVE
+and FRESTORE traced under T0, added for it. DISPATCH skipped for a general
+operation with EA mode 7, register 5-7, survives: decode turns those into
+F-line exceptions itself (fp_bad7) before a word is fetched, so the wrapper
+never sees them -- 61-63 check the exception.
 
 - [ ] Decode static FPU command class and operand requirements once. Launch a
   prepared command when operands, engine acceptance and deferred-exception

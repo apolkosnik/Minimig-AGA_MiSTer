@@ -366,6 +366,8 @@ wire        rf3_we;
 wire [15:0] eaf_wr_mask;   // the registers EA-fetch's instruction may write (phase 4)
 wire  [3:0] agu_reg;       // EA-calculate's base register (phase 4), port D
 wire [31:0] agu_rdata;
+wire  [3:0] agu_xreg;      // ...and an indexed form's index, port E
+wire [31:0] agu_xdata;
 wire        eac_agu_ok;
 wire [31:0] eac_agu_ea;
 wire [31:0] eac_agu_an;
@@ -834,6 +836,8 @@ ap040_pipe_regfile u_regfile
 	.rdata_b  (rdata_b),
 	.raddr_d  (agu_reg),
 	.rdata_d  (agu_rdata),
+	.raddr_e  (agu_xreg),
+	.rdata_e  (agu_xdata),
 
 	.we3      (rf3_we),
 	.waddr3   (rf3_addr),
@@ -1156,6 +1160,8 @@ ap040_ea_calc u_eac
 	.id_st_only       (id_st_only),
 	.agu_reg          (agu_reg),
 	.agu_rdata        (agu_rdata),
+	.agu_xreg         (agu_xreg),
+	.agu_xdata        (agu_xdata),
 	.ahead1_wr_mask   (eaf_wr_mask),
 	.ahead2_wr_mask   (ex_wr_mask),
 	.ex_fwd_valid     (ex_fwd_valid),

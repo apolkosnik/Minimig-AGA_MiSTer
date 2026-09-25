@@ -76,6 +76,8 @@ CASES += [
     ("clr_mem", "clr.l (a0)"), ("st_mem", "st (a0)"), ("clr_reg", "clr.l d1"),
     ("clr_disp", "clr.l 4(a0)"), ("clr_postinc", "clr.w (a0)+"), ("clr_abs", "clr.l ($1000).l"),
     ("scc_disp", "seq 4(a0)"), ("move_imm_mem", "move.l #$12345678,(a0)"),
+    # indexed forms (phase 4, step 4): D4 is zero
+    ("load_index", "move.l 4(a0,d4.l),d1"), ("store_index", "move.l d1,4(a0,d4.l)"),
 ]
 
 

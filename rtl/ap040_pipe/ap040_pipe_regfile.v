@@ -78,6 +78,9 @@ module ap040_pipe_regfile
 	// address it forms a stage early. The same bypasses as the others.
 	input       [3:0] raddr_d,
 	output     [31:0] rdata_d,
+	// ...and its index register, for an indexed address (port E).
+	input       [3:0] raddr_e,
+	output     [31:0] rdata_e,
 
 	// direct stack pointer access for MOVEC/MOVE USP, independent of the
 	// currently active bank (never asserted together with the main write)
@@ -183,6 +186,12 @@ assign rdata_d = (we_fwd  && (waddr  == raddr_d)) ? wdata  :
                  (we2_fwd && (waddr2 == raddr_d)) ? wdata2 :
                  !raddr_d[3]            ? dreg[raddr_d[2:0]] :
                  (raddr_d[2:0] == 3'd7) ? sp_read : areg[raddr_d[2:0]];
+
+assign rdata_e = (we_fwd  && (waddr  == raddr_e)) ? wdata  :
+                 (we3 && (waddr3 == raddr_e)) ? wdata3 :
+                 (we2_fwd && (waddr2 == raddr_e)) ? wdata2 :
+                 !raddr_e[3]            ? dreg[raddr_e[2:0]] :
+                 (raddr_e[2:0] == 3'd7) ? sp_read : areg[raddr_e[2:0]];
 
 integer i;
 always @(posedge clk) begin

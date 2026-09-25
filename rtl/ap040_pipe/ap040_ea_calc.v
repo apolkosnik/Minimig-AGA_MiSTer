@@ -126,6 +126,8 @@ module ap040_ea_calc
 	// the two instructions ahead may still write.
 	output      [3:0] agu_reg,
 	input      [31:0] agu_rdata,
+	output      [3:0] agu_xreg,         // an indexed form's index register, port E
+	input      [31:0] agu_xdata,
 	input      [15:0] ahead1_wr_mask,   // the instruction in EA-fetch
 	input      [15:0] ahead2_wr_mask,   // ...and in EX
 	input             ex_fwd_valid,
@@ -272,10 +274,11 @@ module ap040_ea_calc
 
 // ---- the address stage (restructuring plan, phase 4) ----
 // For the simple forms -- (An), (An)+, -(An), (d16,An), (d16,PC),
-// absolute -- of a load, a read-modify-write (CLR/Scc's write-only store
-// included) and a store, the address is formed here, a stage early, and
-// registered for EA-fetch, which uses it: no forward reaches the L1
-// address this way.
+// absolute, and the brief-format indexed (d8,An,Xn) and (d8,PC,Xn) -- of a
+// load, a read-modify-write (CLR/Scc's write-only store included) and a
+// store, the address is formed here, a stage early, and registered for
+// EA-fetch, which uses it: no forward reaches the L1 address this way. An
+// index resolves from the same places a base does, through port E.
 // The base is the youngest of: the instruction ahead's own An step (formed
 // here a cycle ago, a register), EX's result, EX's An step (a register),
 // the register file (WB's commit bypassed there). EX's result is taken only
@@ -289,7 +292,7 @@ module ap040_ea_calc
 wire        agu_special = id_mm[5] || id_mm[6] || id_moves[2] || id_movep[2] || id_ml[6] || id_bf[4] ||
                           id_ck2[2] || id_cas[3] || id_cas[4] || id_m16[3] || id_fp || id_fx[5] ||
                           id_is_movem || id_is_rts || id_is_rte || id_is_rtr || id_cinv[2] || id_pmmu[4] ||
-                          id_fflt[5] || id_mvfsr[1] || id_ea_indexed;   // mvfsr[0] is CCR-or-SR: opcode bit 9, whatever the instruction
+                          id_fflt[5] || id_mvfsr[1];   // mvfsr[0] is CCR-or-SR: opcode bit 9, whatever the instruction
 // A plain store's base is its destination register; a displacement
 // store's, like a load's, is the source field's (decode points it at An,
 // and the data comes through port B).
@@ -316,18 +319,36 @@ wire [31:0] agu_ext    = id_immrmw ? id_ea_ext : id_imm;
 // register, so nothing further back is looked at when it is taken.
 wire        agu_hz     = (ahead1_wr_mask[agu_reg] && !agu_a1_hit) ||
                          (ahead2_wr_mask[agu_reg] && !agu_a1_hit && !agu_ex_hit && !agu_an_hit);
-wire        agu_wait   = id_valid && agu_class && !agu_nobase && agu_hz;
-wire        agu_ok     = agu_class && (agu_nobase || !agu_hz);
+// The brief extension word, verbatim in agu_ext: [15] D/A and [14:12] the
+// index register, [11] its size (a Word index is sign-extended), [10:9] the
+// scale, [7:0] a signed byte displacement. The full format is EA-fetch's
+// (id_fx, special above).
+wire        agu_idx    = id_ea_indexed;
+assign      agu_xreg   = {agu_ext[15], agu_ext[14:12]};
+wire        agu_x_a1   = eac_valid && eac_agu_anfw && (eac_agu_reg == agu_xreg);
+wire        agu_x_ex   = ex_fwd_valid && (ex_fwd_dest == agu_xreg);
+wire        agu_x_an   = ex_an_valid && (ex_an_reg == agu_xreg);
+wire [31:0] agu_xval   = agu_x_a1 ? eac_agu_an :
+                         agu_x_ex ? ex_fwd_data :
+                         agu_x_an ? ex_an_data : agu_xdata;
+wire [31:0] agu_xsz    = agu_ext[11] ? agu_xval : {{16{agu_xval[15]}}, agu_xval[15:0]};
+wire [31:0] agu_xsc    = agu_xsz << agu_ext[10:9];
+wire [31:0] agu_d8     = {{24{agu_ext[7]}}, agu_ext[7:0]};
+wire        agu_x_hz   = agu_idx && ((ahead1_wr_mask[agu_xreg] && !agu_x_a1) ||
+                                     (ahead2_wr_mask[agu_xreg] && !agu_x_a1 && !agu_x_ex && !agu_x_an));
+wire        agu_wait   = id_valid && agu_class && ((!agu_nobase && agu_hz) || agu_x_hz);
+wire        agu_ok     = agu_class && (agu_nobase || !agu_hz) && !agu_x_hz;
 wire [31:0] agu_dec    = agu_base - agu_step;
 wire [31:0] agu_ea     = id_is_abs    ? (agu_st ? id_imm : agu_ext) :
                          id_is_predec ? agu_dec :
-                         agu_st       ? agu_base : (agu_base + agu_ext);
+                         agu_st       ? agu_base :
+                         agu_idx      ? (agu_base + agu_xsc + agu_d8) : (agu_base + agu_ext);
 // An's own write is its only one unless the instruction's result goes there
 // too (MOVE.L (A0)+,A0): then the result, not the step, is what follows.
 wire        agu_anfw   = agu_ok && (id_is_postinc || id_is_predec) &&
                          !(id_writes_reg && (id_dest_reg == agu_reg));
 
-// ID holds while the instruction waits for its base.
+// ID holds while the instruction waits for its base or its index.
 assign ea_stall = stall_in || agu_wait;
 
 // Every simple access reaches EA-fetch with its address formed: EA-fetch's

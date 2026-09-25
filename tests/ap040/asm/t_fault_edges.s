@@ -29,6 +29,16 @@
 ;        instruction has left the stage that raises it -- then the same
 ;        under T1: the frame is the load's own, its SSW a longword read,
 ;        and it is traced once, after the restart has completed it.
+; 55-60  Three plain loads in a row under T1, then the MOVE to SR that clears
+;        it: each is traced as it completes, the trace owed by one taken
+;        before the next begins -- on a pipelined core, before the next load
+;        is sent on -- so the handler sees four traces, whose stacked PCs are
+;        the next instruction's, in order.
+; 61-63  An FPU general operation whose EA is mode 7 with register 5-7, which
+;        no EA is: an F-line exception, its PC the instruction's own.
+; 64-67  FSAVE and FRESTORE under T0: each is a change of flow for tracing,
+;        and traced as it completes -- and so is the MOVE to SR that clears
+;        T0, which the reference takes as one too.
 ; 38-45  MOVEM.L (A0),D1-D4 with D3's longword on an invalid page. The
 ;        handler finds D1 and D2 loaded and D3 and D4 as they were: the
 ;        faulted beat writes nothing, and nothing the exception reads after
@@ -51,6 +61,9 @@ pre_wr		equ	$3618		; ($CFFC).l as the access-error handler found it
 h_d2		equ	$361C		; D2-D4 as the access-error handler found them
 h_d3		equ	$3620
 h_d4		equ	$3624
+tr_log		equ	$3640		; the trace handler's stacked PCs, eight
+cnt_fl		equ	$3660		; F-line exceptions taken
+fl_pc		equ	$3664		; ...and the last one's stacked PC
 
 failt	macro
 	move.w	#\1,d7
@@ -71,8 +84,10 @@ ok\@:
 	dc.l	unexpected		; 3-8
 	endr
 	dc.l	h_trace			; 9: trace
-	rept	246
-	dc.l	unexpected		; 10-255
+	dc.l	unexpected		; 10
+	dc.l	h_fline			; 11: F-line
+	rept	244
+	dc.l	unexpected		; 12-255
 	endr
 
 	org	$400
@@ -324,6 +339,61 @@ ld50:	move.l	($6008).l,d5		; refused, restarted, then traced
 	move.l	(last_pc).l,d0
 	chkl	d0,ld50,53
 
+;------------------------- 55-60: loads in a row under T1, each traced
+	move.l	#$11110000,($5000).l
+	move.l	#$22220000,($5004).l
+	move.l	#$33330000,($5008).l
+	lea	($5000).l,a1
+	clr.w	(cnt_trc).l
+	move.w	#$A700,sr		; T1 from the next instruction
+ld55a:	move.l	(a1),d1
+ld55b:	move.l	4(a1),d2
+ld55c:	move.l	8(a1),d3
+ld55d:	move.w	#$2700,sr		; traced: T1 at its start
+ld55e:	moveq	#0,d0
+	move.w	(cnt_trc).l,d0
+	chkl	d0,4,55
+	move.l	(tr_log).l,d0
+	chkl	d0,ld55b,56
+	move.l	(tr_log+4).l,d0
+	chkl	d0,ld55c,57
+	move.l	(tr_log+8).l,d0
+	chkl	d0,ld55d,58
+	move.l	(tr_log+12).l,d0
+	chkl	d0,ld55e,59
+	add.l	d2,d1
+	add.l	d3,d1
+	chkl	d1,$66660000,60
+
+;---------------------------- 61-63: an FPU EA that is no EA is an F-line
+	clr.w	(cnt_fl).l
+fl61:	dc.w	$F23D,$4000		; FMOVE.L <mode 7, register 5>,FP0
+	moveq	#0,d0
+	move.w	(cnt_fl).l,d0
+	chkl	d0,1,61
+	move.l	(fl_pc).l,d0
+	chkl	d0,fl61,62		; the instruction's own address
+fl63:	dc.w	$F23E,$4000		; register 6: the same
+	moveq	#0,d0
+	move.w	(cnt_fl).l,d0
+	chkl	d0,2,63
+
+;------------------------------- 64-66: FSAVE and FRESTORE traced under T0
+	clr.w	(cnt_trc).l
+	move.w	#$6700,sr		; T0
+fs64:	fsave	-(sp)
+fr64:	frestore (sp)+
+fe64:	move.w	#$2700,sr
+fn64:	moveq	#0,d0
+	move.w	(cnt_trc).l,d0
+	chkl	d0,3,64
+	move.l	(tr_log).l,d0
+	chkl	d0,fr64,65		; FSAVE's trace: the next instruction
+	move.l	(tr_log+4).l,d0
+	chkl	d0,fe64,66
+	move.l	(tr_log+8).l,d0
+	chkl	d0,fn64,67
+
 	moveq	#0,d0
 	movec	d0,tc
 	pflusha
@@ -361,7 +431,22 @@ h_aerr:
 	movem.l	(sp)+,d0/a0
 	rte
 
+; F-line: count it, keep its PC, and step over the two-word instruction.
+h_fline:
+	addq.w	#1,(cnt_fl).l
+	move.l	2(sp),(fl_pc).l
+	addq.l	#4,2(sp)
+	rte
+
 h_trace:
+	movem.l	d0/a0,-(sp)
+	moveq	#0,d0
+	move.w	(cnt_trc).l,d0
+	and.w	#7,d0
+	lsl.w	#2,d0
+	lea	(tr_log).l,a0
+	move.l	10(sp),0(a0,d0.w)	; the frame's PC, past the two saved
+	movem.l	(sp)+,d0/a0
 	addq.w	#1,(cnt_trc).l
 	rte
 

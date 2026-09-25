@@ -42,6 +42,12 @@
 ; 76-80  MOVE <memory>,CCR and MOVE <memory>,SR: a status register written
 ;        from a load, by a path of its own -- the flags it sets are tested
 ;        at once, and SR's interrupt mask is read back.
+; 81-87  (d8,An,Xn) and (d8,PC,Xn): an index straight behind its producer,
+;        a negative Word index sign-extended, scale 8, an address register as
+;        the index, an index loaded by the instruction just ahead, an indexed
+;        store, and a PC-relative one.
+; 88-89  MULU.L's high word and DIVU.L's remainder used as an index straight
+;        after: the second result, written by a port nothing forwards.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -412,6 +418,50 @@ stl:	move.l	d0,(a0)+
 	move.w	sr,d4
 	and.l	#$FFFF,d4
 	check	d4,$2700,80
+
+;----------------------------------------------- 81-87: indexed addresses
+	lea	(TABLE).l,a0
+	moveq	#3,d1
+	add.l	d1,d1			; 6
+	move.l	4(a0,d1.l),d2		; TABLE+10: $10000002's high word...
+	check	d2,$00021000,81		; ...straddling into $10000003
+	move.w	#-8,d3			; $FFF8
+	lea	(TABLE+$20).l,a1
+	move.l	4(a1,d3.w),d4		; TABLE+$1C
+	check	d4,$10000007,82
+	moveq	#2,d5
+	move.l	0(a0,d5.l*8),d6		; TABLE+16
+	check	d6,$10000004,83
+	lea	($30).w,a2
+	move.l	0(a0,a2.l),d0		; TABLE+$30
+	check	d0,$1000000C,84
+	move.l	#$24,(SCR+$140).l
+	move.l	(SCR+$140).l,d1		; the index, from memory, then at once...
+	move.l	0(a0,d1.l),d2		; ...TABLE+$24
+	check	d2,$10000009,85
+	move.l	#$0FEDCBA9,d3
+	moveq	#8,d4
+	lea	(SCR+$150).l,a3
+	move.l	d3,-4(a3,d4.l)		; SCR+$154
+	move.l	(SCR+$154).l,d5
+	check	d5,$0FEDCBA9,86
+	moveq	#4,d6
+	move.l	pctab(pc,d6.l),d7	; the table's second longword
+	check	d7,$FEEDFACE,87
+
+;------------------------- 88-89: a MULL/DIVL second result as the index
+	lea	(TABLE).l,a0
+	move.l	#$00010000,d3		; the multiplicand is the low register
+	move.l	#$00080000,d2		; product $8_0000_0000: high word 8
+	mulu.l	d2,d1:d3		; D1 = 8 (high), D3 = 0
+	move.l	0(a0,d1.l),d4		; TABLE+8
+	check	d4,$10000002,88
+	move.l	#$0000002C,d5		; dividend low
+	moveq	#0,d6			; high
+	moveq	#$10,d7
+	divu.l	d7,d6:d5		; quotient 2, remainder $C
+	move.l	0(a0,d6.l),d0		; TABLE+$C
+	check	d0,$10000003,89
 
 ;------------------------------------------ 69-70: MOVEC to ISP, then (A7)
 	move.l	#$600DF00D,(SCR+$100).l
