@@ -160,6 +160,18 @@ reg  [1:0] who;         // whose it is
 
 reg        a_pend;      // a fetch is wanted and has not been returned
 reg [31:0] a_addr;
+// Writes are snooped a cycle after they are accepted, from w_addr, never from
+// the address the CPU is presenting (2026-09-25): that address is EA-fetch's
+// latest signal, and every compare the window made against it ran on into
+// pf_base, q_a and the fill -- the bus16 top's worst path, reached from each
+// of EA-fetch's address sources in turn as the others were taken off it. In
+// the accept cycle itself no fetch is answered, neither from the window nor
+// by a fill arriving: the request is kept (a_dfr) and answered in the snoop
+// cycle, from the window if the write missed it, or fetched again after the
+// write if it did not. A fill that arrives meanwhile joins the window, and
+// the snoop empties it if it was stale.
+reg        a_dfr;       // a request held over a write's accept cycle
+reg        w_snoop;     // a write was accepted last cycle: snoop it now
 
 // The prefetch stream. Entry i holds the longword whose address bits [3:2]
 // are i; the window is pf_cnt longwords from pf_base, never more than four,
@@ -264,14 +276,11 @@ endfunction
 // This cycle's view of the window, with a prefetch that returns now already
 // in it -- a request in the same cycle must see it.
 wire        pf_ack     = busy && mem_ack && (who == WHO_A);
-// ...and not a longword a write accepted this same cycle touches: the
-// write-snoop's kill only catches a read still on the bus, so a fill landing
-// in the write's own cycle was appended and handed to the fetch waiting for
-// it -- the old instruction, behind a store that rewrote it
-// (tb_ap040_pipe_smcdual.v). Dropped instead; the fetch it was for is still
-// pending, and goes out again after the write. (w_* are declared below.)
-wire        pf_wr      = w_accept && ((w_lo == pf_next) || (w_lo == pf_next - 30'd1));
-wire        pf_app     = pf_ack && !pf_kill && !pf_wr;
+// A fill landing in a write's accept cycle joins the window like any other;
+// it is not handed to the fetch waiting for it then (see a_dfr), and the
+// snoop a cycle later empties the window if the write reached it -- the old
+// instruction behind a store that rewrote it (tb_ap040_pipe_smcdual.v).
+wire        pf_app     = pf_ack && !pf_kill;
 wire [29:0] pf_next    = pf_base + {27'd0, pf_cnt};
 wire  [2:0] pf_cnt1    = pf_cnt + {2'd0, pf_app};
 function [31:0] pf_word1;   // entry i, including the longword arriving now
@@ -282,13 +291,9 @@ function [31:0] pf_word1;   // entry i, including the longword arriving now
 endfunction
 wire [29:0] req_lw     = address_a[31:2];
 wire [29:0] req_k      = req_lw - pf_base;
-// ...and not from a longword a write accepted this same cycle touches: the
-// window's copy is stale by then, and a refetch the write itself caused
-// (a store onto an instruction already fetched behind it) asks for exactly
-// that longword in exactly that cycle. It then misses, and queues behind the
-// write. (w_lo is declared below; the tools take either order.)
-wire        req_wr     = w_accept && ((w_lo == req_lw) || (w_lo == req_lw - 30'd1));
-wire        req_hit    = !pf_inval && !req_wr && (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
+// Not in a write's accept cycle (the request is held, a_dfr), nor from a
+// window the snoop is emptying this cycle.
+wire        req_hit    = !pf_inval && !w_accept && !w_hits_pf && (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
 wire [31:0] req_long   = pf_word1(req_lw[1:0]);
 // ...or the one still on the bus, which it will wait for.
 wire        req_onbus  = pf_out && !pf_ack && !pf_kill && (req_lw == pf_next) && (sup == pf_sup);
@@ -296,18 +301,18 @@ wire        req_onbus  = pf_out && !pf_ack && !pf_kill && (req_lw == pf_next) &&
 // miss restarts the window AT the requested longword with nothing in it, so
 // the first fill to join -- after any write empties it again -- is that
 // longword. (An address compare here could never be false.)
-wire        pend_fill  = a_pend && pf_app;
-// A write accepted this cycle that touches the window or the read in flight.
+wire        pend_fill  = a_pend && !a_dfr && pf_app && !w_accept && !w_hits_pf;
+// The held request, in the snoop cycle: from the window, or a miss.
+wire [29:0] a_lw       = a_addr[31:2];
+wire [29:0] dfr_k      = a_lw - pf_base;
+wire        dfr_hit    = !pf_inval && !w_hits_pf && (dfr_k < {27'd0, pf_cnt1}) && (a_sup == pf_sup);
+wire [31:0] dfr_long   = pf_word1(a_lw[1:0]);
+// The write accepted last cycle, snooped now from its registered address.
 // Its bytes lie in its own longword and at most the next, and it is taken
 // to touch both, whatever its size and alignment (restructuring plan, phase
-// 5): which of them it really reaches was an adder on the address and the
-// size, the latest signals EA-fetch sends, ahead of the prefetch window's
-// compares -- the bus16 top's worst path, EX's SR forward through the stack
-// bank and the address arithmetic into pf_base (-0.959 ns at 25 ns). Taking
-// too much only empties the window once more than it had to, and a write
-// next to the instruction stream is rare; the one-less compares below sit
-// on the fetch and window side, which are earlier.
-wire [29:0] w_lo       = address_b[31:2];
+// 5): too much only empties the window once more than it had to, and a
+// write next to the instruction stream is rare.
+wire [29:0] w_lo       = w_addr[31:2];
 wire        w_accept   = wren_b && !w_pend && !w_block && !w_receipt;
 // Distances into the window, modular like req_k: a window can span the top
 // of the address space, and ordered compares against pf_base + 4 missed
@@ -318,7 +323,7 @@ wire        w_accept   = wren_b && !w_pend && !w_block && !w_receipt;
 // pf_cnt with pf_cnt at most three -- one goes out only while pf_cnt_aft <
 // PF_N -- so the window's four longwords are the whole range.
 wire [29:0] w_klo      = w_lo - pf_base;
-wire        w_hits_pf  = w_accept && ((w_klo < {27'd0, PF_N}) || (w_klo == 30'h3FFF_FFFF));
+wire        w_hits_pf  = w_snoop && ((w_klo < {27'd0, PF_N}) || (w_klo == 30'h3FFF_FFFF));
 // What the next prefetch would be once this cycle's request is applied. A
 // hit leaves base + count where it was; a miss starts the new stream, which
 // can go out in the same cycle. Keeping prefetch out of every request cycle
@@ -339,7 +344,7 @@ always @(posedge clk) begin
 		b_x <= 1'b0; w_x <= 1'b0; b_bi <= 2'd0; b_last <= 2'd0; w_bi <= 2'd0; w_last <= 2'd0;
 		b_acc <= 24'd0; w_pb <= 2'd0; pb_req <= 1'b0; pb_addr <= 32'd0;
 		pf_q[0] <= 32'd0; pf_q[1] <= 32'd0; pf_q[2] <= 32'd0; pf_q[3] <= 32'd0;
-		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0;
+		a_pend <= 1'b0; b_pend <= 1'b0; w_pend <= 1'b0; a_dfr <= 1'b0; w_snoop <= 1'b0;
 		a_addr <= 32'd0; b_addr <= 32'd0; b_size <= `AP040_SZ_L;
 		a_sup <= 1'b1; b_fc <= `AP040_FC_SUPER_DATA; w_fc <= `AP040_FC_SUPER_DATA;
 		w_addr <= 32'd0; w_data <= 32'd0; w_size <= `AP040_SZ_L;
@@ -350,6 +355,7 @@ always @(posedge clk) begin
 		mem_fc <= `AP040_FC_SUPER_PROG;
 	end else begin
 		if (wr_drop) w_block <= 1'b0;
+		w_snoop <= w_accept;
 		if (w_pass_now) begin
 			w_tent    <= 1'b0;
 			w_receipt <= !wren_b;
@@ -369,7 +375,12 @@ always @(posedge clk) begin
 			pf_stop <= 1'b0;
 			a_addr <= {address_a[31:1], 1'b0};
 			a_sup  <= sup;
-			if (req_hit) begin
+			a_dfr  <= w_accept;
+			if (w_accept) begin
+				// Held over the write's accept cycle; the window is untouched.
+				rvalid_a <= 1'b0;
+				a_pend   <= 1'b1;
+			end else if (req_hit) begin
 				// Buffered: answered next cycle, and the window starts here.
 				q_a      <= address_a[1] ? req_long[15:0] : req_long[31:16];
 				rvalid_a <= 1'b1;
@@ -387,6 +398,26 @@ always @(posedge clk) begin
 				// other read in flight belongs to the old window.
 				if (pf_out && !pf_ack && !req_onbus) pf_kill <= 1'b1;
 			end
+		end else if (a_dfr) begin
+			// The snoop cycle: the held request, from the window or missed.
+			a_dfr <= 1'b0;
+			if (dfr_hit) begin
+				q_a      <= a_addr[1] ? dfr_long[15:0] : dfr_long[31:16];
+				rvalid_a <= 1'b1;
+				rflt_a   <= 1'b0;
+				a_pend   <= 1'b0;
+				pf_base  <= a_lw;
+				pf_cnt   <= pf_cnt1 - dfr_k[2:0];
+			end else begin
+				pf_base  <= a_lw;
+				pf_cnt   <= 3'd0;
+				pf_sup   <= a_sup;
+				if (pf_out && !pf_ack) pf_kill <= 1'b1;
+			end
+		end else if (a_pend && pf_app && w_accept) begin
+			// A pending fetch's fill in a write's accept cycle: it joins the
+			// window, and the fetch is answered from there next cycle.
+			a_dfr <= 1'b1;
 		end else if (pend_fill) begin
 			q_a      <= a_addr[1] ? mem_rdata[15:0] : mem_rdata[31:16];
 			rvalid_a <= 1'b1;
@@ -398,7 +429,6 @@ always @(posedge clk) begin
 		if (w_hits_pf || pf_inval) begin
 			pf_cnt <= 3'd0;
 			if (pf_out && !pf_ack) pf_kill <= 1'b1;
-			if (en_a && req_hit) pf_base <= req_lw + 30'd1;   // the word just served is gone past
 		end
 		if (rd_b) begin
 			b_addr   <= address_b;
@@ -521,7 +551,7 @@ always @(posedge clk) begin
 			mem_size  <= b_x ? `AP040_SZ_B : b_size;
 			mem_addr  <= b_x ? (b_addr + {30'd0, b_bi}) : b_addr;
 			mem_fc    <= b_fc;
-		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_accept && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
+		end else if ((pf_live || en_a) && !pf_out && (pf_cnt_aft < PF_N) && !w_accept && !a_dfr && !pf_inval && (!pf_stop || en_a) && !quiesce) begin
 			// The next longword of the stream, as the window stands after
 			// this cycle's request. Not in a cycle a write is accepted: whether
 			// that write lands in the window is a thirty-bit compare on an

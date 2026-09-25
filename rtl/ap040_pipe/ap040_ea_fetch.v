@@ -1018,12 +1018,28 @@ wire        bf_st_want = bf_active && ((bf_ph == BF_WR1) || (bf_ph == BF_WR2)) &
 wire        bf_st_go  = bf_st_want && !l1_wr_busy;
 wire  [3:0] bf_rc     = (bf_ph == BF_OFF) ? {1'b0, bfx[8:6]} :
                         (bf_ph == BF_WID) ? {1'b0, bfx[2:0]} : {1'b0, bfx[14:12]};
-wire        bf_use_c  = bf_active && ((bf_ph == BF_OFF) || (bf_ph == BF_WID) || (bf_ph == BF_SRC));
+// ...and from the first cycle for a register field, which has no EA to
+// index: its start reads the extension word's register there (bf_ph is
+// BF_EA then, so bf_rc names bfx[14:12]).
+wire        bf_use_c  = (bf_active && ((bf_ph == BF_OFF) || (bf_ph == BF_WID) || (bf_ph == BF_SRC))) ||
+                        (eac_valid && bfv && bf_reg && !bf_active);
 // The stage-3 values, from ap040_core.v's bf_newf and S_BF_X3/M3.
 wire [31:0] bf_nf     = (bf_op == 3'd2) ? ((~bf_field) & bf_ones) :
                         (bf_op == 3'd4) ? 32'd0 :
                         (bf_op == 3'd6) ? bf_ones : (bf_du & bf_ones);
 wire [31:0] bf_al     = bf_t40[39:8] & bf_maskl[39:8];
+// Stage 2 and stage 3 in one (restructuring plan, phase 6A): the field, its
+// ones and its mask straight off bf_t40, and the flags, the result and the
+// new field from those, all in S2 -- two registered steps that only ever
+// fed each other.
+wire [31:0] bf_field_c = (bf_w == 6'd32) ? bf_t40[39:8] : (bf_t40[39:8] >> (6'd32 - bf_w));
+wire [31:0] bf_ones_c  = (bf_w == 6'd32) ? 32'hFFFF_FFFF : ((32'd1 << bf_w) - 32'd1);
+wire [39:0] bf_maskl_c = (bf_w == 6'd32) ? {32'hFFFF_FFFF, 8'd0}
+                                         : ({32'hFFFF_FFFF, 8'd0} << (6'd32 - bf_w));
+wire [31:0] bf_nf_c    = (bf_op == 3'd2) ? ((~bf_field_c) & bf_ones_c) :
+                         (bf_op == 3'd4) ? 32'd0 :
+                         (bf_op == 3'd6) ? bf_ones_c : (bf_du & bf_ones_c);
+wire [31:0] bf_al_c    = bf_t40[39:8] & bf_maskl_c[39:8];
 wire  [5:0] bf_clz;
 function [5:0] bf_clz32;
 	input [31:0] v;
@@ -1034,7 +1050,7 @@ function [5:0] bf_clz32;
 			if (v[k]) bf_clz32 = 6'd31 - k[5:0];
 	end
 endfunction
-assign bf_clz = bf_clz32(bf_al);
+assign bf_clz = bf_clz32(bf_al_c);
 wire [39:0] bf_head   = ~(40'hFF_FFFF_FFFF >> bf_bib);
 wire [39:0] bf_nw40   = ({bf_w1, bf_w2} & bf_head) | (bf_t40 >> bf_bib);
 
@@ -3596,7 +3612,18 @@ always @(posedge clk) begin
 					// D2{0:8},D1 spent two cycles latching two constants.
 					if (!bfx[11]) bf_off <= {27'd0, bfx[10:6]};
 					if (!bfx[5])  bf_w   <= (bfx[4:0] == 5'd0) ? 6'd32 : {1'b0, bfx[4:0]};
-					bf_ph     <= bfx[11] ? BF_OFF : bfx[5] ? BF_WID : BF_SRC;
+					// ...and a register field with both is rotated now too
+					// (phase 6A): port A reads the register, and port C, with no
+					// EA to index, already reads the extension word's register,
+					// BFINS's source -- BF_SRC's own reads, a cycle early.
+					if (bf_reg && !bfx[11] && !bfx[5]) begin
+						bf_du  <= operand_c;
+						bf_t40 <= {((bfx[10:6] == 5'd0) ? operand_a
+						            : ((operand_a << bfx[10:6]) | (operand_a >> (6'd32 - {1'b0, bfx[10:6]})))), 8'd0};
+						bf_bib <= 3'd0;
+						bf_ph  <= BF_S2;
+					end else
+						bf_ph  <= bfx[11] ? BF_OFF : bfx[5] ? BF_WID : BF_SRC;
 				end else case (bf_ph)
 				BF_OFF: begin
 					bf_off <= operand_c;
@@ -3643,20 +3670,16 @@ always @(posedge clk) begin
 					bf_ph  <= BF_S2;
 				end
 				BF_S2: begin
-					bf_field <= (bf_w == 6'd32) ? bf_t40[39:8] : (bf_t40[39:8] >> (6'd32 - bf_w));
-					bf_ones  <= (bf_w == 6'd32) ? 32'hFFFF_FFFF : ((32'd1 << bf_w) - 32'd1);
-					bf_maskl <= (bf_w == 6'd32) ? {32'hFFFF_FFFF, 8'd0}
-					                            : ({32'hFFFF_FFFF, 8'd0} << (6'd32 - bf_w));
-					bf_ph    <= BF_S3;
-				end
-				BF_S3: begin
-					bf_n <= (bf_op == 3'd7) ? bf_nf[bf_w - 6'd1] : bf_field[bf_w - 6'd1];
-					bf_z <= (bf_op == 3'd7) ? (bf_nf == 32'd0)   : (bf_field == 32'd0);
-					bf_res <= (bf_op == 3'd3) ? (bf_field | (bf_field[bf_w - 6'd1] ? ~bf_ones : 32'd0)) :
-					          (bf_op == 3'd5) ? (bf_off + {26'd0, (bf_al == 32'd0) ? bf_w : bf_clz}) :
-					                            bf_field;
+					bf_field <= bf_field_c;
+					bf_ones  <= bf_ones_c;
+					bf_maskl <= bf_maskl_c;
+					bf_n <= (bf_op == 3'd7) ? bf_nf_c[bf_w - 6'd1] : bf_field_c[bf_w - 6'd1];
+					bf_z <= (bf_op == 3'd7) ? (bf_nf_c == 32'd0)   : (bf_field_c == 32'd0);
+					bf_res <= (bf_op == 3'd3) ? (bf_field_c | (bf_field_c[bf_w - 6'd1] ? ~bf_ones_c : 32'd0)) :
+					          (bf_op == 3'd5) ? (bf_off + {26'd0, (bf_al_c == 32'd0) ? bf_w : bf_clz}) :
+					                            bf_field_c;
 					if (bf_modop) begin
-						bf_t40 <= (bf_t40 & ~bf_maskl) | (({bf_nf, 8'd0} << (6'd32 - bf_w)) & bf_maskl);
+						bf_t40 <= (bf_t40 & ~bf_maskl_c) | (({bf_nf_c, 8'd0} << (6'd32 - bf_w)) & bf_maskl_c);
 						bf_ph  <= BF_S4;
 					end else
 						bf_ph  <= BF_DONE;

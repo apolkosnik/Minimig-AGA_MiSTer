@@ -680,6 +680,13 @@ wire [15:0] sr_base     = commit_sr  ? exe_sr_data :
 // whose result depends on an input flag. So EX keeps the pre-forward view,
 // and only EA-fetch, one stage upstream, gets the forwarded one.
 wire [15:0] sr_resolved    = ex_sr_fwd_valid  ? ex_sr_fwd_data : sr_base;
+`ifdef VERILATOR
+// The register file banks A7 by sr_base, not EX's forward: EX may change S
+// or M only in a cycle it is also emptying everything behind it.
+always @(posedge clk)
+	if (nreset && ce && ex_sr_fwd_valid && (ex_sr_fwd_data[13:12] != sr_base[13:12]) && !ex_flush)
+		$error("ap040_pipe_cpu: EX changes S/M (%h -> %h) without emptying what is behind it", sr_base, ex_sr_fwd_data);
+`endif
 wire [15:0] sr_resolved_ea = ex_sr_fwd_valid  ? ex_sr_fwd_data :
                              ex_ccr_fwd_valid ? {sr_base[15:5], ex_ccr_fwd_data} : sr_base;
 
@@ -806,18 +813,19 @@ ap040_pipe_regfile u_regfile
 	.nreset   (nreset),
 
 	// Real, live bits now (milestone 15) -- was hardwired 1'b1/1'b0 through
-	// milestone 14, since nothing touched them yet. sr_resolved, not the
-	// raw sr register: MOVE-to-SR's own write-through forward, same reason
-	// every other same-cycle producer/consumer pair in this pipeline needs
-	// one -- an immediately-following instruction that touches A7 (say, a
-	// BSR right after a MOVE-to-SR that just dropped to user mode) is in
-	// EA-fetch reading THIS port the exact cycle MOVE-to-SR's commit lands;
-	// the raw registered `sr` wouldn't reflect that write until the NEXT
-	// cycle, banking A7 through the stale PRE-switch stack for one cycle.
+	// milestone 14, since nothing touched them yet. sr_base: the register
+	// with WB's commit written through, so an instruction reading A7 in the
+	// cycle MOVE to SR commits banks it the new way. Not EX's forward
+	// (sr_resolved) any more (2026-09-24): every instruction that changes S
+	// or M empties everything behind it as it passes EX -- MOVE to SR and
+	// the immediates to SR refetch (sr_wr_refetch), RTE, STOP and an
+	// exception redirect -- so whatever read A7 in that cycle is discarded,
+	// and the forward was EX's SR logic in front of every register read,
+	// the start of the bus16 top's worst path. The check below holds it.
 	// sr[13]/sr[12] reset to AP040_SR_RESET's own S=1/M=0, so A7 still
 	// banks to ISP at reset, unchanged behavior for every earlier test.
-	.sr_s     (sr_resolved[13]),
-	.sr_m     (sr_resolved[12]),
+	.sr_s     (sr_base[13]),
+	.sr_m     (sr_base[12]),
 	// ...and the architectural view for the write side -- see the port's
 	// own comment in ap040_pipe_regfile.v (milestone 92).
 	.sr_s_w   (sr_base[13]),

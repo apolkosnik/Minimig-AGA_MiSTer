@@ -371,6 +371,24 @@ The surviving mutations of the pipelined load, each equivalent:
   run of loads (t_fault_edges.s 55-60) was added to be sure, and passes
   with and without the term.
 
+The bus16 top's worst path kept the same shape through every change above:
+some port-B address source in EA-fetch, through the address views, into
+membus's write snoop and on into pf_base, q_a or a fill -- each fit found
+whichever source was left (the indexed views; EX's SR forward into the
+stack bank; a MOVEM's register). So the register file's stack bank now
+comes from sr_base, WB's commit and the register, not EX's forward: every
+change of S or M empties what is behind it while it is in EX (asserted), so
+no register is read in its commit cycle. And membus snoops a write a cycle
+after accepting it, from w_addr, and in the accept cycle answers no fetch
+at all -- a request, or a pending fetch whose fill arrives then, is held
+(a_dfr) and answered next cycle from the window if the write missed it, or
+fetched again after the write. The CPU's port-B address reaches only
+membus's registers. No perf case changed. Fits: bus16 41.04 MHz, +0.635 ns
+(its worst path now EX's shifter into eaf_operand_b); the core top +1.570.
+The stack bank from the raw SR register, WB's commit not written through,
+survives mutation and is equivalent, for the same reason: the first
+refetched instruction reads after the commit.
+
 Primary files: EA-fetch, `ap040_pipe_membus.v`, `ap040_pipe_l1.v`, bus16 and CPU;
 include the FPU wrapper when moving its memory operations.
 
@@ -403,6 +421,18 @@ queue entries cannot increase a serial external bus's transfer capacity.
 Deliver these as separate changes, preserving ordered completion.
 
 ### 6A. Register bitfields
+
+6A, first step (2026-09-24): the register forms 6 -> 4 cycles (a modifying
+one 7 -> 5), memory forms one fewer, a dynamic offset 8 -> 7. A register
+field with an immediate offset and width is rotated in the sequencer's
+first cycle -- port A already reads the register then, and port C, with no
+EA to index, is pointed at the extension word's register (BFINS's source)
+-- and the extract stage and the flags/result stage, two registered steps
+that only fed each other, are one. The staged EX datapath the plan
+describes is still to come. Its mutations: the register field's source not
+pointed at from the start, the merged stage's stale field, BFFFO's stale
+mask, and the start merge undone (a slowdown) are caught; a rotation
+started with a register offset is caught by t_agu.s 98, added for it.
 
 - [ ] Move the phase-3 field datapath into staged execution with valid bits,
   operand/result metadata, forwarding and explicit dependency handling.
