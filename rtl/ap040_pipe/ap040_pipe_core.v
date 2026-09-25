@@ -71,7 +71,7 @@ ap040_pipe_cpu #(
 	.pf_done (pf_req),
 	// ...nor caches: CINV/CPUSH at once
 	.cm_req (cm_req), .cm_ic (), .cm_dc (), .cm_push (), .cm_scope (), .cm_addr (), .cm_done (cm_req),
-	.ic_en (),
+	.ic_en (), .dc_en (), .l1_nalloc_b (), .l1_m16_b (), .l1_lock_b (),
 	.dbg_if_valid  (dbg_if_valid),
 	.dbg_if_pc     (dbg_if_pc),
 	.dbg_id_valid  (dbg_id_valid),

@@ -124,7 +124,7 @@ wire        d_req, d_write, d_acc, d_sup, d_pass, d_flt;
 wire [31:0] d_addr, d_pa;
 wire        i_req, i_sup, i_pass, i_flt, ip_sup, ip_hit;
 wire [31:0] i_addr, i_pa, ip_addr, ip_pa;
-wire  [1:0] i_cm, ip_cm;
+wire  [1:0] i_cm, ip_cm, d_cm;
 wire [31:0] bb_addr, bb_la, bb_wdata, bb_q, bb_rx_addr;
 wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle, bb_rx;
@@ -146,11 +146,15 @@ ap040_pipe_dmu u_dmu
 	.xlat (tc[15]), .tc_e (tc[15]), .tc_p (tc[14]),
 	.c_addr (c_addr), .c_rd (c_rd), .c_wr (c_wr), .c_size (c_size), .c_wdata (c_wdata),
 	.c_sup (c_sup), .c_fc_ovr (c_fc_ovr), .c_fc_val (c_fc_val), .c_wr_drop (c_wr_drop),
+	.c_nalloc (1'b0), .c_m16 (1'b0), .c_lock (1'b0),
+	.dc_en (1'b0), .dtt0 (ttr0), .dtt1 (ttr0),
+	.cm_req (1'b0), .cm_dc (1'b0), .cm_scope (2'd0), .cm_addr (32'd0), .cm_done (),
+	.sn_req (1'b0), .sn_addr (32'd0),
 	.c_q (c_q), .c_rvalid (c_rvalid), .c_wr_busy_w (c_wr_busy_w), .c_rflt (c_rflt),
 	.c_wflt (c_wflt), .c_flt_bus (c_flt_bus), .c_flt_ma (c_flt_ma), .c_idle (c_idle),
 	.wr_pend (wr_pend),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
-	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.m_addr (bb_addr), .m_la (bb_la), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
@@ -165,7 +169,7 @@ ap040_pipe_mmu u_mmu
 	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (i_cm),
 	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa), .ip_cm (ip_cm),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
-	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
 	.pt_done (), .pt_mmusr (),
 	.pf_req (1'b0), .pf_mode (2'd0), .pf_addr (32'd0), .pf_fc (3'd0), .pf_done (),

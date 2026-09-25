@@ -98,6 +98,8 @@ ap040_pipe_cpu #(
 	// its caching modes
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
 	.cm_done (cm_done), .ic_en (ic_en), .mmu_itt0 (mmu_itt0), .mmu_itt1 (mmu_itt1),
+	// no data cache on this top: port B goes straight to the bus controller
+	.dc_en (), .l1_nalloc_b (), .l1_m16_b (), .l1_lock_b (),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),

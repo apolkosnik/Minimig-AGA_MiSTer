@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review; stages A and B
-built (below, "Stage A as built", "Stage B as built"). Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stages A, B and C
+built (below, "Stage A as built", "Stage B as built", "Stage C as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -454,6 +454,110 @@ Tests:
 - The programs that turn the caches on now run through the cache: t_integer,
   t_fastpaths, t_fpu, t_exceptions (fetch bus errors), t_moves_fc, t_mmu,
   t_bitfield_cache, t_cinv_moves and dhry.
+
+## Stage C as built
+
+The data cache, write-through, in the DMU (ap040_pipe_dmu.v). It uses
+stage 0's arrays: four ways of 256 longwords with byte enables, one tag row
+per set, and the snoop copy. The valid bits and the counter are in flops.
+CACR DE turns it on; with DE clear every path is stage B's.
+
+- Reads. With DE set, every read is latched and translated. An
+  untranslated read passes the MMU at once, with a data TTR's caching mode
+  or write-through; DE thus costs that path its straight-through cycle.
+  The read's set is read in the cycle its translation passes, since PA9-PA2
+  are the latched logical bits, and compared the cycle after. A hit is
+  answered three cycles after the request, right-aligned by size, for any
+  size at any offset inside a longword.
+- A read spanning two longwords, or crossing a page, goes to the bus as it
+  did. Memory holds what the cache does, since the cache is write-through.
+- Misses read the line, the longword asked for first and the rest wrapping.
+  - Each longword is one bus controller read through the translated-read
+    port; the first goes in the miss cycle.
+  - Each longword is written to its way as it arrives; the tag and the
+    valid bit go in with the last.
+  - The read is answered from the first longword. Later reads of the line
+    are answered from the line read buffer as their longwords arrive,
+    unless a write's update is waiting.
+  - A read for another line waits until the fill ends.
+  - An error on any beat abandons the line, faulting only a read waiting
+    for that longword. A read waiting for another longword is looked up
+    again. The way's old tag is still in the row, so the way stays invalid.
+- Writes go to the bus controller as they did.
+  - Each updates a line holding it, through the byte enables (both, for a
+    write spanning two longwords or lines), in the order sent, before any
+    later read's lookup (4.3.1.1, Table 4-4).
+  - A write sent while a line is being read keeps its update until the
+    line is in, then applies it, so the line never loses a write, whichever
+    of its reads the write overtook.
+  - While an update waits, the next write is held.
+- Not cached. Accesses made inhibited by a TTR's or a page's CM, MOVES to
+  an alternate space, and locked accesses (TAS, CAS and CAS2: EA-fetch's
+  reads and EX's store beat) each invalidate a line holding them, then go
+  to the bus (4.3.2, 7.4.5).
+- Allocating nothing. Exception frame writes, the vector fetch (and the
+  reset vectors) and MOVE16 allocate nothing (4.3.3): a miss is a single
+  bus read and a hit is served. A MOVE16 write that hits invalidates the
+  line.
+- Replacement takes the first invalid way, else the way the counter names.
+  The counter counts every read looked up and every write sent, and once
+  more after it names a way (4.1).
+- CINV/CPUSH on DC: all ways, a line, or a page (64 rows through the tag
+  port B). There is no dirty data, so CPUSH is CINV here.
+  - Each cache takes a request once; the bus16 top's done is both units'.
+  - The CPU starts the instruction only once the data side is idle, so
+    the data cache begins at once; every later access waits for it.
+- Table searches. The walker writes U and M through its own port, behind
+  the cache, and every write it lands is snooped into the data cache: the
+  line holding the descriptor is invalidated. 4.3.3 has a table search's
+  write hit update the line; with write-through the two agree (t_mmu.s
+  tests 148-149). The walker's reads come from memory, which a write-
+  through cache matches once the writes ahead have landed (walk_hold).
+  Copyback (stage D) makes both go through the cache.
+- Snoops work as the instruction cache's; the walker drives the data
+  cache's on the bus16 top.
+- Cost and gain, on the program bench's first phase with the caches on
+  (stage B's figures first):
+  - dhry: 652,982 -> 437,103 cycles;
+  - t_fpu: 107,313 -> 100,022;
+  - t_bitfield_cache: 36,609 -> 34,941;
+  - t_integer: 11,941 -> 12,128 (straight-line code, every read latched
+    and looked up).
+- Fit at 25 ns, bus16 top: 40.31 MHz, +0.190 ns, 22,561 ALMs, 38 RAM blocks
+  (B: +0.497, 21,243, 21). The worst paths are EA-fetch's own, none through
+  the data cache.
+
+Tests:
+- t_dcache.s (pipelined core only), which sees the cache through pokes:
+  memory changed behind the CPU (tb_ap040_pipe_program.v's new $F134/$F136
+  registers). It covers:
+  - a read miss allocating, a write miss not;
+  - write hits updating, including byte, word at an odd address, a
+    longword across longwords and across lines;
+  - CINV/CPUSH DC on a line, a page and everything, and the instruction
+    cache's forms (all, line, page) leaving it;
+  - DE clear, which bypasses the cache and keeps it;
+  - a DTT's CM 10 inhibiting reads and writes, invalidating a line hit;
+  - MOVES to FC 3;
+  - TAS and CAS locked;
+  - MOVE16 hits served from the line, its writes invalidating, and its
+    misses allocating nothing;
+  - the vector fetch allocating nothing;
+  - a page's CM and a physical An through an alias.
+- t_cache.s, the sequential core's cache test, now runs on the pipe too.
+- tb_ap040_pipe_dcache.v, at the DMU's ports. It checks:
+  - the fill order;
+  - the hit latency, and every size at every offset;
+  - the byte enables, and spanning writes;
+  - a write meeting a line being read, swept across the fill;
+  - inhibited, locked, MOVES, no-allocate and MOVE16 accesses;
+  - CINV's scopes and its done;
+  - beat errors, including a way whose old tag outlives an abandoned fill;
+  - snoops, swept across a fill and its tag write, with memory written as
+    they are raised;
+  - replacement against the counter model;
+  - DE cleared under a fill, with a read at once;
+  - a page's CM.
 
 ## Tests
 

@@ -86,7 +86,9 @@ wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
-wire        cm_req, cm_ic, cm_done, ic_en;
+wire        cm_req, cm_ic, cm_dc, cm_done, cm_done_i, cm_done_d, ic_en, dc_en;
+wire        l1_nalloc_b, l1_m16_b, l1_lock_b;
+wire  [1:0] d_cm;
 wire  [1:0] cm_scope;
 wire [31:0] cm_addr;
 wire [31:0] pt_addr, pt_mmusr, pf_addr;
@@ -137,8 +139,9 @@ ap040_pipe_cpu #(
 	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr),
 	.pf_fc (pf_fc), .pf_done (pf_done),
-	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
-	.cm_done (cm_done), .ic_en (ic_en),
+	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
+	.cm_done (cm_done), .ic_en (ic_en), .dc_en (dc_en),
+	.l1_nalloc_b (l1_nalloc_b), .l1_m16_b (l1_m16_b), .l1_lock_b (l1_lock_b),
 	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
 	.mmu_dtt0(mmu_dtt0), .mmu_dtt1(mmu_dtt1),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
@@ -159,17 +162,36 @@ ap040_pipe_cpu #(
 // handed to the bus controller. Port A's stream is translated by the bus
 // controller itself until the instruction memory unit comes with its cache
 // (stage B): see ap040_pipe_membus.v's header.
+// CINV/CPUSH is done when both caches are. Each unit's done is one clock
+// and they need not come together; each takes a request once.
+reg cm_gi, cm_gd;
+always @(posedge clk)
+	if (!nreset || !cm_req) begin cm_gi <= 1'b0; cm_gd <= 1'b0; end
+	else begin
+		if (cm_done_i) cm_gi <= 1'b1;
+		if (cm_done_d) cm_gd <= 1'b1;
+	end
+assign cm_done = (cm_gi || cm_done_i) && (cm_gd || cm_done_d) && !(cm_gi && cm_gd);
+
 ap040_pipe_dmu u_dmu
 (
 	.clk (clk), .nreset (nreset),
 	.xlat (l1_wr_sync), .tc_e (mmu_tc[15]), .tc_p (mmu_tc[14]),
 	.c_addr (l1_addr_b), .c_rd (l1_rd_b), .c_wr (l1_wren_b), .c_size (l1_size_b), .c_wdata (l1_data_b),
 	.c_sup (l1_sup_b), .c_fc_ovr (l1_fc_ovr), .c_fc_val (l1_fc_val), .c_wr_drop (l1_wr_drop),
+	.c_nalloc (l1_nalloc_b), .c_m16 (l1_m16_b), .c_lock (l1_lock_b),
+	.dc_en (dc_en), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
+	.cm_req (cm_req), .cm_dc (cm_dc), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done_d),
+	// The table walker writes U and M through its own port, behind the
+	// data cache: a line holding the descriptor is invalidated as the write
+	// lands (MC68040UM 4.3.3 has a table search's write hit update the line;
+	// write-through, the two are the same). No other master yet (stage F).
+	.sn_req (walker_req && walker_we && walker_ack), .sn_addr (walker_addr),
 	.c_q (l1_q_b), .c_rvalid (l1_rvalid_b), .c_wr_busy_w (l1_wr_busy_w), .c_rflt (l1_rflt_b),
 	.c_wflt (l1_wflt), .c_flt_bus (l1_flt_bus), .c_flt_ma (l1_flt_ma), .c_idle (l1_idle),
 	.wr_pend (dmu_wr_pend),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
-	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.m_addr (bb_addr), .m_la (bb_la), .m_rd (bb_rd), .m_wr (bb_wr), .m_size (bb_size), .m_wdata (bb_wdata),
 	.m_sup (bb_sup), .m_fc_ovr (bb_fc_ovr), .m_fc_val (bb_fc_val),
 	.m_rx (bb_rx), .m_rx_addr (bb_rx_addr), .m_rx_size (bb_rx_size), .m_rx_fc (bb_rx_fc),
@@ -189,7 +211,7 @@ ap040_pipe_mmu u_mmu
 	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (i_cm),
 	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa), .ip_cm (ip_cm),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
-	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (),
+	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.pt_req (pt_req), .pt_write (pt_write), .pt_access (1'b0), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr),
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
@@ -212,7 +234,7 @@ ap040_pipe_imu u_imu
 	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus),
 	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
 	.ic_en    (ic_en), .itt0 (mmu_itt0), .itt1 (mmu_itt1),
-	.cm_req   (cm_req), .cm_ic (cm_ic), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done),
+	.cm_req   (cm_req), .cm_ic (cm_ic), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done_i),
 	// nothing here writes memory behind the CPU: the chipset's snoop comes
 	// with the card's integration (caches stage F)
 	.sn_req   (1'b0), .sn_addr (32'd0),

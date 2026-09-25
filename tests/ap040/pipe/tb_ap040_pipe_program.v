@@ -12,6 +12,8 @@
 //   $F100 w  failing test number       $F102 w  $600D pass / $BAD0 fail   //
 //   $F108 w  cycle stamp               $F110 w  interrupt level           //
 //   $F120    writes must carry FC=1    $F130 w  DMA-style poke of $3500   //
+//   $F134 w  a poke's address          $F136 w  poke the word there,      //
+//            behind the CPU (the data cache's tests; caches stage C)      //
 //   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N  //
 //   $F150 w  two devices: level, then a lower one after N cycles          //
 //   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has //
@@ -65,6 +67,7 @@ reg         walker_berr_r = 0;   // one-shot walker bus error, armed via $F146
 reg         wberr_arm = 0;
 reg         berr_armed;
 reg         fberr_armed = 0;
+reg  [15:0] poke_addr = 0;
 reg  [15:0] fberr_addr = 0;
 wire        berr_d = berr_armed && nreset && (busstate != 2'b01) &&
                      (addr_out[15:0] == 16'hF140);
@@ -415,6 +418,8 @@ always @(posedge clk) begin
 				mem[15'h1A80] = data_write;
 				mem[15'h1A81] = 16'h0000;
 			end
+			if (addr_out[15:0] == 16'hF134) poke_addr = data_write;
+			if (addr_out[15:0] == 16'hF136) mem[poke_addr[15:1]] = data_write;
 		end
 	end
 end

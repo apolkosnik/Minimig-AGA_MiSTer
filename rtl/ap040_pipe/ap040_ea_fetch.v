@@ -388,6 +388,12 @@ module ap040_ea_fetch
 	output     [31:0] pf_addr,
 	output      [2:0] pf_fc,
 	input             pf_done,
+	// What a port-B access is, for the data cache (MC68040UM 4.3.3, 7.4.5):
+	// it allocates no line (an exception frame, the vector fetch, MOVE16);
+	// MOVE16; locked (TAS, CAS, CAS2)
+	output            l1_nalloc_b,
+	output            l1_m16_b,
+	output            l1_lock_b,
 	// CINV/CPUSH at the caches: the field and An, held until cm_done
 	output            cm_req,
 	output            cm_ic, cm_dc, cm_push,
@@ -2277,6 +2283,9 @@ wire        aer_now_wr  = !aerr_rd;
 // line reports SIZE 11 with TT 01, and its EA field the line.
 wire        aer_now_lk  = (eac_alu_op == `AP040_ALU_TAS) || cas || cas2;
 wire        aer_now_16  = m16_active;
+assign l1_nalloc_b = exc_writing || exc_vec_issue || exc_vec_pending || m16_active;
+assign l1_m16_b    = m16_active;
+assign l1_lock_b   = aer_now_lk && !exc_writing && !exc_vec_issue && !exc_vec_pending;
 wire  [1:0] aer_now_sz  = aerr_rd ? rdq_sz : l1_size_b;
 wire  [2:0] aer_now_fc  = aerr_rd ? rdq_fc : (l1_fc_ovr ? l1_fc_val : {l1_sup_b, 2'b01});
 wire        aer_now_mv  = aerr_rd ? rdq_moves : eac_moves[2];

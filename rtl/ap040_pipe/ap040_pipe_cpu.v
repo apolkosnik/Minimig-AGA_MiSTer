@@ -221,6 +221,12 @@ module ap040_pipe_cpu
 	output [31:0] cm_addr,
 	input         cm_done,
 	output        ic_en,        // CACR IE
+	output        dc_en,        // CACR DE
+	// what a port-B access is, for the data cache: no allocation, MOVE16,
+	// locked (see ap040_ea_fetch.v)
+	output        l1_nalloc_b,
+	output        l1_m16_b,
+	output        l1_lock_b,
 	input  [31:0] l1_q_b,
 	input         l1_rvalid_b,
 
@@ -781,6 +787,7 @@ always @(posedge clk) begin
 	if (nreset && ce && pm_mmusr_we) mmusr <= pm_mmusr_val;
 end
 assign ic_en = cacr[15];
+assign dc_en = cacr[31];
 
 assign mmu_tc = tc;     assign mmu_urp = urp;   assign mmu_srp = srp;
 assign mmu_itt0 = itt0; assign mmu_itt1 = itt1; assign mmu_dtt0 = dtt0; assign mmu_dtt1 = dtt1;
@@ -907,6 +914,12 @@ wire        eaf_l1_fc_ovr;
 wire  [2:0] eaf_l1_fc_val;
 assign l1_fc_ovr = !rv_active && !ex_st_req && eaf_l1_fc_ovr;
 assign l1_fc_val = eaf_l1_fc_val;
+// For the data cache: the reset vectors allocate nothing; EX's store beat
+// is locked for TAS and CAS.
+wire        eaf_l1_nalloc, eaf_l1_m16, eaf_l1_lock;
+assign l1_nalloc_b = rv_active || (!ex_st_req && eaf_l1_nalloc);
+assign l1_m16_b    = !rv_active && !ex_st_req && eaf_l1_m16;
+assign l1_lock_b   = !rv_active && (ex_st_req ? ((eaf_alu_op == `AP040_ALU_TAS) || eaf_casf[4]) : eaf_l1_lock);
 // The fetch's privilege is the mode the fetched instruction will RUN in,
 // which for the first instruction of a handler is supervisor -- and the
 // exception's own SR write has not committed when that fetch goes out.
@@ -1474,6 +1487,7 @@ ap040_ea_fetch #(
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope),
 	.cm_addr (cm_addr), .cm_done (cm_done),
+	.l1_nalloc_b (eaf_l1_nalloc), .l1_m16_b (eaf_l1_m16), .l1_lock_b (eaf_l1_lock),
 	.smc_hit          (smc_hit),
 	.l1_rflt_b        (l1_rflt_b),
 	.l1_wflt          (l1_wflt),

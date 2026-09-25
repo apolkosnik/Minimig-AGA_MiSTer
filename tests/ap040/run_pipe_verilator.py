@@ -33,15 +33,15 @@ CORE = [RTL / n for n in (
 # must each print ALL TESTS PASSED; OPEN run too and are reported with the
 # gap that holds them, so a known gap is visible on every run without
 # hiding a regression anywhere else -- none is open since the MMU
-# (bundle 10). t_cache and bench_* are the sequential core's no-cache
-# exclusions as well (run_verilator.py): this core has no data cache yet
+# (bundle 10). bench_* are the sequential core's no-cache exclusions as
+# well (run_verilator.py). t_cache runs since this core has its data cache
 # (caches stage C). t_icache is this core's alone: the sequential core
 # widens every CINV/CPUSH to all lines, and t_icache tests that a line or
 # page operation leaves the others.
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
                      "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order", "t_moves_alt", "t_smc_mmu",
-                     "t_icache"]
+                     "t_icache", "t_cache", "t_dcache"]
 PROGRAMS_OPEN = {}
 # tb_ap040_pipe_program_local runs the programs that need no bus devices and
 # no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a
@@ -130,6 +130,10 @@ def main():
             src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_imu.v",
                    RTL / "ap040_pipe_membus.v", RTL / "ap040_pipe_cache_arr.v", HERE / "sim_pipe_ram.v",
                    HERE / "sim_dpram.v"]
+        elif name.endswith("dcache"):
+            # the DMU, the MMU and the bus controller, as dmuport
+            src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_membus.v",
+                   RTL / "ap040_pipe_cache_arr.v", HERE / "sim_pipe_ram.v", HERE / "sim_dpram.v"]
         elif name.endswith("icache"):
             # the IMU and the bus controller on their own, as busredirect
             src = [RTL / "ap040_pipe_imu.v", RTL / "ap040_pipe_membus.v",

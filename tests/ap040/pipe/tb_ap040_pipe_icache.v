@@ -284,6 +284,8 @@ task cinv;   // CINV/CPUSH IC: scope 01 line, 10 page, 11 all
 		if (!cm_done) fail("CINV never finished");
 		step;              // the CPU's acknowledgement lands the cycle after done
 		cm_req = 1'b0;
+		step;              // ...and the request is down a clock before another:
+		                   // a unit takes each request once
 	end
 endtask
 task snoop;   // one cycle of sn_req
@@ -467,7 +469,7 @@ initial begin
 	k = 0;
 	while (!cm_done && k < 400) begin step; k = k + 1; end
 	if (u_imu.fl_act || log_n < lg + 3) fail("6: CINV finished with a fill under way");
-	step; cm_req = 1'b0;
+	step; cm_req = 1'b0; step;
 	if (lvalid(32'h0A00)) fail("6: CINVA left the line filled while it waited");
 	wait_q;
 	mem_lat = 1;
@@ -642,7 +644,7 @@ initial begin
 			begin
 				k = 0;
 				while (!cm_done && k < 400) begin step; k = k + 1; end
-				step; cm_req = 1'b0;
+				step; cm_req = 1'b0; step;
 			end
 			begin
 				repeat (d) step;

@@ -382,6 +382,7 @@ reg  [5:0] cm_set;      // the set to read next...
 reg        cm_more;     // ...if any is left
 reg  [5:0] cm_rset;     // the set whose row is on the outputs...
 reg        cm_rdv;      // ...this cycle
+reg        cm_seen;     // done with this request: its done may wait on the data cache's
 // snoops: captured (1), their row on the copy's outputs (2)
 reg        sn_v1, sn_v2;
 reg [27:0] sn_l1, sn_l2;
@@ -492,7 +493,7 @@ assign f_addr = dir ? {rd_pa, 2'b00} : c_addr;
 assign f_sup  = dir ? rd_sp : c_sp;
 
 // CINV/CPUSH: once the cache is idle.
-wire        cm_go   = cm_req && !cm_done && (cm_st == CM_IDLE) && !lk_v && !fl_act;
+wire        cm_go   = cm_req && !cm_seen && (cm_st == CM_IDLE) && !lk_v && !fl_act;
 wire        cm_rd   = (cm_st != CM_IDLE) && cm_more;
 wire  [3:0] cm_hw;
 generate
@@ -694,7 +695,7 @@ always @(posedge clk) begin
 		fl_act <= 1'b0; fl_line <= 28'd0; fl_sp <= 1'b1; fl_st <= 2'd0; fl_iss <= 3'd0; fl_arr <= 2'd0;
 		fl_have <= 4'd0; fl_way <= 2'd0; fl_tags <= 88'd0; fl_out <= 1'b0;
 		rep <= 2'd0;
-		cm_st <= CM_IDLE; cm_set <= 6'd0; cm_more <= 1'b0; cm_rset <= 6'd0; cm_rdv <= 1'b0;
+		cm_st <= CM_IDLE; cm_set <= 6'd0; cm_more <= 1'b0; cm_rset <= 6'd0; cm_rdv <= 1'b0; cm_seen <= 1'b0;
 		sn_v1 <= 1'b0; sn_v2 <= 1'b0; sn_l1 <= 28'd0; sn_l2 <= 28'd0; sn_junk2 <= 1'b0; fl_nov <= 1'b0;
 		for (i = 0; i < 64; i = i + 1) vld[i] <= 4'd0;
 	end else begin
@@ -753,14 +754,15 @@ always @(posedge clk) begin
 		// ---- CINV/CPUSH ----
 		// A row is read each cycle (cm_set, while cm_more) and its ways
 		// compared the next (cm_rset): one for a line, sets 0-63 for a page.
+		if (!cm_req) cm_seen <= 1'b0;
 		cm_rdv  <= cm_rd;
 		cm_rset <= cm_set;
 		if (cm_go) begin
-			if (!cm_ic) cm_done <= 1'b1;
+			if (!cm_ic) begin cm_done <= 1'b1; cm_seen <= 1'b1; end
 			else case (cm_scope)
 			2'b01: begin cm_st <= CM_LINE; cm_set <= cm_addr[9:4]; cm_more <= 1'b1; end
 			2'b10: begin cm_st <= CM_PAGE; cm_set <= 6'd0;         cm_more <= 1'b1; end
-			default: cm_done <= 1'b1;   // all ways: cm_all, below
+			default: begin cm_done <= 1'b1; cm_seen <= 1'b1; end   // all ways: cm_all, below
 			endcase
 		end
 		if (cm_rd) begin
@@ -768,7 +770,7 @@ always @(posedge clk) begin
 			else cm_more <= 1'b0;
 		end
 		if (cm_rdv) begin
-			if (cm_st == CM_LINE || cm_rset == 6'd63) begin cm_st <= CM_IDLE; cm_done <= 1'b1; end
+			if (cm_st == CM_LINE || cm_rset == 6'd63) begin cm_st <= CM_IDLE; cm_done <= 1'b1; cm_seen <= 1'b1; end
 		end
 
 		// ---- snoops ----
