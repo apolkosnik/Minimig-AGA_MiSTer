@@ -311,6 +311,7 @@ wire        a7_busy = (ex_fwd_valid  && (ex_fwd_dest  == 4'd15)) ||
                       aux_we || ex_creg_sp;
 wire        ex_fwd2_valid;
 wire        ex_fwd2_slow;
+wire        ex_res_slow;       // EX holds a staged MUL.L: its result is due from WB
 wire  [3:0] ex_fwd2_dest;
 wire [31:0] ex_fwd2_data;
 wire        id_src_a_is_imm, id_writes_reg, id_writes_ccr;
@@ -1175,6 +1176,7 @@ ap040_ea_calc u_eac
 	.ex_fwd_valid     (ex_fwd_valid),
 	.ex_fwd_dest      (ex_fwd_dest),
 	.ex_fwd_data      (ex_fwd_data),
+	.ex_res_slow      (ex_res_slow),
 	.ex_an_valid      (eaf_valid && eaf_writes_an && !ex_fwd2_slow),
 	.ex_an_reg        (eaf_an_reg),
 	.ex_an_data       (eaf_an_data),
@@ -1484,6 +1486,7 @@ ap040_ea_fetch #(
 	.ex_fwd2_dest     (ex_fwd2_dest),
 	.ex_fwd2_data     (ex_fwd2_data),
 	.ex_fwd2_slow     (ex_fwd2_slow),
+	.ex_res_slow      (ex_res_slow),
 
 	.l1_addr_b        (eaf_l1_addr_b),
 	.l1_q_b           (l1_q_b),
@@ -1660,6 +1663,7 @@ ap040_execute u_ex
 	.ex_fwd2_dest     (ex_fwd2_dest),
 	.ex_fwd2_data     (ex_fwd2_data),
 	.ex_fwd2_slow     (ex_fwd2_slow),
+	.ex_res_slow      (ex_res_slow),
 	.ex_pf_inval      (ex_pf_inval),
 	.ex_fwd_dest      (ex_fwd_dest),
 	.ex_fwd_data      (ex_fwd_data),

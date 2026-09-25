@@ -442,6 +442,7 @@ module ap040_ea_fetch
 	input       [3:0] ex_fwd2_dest,
 	input      [31:0] ex_fwd2_data,
 	input             ex_fwd2_slow,     // ex_fwd2_data is a multiply/divide high word
+	input             ex_res_slow,      // ex_fwd_data is not EX's result: a staged MUL.L (phase 6C)
 
 	// ap040_pipe_l1.v port B -- read for a memory-source instruction or
 	// JMP/JSR's redirect target; write for BSR/JSR's push -- see header.
@@ -1970,6 +1971,8 @@ wire hold_hazard    = creg_hazard || (live && chk_fwd_hazard) ||   // chk_fwd_ha
                       (live && irq_recheck) ||                     // the interrupt arm, behind an SR write
                       (live && cmr_busy) ||                        // a format-$7 RTE's CM, being read
                       addr_hz ||                                   // an address from a long forward
+                      (live && ex_res_slow &&                      // a staged MUL.L's register, due from WB
+                       (fwd_a_from_ex || fwd_b_from_ex || fwd_c_from_ex)) ||
                       trapcc_hz;                                   // TRAPcc behind a flag producer
 
 // A hazard has to stop the stage it is IN. eaf_stall tells the stages

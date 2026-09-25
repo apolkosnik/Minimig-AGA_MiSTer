@@ -133,6 +133,7 @@ module ap040_ea_calc
 	input             ex_fwd_valid,
 	input       [3:0] ex_fwd_dest,
 	input      [31:0] ex_fwd_data,      // EX's result: final in any cycle this stage takes an instruction
+	input             ex_res_slow,      // ...unless it is a staged MUL.L's, formed only into WB
 	input             ex_an_valid,      // EX's An step, a register: eaf_an_data
 	input       [3:0] ex_an_reg,
 	input      [31:0] ex_an_data,
@@ -318,7 +319,8 @@ wire [31:0] agu_ext    = id_immrmw ? id_ea_ext : id_imm;
 // The instruction ahead's An step already holds every older write to the
 // register, so nothing further back is looked at when it is taken.
 wire        agu_hz     = (ahead1_wr_mask[agu_reg] && !agu_a1_hit) ||
-                         (ahead2_wr_mask[agu_reg] && !agu_a1_hit && !agu_ex_hit && !agu_an_hit);
+                         (ahead2_wr_mask[agu_reg] && !agu_a1_hit && !agu_ex_hit && !agu_an_hit) ||
+                         (agu_ex_hit && !agu_a1_hit && ex_res_slow);
 // The brief extension word, verbatim in agu_ext: [15] D/A and [14:12] the
 // index register, [11] its size (a Word index is sign-extended), [10:9] the
 // scale, [7:0] a signed byte displacement. The full format is EA-fetch's
@@ -335,7 +337,8 @@ wire [31:0] agu_xsz    = agu_ext[11] ? agu_xval : {{16{agu_xval[15]}}, agu_xval[
 wire [31:0] agu_xsc    = agu_xsz << agu_ext[10:9];
 wire [31:0] agu_d8     = {{24{agu_ext[7]}}, agu_ext[7:0]};
 wire        agu_x_hz   = agu_idx && ((ahead1_wr_mask[agu_xreg] && !agu_x_a1) ||
-                                     (ahead2_wr_mask[agu_xreg] && !agu_x_a1 && !agu_x_ex && !agu_x_an));
+                                     (ahead2_wr_mask[agu_xreg] && !agu_x_a1 && !agu_x_ex && !agu_x_an) ||
+                                     (agu_x_ex && !agu_x_a1 && ex_res_slow));
 wire        agu_wait   = id_valid && agu_class && ((!agu_nobase && agu_hz) || agu_x_hz);
 wire        agu_ok     = agu_class && (agu_nobase || !agu_hz) && !agu_x_hz;
 wire [31:0] agu_dec    = agu_base - agu_step;

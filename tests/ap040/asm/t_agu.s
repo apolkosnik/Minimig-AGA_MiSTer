@@ -48,6 +48,15 @@
 ;        store, and a PC-relative one.
 ; 88-89  MULU.L's high word and DIVU.L's remainder used as an index straight
 ;        after: the second result, written by a port nothing forwards.
+; 90-96  A 32-bit MULU.L/MULS.L's result, which EX does not forward (phase
+;        6C), used straight after: as data, as an index, by the next
+;        multiply, and its flags by Bcc -- V on overflow -- and a multiply
+;        whose operand is a load sent on to EX.
+; 97-104 Register bitfields with each kind of offset and width -- immediate
+;        and immediate, a register and immediate, immediate and a register,
+;        both registers -- for BFEXTU, BFEXTS, BFINS and BFFFO: a register
+;        field with both immediate is rotated in its first cycle (phase 6A),
+;        and the other kinds must not be.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -462,6 +471,65 @@ stl:	move.l	d0,(a0)+
 	divu.l	d7,d6:d5		; quotient 2, remainder $C
 	move.l	0(a0,d6.l),d0		; TABLE+$C
 	check	d0,$10000003,89
+
+;------------------------ 90-96: a MUL.L's result and flags, straight after
+	moveq	#7,d1
+	moveq	#6,d2
+	mulu.l	d2,d1			; 42
+	add.l	d1,d1			; 84, at once
+	check	d1,84,90
+	moveq	#3,d3
+	moveq	#4,d4
+	mulu.l	d3,d4			; 12
+	move.l	0(a0,d4.l),d5		; TABLE+12, the index at once
+	check	d5,$10000003,91
+	mulu.l	d4,d4			; 144, its own result squared
+	mulu.l	d4,d4			; 20736
+	check	d4,20736,92
+	move.l	#$10000,d6
+	mulu.l	d6,d6			; $1_0000_0000: V, Z
+	bvs.s	ok93
+	move.w	#93,d7
+	bra	fail
+ok93:	beq.s	ok94
+	move.w	#94,d7
+	bra	fail
+ok94:	moveq	#-3,d0
+	moveq	#5,d1
+	muls.l	d1,d0			; -15: N
+	bmi.s	ok95
+	move.w	#95,d7
+	bra	fail
+ok95:	move.l	#9,(SCR+$170).l
+	lea	(SCR+$170).l,a4
+	moveq	#11,d2
+	mulu.l	(a4)+,d2		; 99, the operand a pipelined load's
+	check	d2,99,96
+
+;----------------------- 97-104: register bitfields, each offset/width kind
+	move.l	#$12345678,d1
+	moveq	#4,d2			; an offset held in a register: 4, not its number
+	moveq	#12,d3			; a width held in a register
+	bfextu	d1{4:8},d0		; $23
+	check	d0,$23,97
+	bfextu	d1{d2:8},d0		; offset 4 from D2: $23
+	check	d0,$23,98
+	bfextu	d1{8:d3},d0		; width 12 from D3: $345
+	check	d0,$345,99
+	bfextu	d1{d2:d3},d0		; $234
+	check	d0,$234,100
+	bfexts	d1{d2:4},d0		; $2
+	check	d0,2,101
+	move.l	#$F0000000,d4
+	bfexts	d4{d2:8},d0		; $00 -> 0? bits 4..11 of $F0000000: $00
+	check	d0,0,102
+	move.l	#$FFFFFFFF,d5
+	moveq	#$A,d6
+	bfins	d6,d5{d2:4}		; bits 4..7 = $A
+	check	d5,$FAFFFFFF,103
+	move.l	#$00100000,d7
+	bfffo	d7{d2:16},d0		; first one at bit 11
+	check	d0,11,104
 
 ;------------------------------------------ 69-70: MOVEC to ISP, then (A7)
 	move.l	#$600DF00D,(SCR+$100).l

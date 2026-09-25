@@ -473,6 +473,31 @@ Operand-sensitive arithmetic timing needs representative finite/special values.
 
 ### 6C. Long multiply
 
+6C, first step (2026-09-25): a 32-bit MULU.L/MULS.L no longer holds EX.
+Its product and flags go straight into WB's registers as it leaves, from
+the product itself, so register MUL.L 3 -> 2 cycles, the decoder's supply
+limit. The product is not on EX's forward path (that would put the
+multiplier in front of the forward mux), so a reader of its register waits
+one cycle (ex_res_slow: EA-fetch's hold, EA-calculate's base and index
+hazards) and takes it from WB's commit. The 64-bit forms and the divides
+keep the hold, for their second register and An step. t_agu.s 90-104 add
+MUL.L followed by readers of its register as data, base, index and
+bitfield operand, and the register bitfields' offset forms. Fits: core
++1.228 ns, bus16 +1.790.
+Its mutations: EA-fetch not waiting for a staged multiply, V from the low
+half only and the result from EX's path are caught (the programs, mull);
+the hold put back is caught as a slowdown. A staged multiply marking the
+multiplier busy survives, equivalent while decode gathers: a multiply held
+for its product right behind a staged one would take the stale product,
+but every MUL.L is two words, so the next reaches EX two cycles on, when
+mul_busy has cleared. EA-calculate taking a staged multiply as a base
+survives and is equivalent: MUL.L writes only data registers, and a base
+is An; the term stays beside the index's, where a data register can be
+the index. Taking it as an index survives, equivalent while decode
+gathers: traced on t_agu.s 91, the indexed load behind a MUL.L is judged
+with the multiply already past EX. Phase 8 takes that spacing away, so
+both terms stay.
+
 - [ ] Replace `mul_wait` as a global EX hold with a staged multiplier request
   and result path; carry both possible destinations and CCR metadata.
 - [ ] Preserve signed/unsigned, 32/64-bit result, register-alias and An-update

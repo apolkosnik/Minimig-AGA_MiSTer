@@ -289,6 +289,7 @@ module ap040_execute
 	// EA-fetch and redirects IF to ex_recovery_pc.
 	output            ex_mispredict,
 	output            ex_fwd2_slow,
+	output            ex_res_slow,      // EX's result is a MULU/MULS.L's, formed only into WB
 	output            ex_pf_inval,       // empty the prefetch stream for that refetch
 	// The broadcast flush: everything ex_mispredict causes a flush for, plus
 	// STOP, which discards younger work without redirecting anywhere
@@ -547,10 +548,19 @@ end
 // cycle, which is what lets it map onto the DSP blocks without a
 // combinational 64-bit product on EX's own path. mul_wait holds the stage
 // for that cycle the way div_wait does for the divider's.
+//
+// ...except a 32-bit result (restructuring plan, phase 6C): its product and
+// flags go straight into WB's registers as the instruction leaves, so it
+// holds nothing. Not EX's forward -- the product is not on EX's own path,
+// as before -- so an instruction that reads its register waits a cycle
+// (ex_res_slow) and takes it from WB's commit. The 64-bit forms and the
+// divides keep the hold: their second register and An step need it.
 reg         mul_busy;
 reg  [63:0] mul_prod;
 wire        mul_req  = eaf_valid && ml && !ml_div;
-wire        mul_wait = mul_req && !mul_busy;
+wire        mul_st   = ml && !ml_div && !ml_64;
+wire        mul_wait = mul_req && !mul_busy && !mul_st;
+assign      ex_res_slow = eaf_valid && mul_st;
 wire signed [63:0] mul_s_c = $signed(op_a) * $signed(eaf_operand_b);
 wire        [63:0] mul_u_c = {32'd0, op_a} * {32'd0, eaf_operand_b};
 always @(posedge clk) begin
@@ -558,7 +568,7 @@ always @(posedge clk) begin
 		mul_busy <= 1'b0;
 		mul_prod <= 64'h0;
 	end else if (ce) begin
-		if (mul_req && !mul_busy) begin
+		if (mul_req && !mul_busy && !mul_st) begin
 			mul_busy <= 1'b1;
 			mul_prod <= ml_s ? mul_s_c : mul_u_c;
 		end else if (mul_busy) begin
@@ -576,6 +586,10 @@ wire  [4:0] ml_flags = ml_div ? (divl_ovf ? {ccr_in[4], ccr_in[3], ccr_in[2], 1'
                        ml_64  ? {ccr_in[4], mul_prod[63], (mul_prod == 64'd0), 1'b0, 1'b0}
                               : {ccr_in[4], mul_prod[31], (mul_prod[31:0] == 32'd0), mull_v32, 1'b0};
 wire [31:0] ml_lo    = ml_div ? divl_q : mul_prod[31:0];
+// The staged one's, from the product itself.
+wire [63:0] mul_c     = ml_s ? mul_s_c : mul_u_c;
+wire        mul_c_v32 = ml_s ? (mul_c[63:32] != {32{mul_c[31]}}) : (mul_c[63:32] != 32'd0);
+wire  [4:0] mul_st_flags = {ccr_in[4], mul_c[31], (mul_c[31:0] == 32'd0), mul_c_v32, 1'b0};
 wire [31:0] ml_hi    = ml_div ? divl_r : mul_prod[63:32];
 wire        ml_wr    = !(ml_div && divl_ovf);
 
@@ -985,7 +999,7 @@ always @(posedge clk) begin
 		exe_valid        <= eaf_valid && !ex_aerr;
 		exe_pc           <= eaf_pc;
 		exe_dest_reg     <= eaf_dest_reg;
-		exe_result_data  <= combined_result;
+		exe_result_data  <= (eaf_valid && mul_st) ? mul_c[31:0] : combined_result;
 		// The address update rides alongside, on its own gate -- see
 		// ap040_pipe_regfile.v's second write port.
 		exe_an_sel       <= eaf_an_sel;
@@ -994,7 +1008,7 @@ always @(posedge clk) begin
 		exe_writes_reg2  <= ml_two ? ml_wr : eaf_writes_an;
 		exe_writes_reg   <= writes_reg_resolved;
 		exe_writes_ccr   <= eaf_writes_ccr;
-		exe_result_flags <= exe_flags_c;
+		exe_result_flags <= (eaf_valid && mul_st) ? mul_st_flags : exe_flags_c;
 		exe_writes_sr    <= exe_writes_sr_c;
 		exe_sr_data      <= exe_sr_data_c;
 		exe_writes_creg  <= exe_writes_creg_c;
