@@ -294,6 +294,9 @@ wire [31:0] ex_an_early_data;
 wire  [1:0] ex_an_early_sel;
 wire        ex_st_sup;
 wire        ex_aerr;      // EX's store was refused: abandoned, and owed (ap040_ea_fetch.v)
+wire        ex_aerr_rd;   // ...or its pipelined load's read faulted
+wire        ex_ld_busy;   // EX's pipelined load is outstanding: port B is its (phase 5)
+wire        eaf_ld_pend, eaf_ld_sxw;
 // A write to A7 that has not landed in the register file yet: one in EX
 // through either port, or one committing this cycle, whose value the file
 // only shows from the NEXT cycle. MOVEC counts twice over -- aux_we is its
@@ -887,7 +890,12 @@ assign l1_fc_val = eaf_l1_fc_val;
 // exception's own SR write has not committed when that fetch goes out.
 // sr_resolved carries EX's pending write; the committed register does not.
 assign l1_sup_a  = sr_resolved[13];
-assign l1_rd_b   = ce && (rv_active ? rv_issue : eaf_l1_rd_b);
+// EA-fetch's requests wait for EX's pipelined load as they do for EX's
+// store (port_taken); every request of its own already asks, and these
+// gates are the port's own guarantee that nothing younger overtakes it.
+wire        eaf_rd_out = eaf_l1_rd_b   && !ex_ld_busy;
+wire        eaf_wr_out = eaf_l1_wren_b && !ex_ld_busy;
+assign l1_rd_b   = ce && (rv_active ? rv_issue : eaf_rd_out);
 assign l1_inval_a = ce && ex_pf_inval;
 
 // The store snoop (2026-09-24). A store can land on an instruction already
@@ -908,7 +916,7 @@ reg  [31:0] sq_a;
 reg   [1:0] sq_sz;
 reg         sq_v, sq_dep;
 wire        eaf_departs;
-wire        sq_acc  = ce && !rv_active && !ex_st_req && eaf_l1_wren_b && !l1_wr_busy;
+wire        sq_acc  = ce && !rv_active && !ex_st_req && eaf_wr_out && !l1_wr_busy;
 wire [31:0] snp_e   = sq_a + ((sq_sz == `AP040_SZ_L) ? 32'd4 : (sq_sz == `AP040_SZ_W) ? 32'd2 : 32'd1);
 wire [31:0] snp_dlo = dec_holding ? dec_hold_pc : if_pc;
 wire        snp_dec = (dec_holding || if_valid_id) && (sq_a < if_pc + 32'd2) && (snp_e > snp_dlo);
@@ -939,8 +947,8 @@ assign l1_addr_b = rv_active ? {29'd0, (rv_ph == RV_PC), 2'b00} : ex_st_req ? ex
 // disabled cycle is a request the memory sees again. The write buffer
 // accepted one store 134 times that way. en_a needs no gate here --
 // ap040_inst_fetch.v already builds it from ce.
-assign l1_wren_b = ce && !rv_active && (ex_st_req ? 1'b1  : eaf_l1_wren_b);
-assign l1_wr_drop = ce && !(!rv_active && (ex_st_req || eaf_l1_wren_b));
+assign l1_wren_b = ce && !rv_active && (ex_st_req ? 1'b1  : eaf_wr_out);
+assign l1_wr_drop = ce && !(!rv_active && (ex_st_req || eaf_wr_out));
 assign l1_size_b   = rv_active ? `AP040_SZ_L : ex_st_req ? ex_st_size : eaf_l1_size_b;
 assign l1_data_b = ex_st_req ? ex_st_data : eaf_l1_data_b;
 
@@ -1365,6 +1373,8 @@ ap040_ea_fetch #(
 	.eac_is_div       (eac_is_div),
 	.eac_div_signed   (eac_div_signed),
 	.eaf_is_div       (eaf_is_div),
+	.eaf_ld_pend      (eaf_ld_pend),
+	.eaf_ld_sxw       (eaf_ld_sxw),
 	.eaf_div_signed   (eaf_div_signed),
 	.rf3_we           (rf3_we),
 	.wr_mask          (eaf_wr_mask),
@@ -1386,7 +1396,7 @@ ap040_ea_fetch #(
 	.eaf_refetch      (eaf_refetch),
 	.eaf_departs      (eaf_departs),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
-	.port_taken       (ex_st_req),
+	.port_taken       (ex_st_req || ex_ld_busy),
 	.wb_busy          (exe_valid),
 	.ex_br_resolve    (ex_br_resolve),
 	.ex_br_taken      (ex_br_taken),
@@ -1424,6 +1434,7 @@ ap040_ea_fetch #(
 	.l1_flt_bus       (l1_flt_bus),
 	.l1_flt_ma        (l1_flt_ma),
 	.ex_aerr          (ex_aerr),
+	.ex_aerr_rd       (ex_aerr_rd),
 	.ex_st_addr       (ex_st_addr),
 	.ex_st_data       (ex_st_data),
 	.ex_st_size       (ex_st_size),
@@ -1608,16 +1619,23 @@ ap040_execute u_ex
 	.st_smc_late      (st_smc_late),
 	.eaf_immsr_to_sr  (eaf_immsr_to_sr),
 	.eaf_is_div       (eaf_is_div),
+	.eaf_ld_pend      (eaf_ld_pend),
+	.eaf_ld_sxw       (eaf_ld_sxw),
 	.eaf_div_signed   (eaf_div_signed),
 	.eaf_ea_target    (eaf_ea_target),
 	.l1_wr_busy       (l1_wr_busy),
 	.l1_wflt          (l1_wflt),
 	.ex_aerr          (ex_aerr),
+	.ex_aerr_rd       (ex_aerr_rd),
 	.ex_ccr_fwd_valid (ex_ccr_fwd_valid),
 	.ex_br_resolve    (ex_br_resolve),
 	.ex_br_taken      (ex_br_taken),
 	.ex_ccr_fwd_data  (ex_ccr_fwd_data),
 	.ex_st_req        (ex_st_req),
+	.l1_q_b           (l1_q_b),
+	.l1_rvalid_b      (l1_rvalid_b),
+	.l1_rflt_b        (l1_rflt_b),
+	.ex_ld_busy       (ex_ld_busy),
 	.ex_st_addr       (ex_st_addr),
 	.ex_st_data       (ex_st_data),
 	.ex_st_size       (ex_st_size),

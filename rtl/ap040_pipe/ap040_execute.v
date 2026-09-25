@@ -233,6 +233,18 @@ module ap040_execute
 	// PC is this instruction.
 	input             l1_wflt,
 	output            ex_aerr,
+	// A load EA-fetch sent on as it issued the read (restructuring plan,
+	// phase 5): its data is taken here, from the port, the cycle it
+	// arrives -- eaf_operand_a is not it -- and until then this stage waits
+	// and port B is the load's (ex_ld_busy). A read that faulted is
+	// abandoned as a refused store is (ex_aerr, with ex_aerr_rd).
+	input             eaf_ld_pend,
+	input             eaf_ld_sxw,     // ADDA.W and kin: a word, sign-extended
+	input      [31:0] l1_q_b,
+	input             l1_rvalid_b,
+	input             l1_rflt_b,
+	output            ex_ld_busy,
+	output            ex_aerr_rd,
 	output            ex_st_req,
 	output     [31:0] ex_st_addr,   // BYTE address; the core converts
 	output     [31:0] ex_st_data,
@@ -329,10 +341,33 @@ module ap040_execute
 	output reg [31:0] exe_creg_data
 );
 
+// The load's data. l1_rvalid_b is a level from the read's return until the
+// next read goes out, and the next cannot while this one is outstanding, so
+// it is taken in the cycle it arrives -- which is always the cycle this
+// stage moves on in: every instruction that could hold EX longer (a long
+// multiply or divide, a read-modify-write's store) is not sent on this way
+// (ap040_ea_fetch.v's lx). A register to keep the data across such a hold
+// was here first, and no mutation of it could be seen; the check below
+// holds the reason instead.
+wire [31:0] ld_lane    = eaf_ld_sxw ? {{16{l1_q_b[15]}}, l1_q_b[15:0]} : l1_q_b;
+wire        ld_wait    = eaf_valid && eaf_ld_pend;
+wire        ld_flt     = ld_wait && l1_rvalid_b && l1_rflt_b;
+wire        ld_hold    = ld_wait && !l1_rvalid_b;
+assign ex_ld_busy = ld_wait && !(l1_rvalid_b && !l1_rflt_b);
+assign ex_aerr_rd = ld_flt;
 assign ex_st_req = eaf_valid && eaf_is_rmw;
-assign ex_aerr   = ex_st_req && l1_wflt;
+// Only the ALU and the multiplier take it: a pipelined load is neither a
+// branch, a divide, a DBcc nor a status-register write, whose operand
+// paths stay as they were -- EX's redirect among them.
+wire [31:0] op_a       = eaf_ld_pend ? ld_lane : eaf_operand_a;
+assign ex_aerr   = (ex_st_req && l1_wflt) || ld_flt;
 wire   rmw_wait  = ex_st_req && l1_wr_busy && !l1_wflt;
-assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait;
+assign ex_stall  = stall_in || rmw_wait || div_wait || mul_wait || ld_hold;
+`ifdef VERILATOR
+always @(posedge clk)
+	if (nreset && ce && ld_wait && l1_rvalid_b && !l1_rflt_b && ex_stall)
+		$error("ap040_execute: a pipelined load's data arrived at %h with EX held; it would be lost", eaf_pc);
+`endif
 // ...and the refetch it then owes, raised only in a cycle this stage moves
 // on in: the flush that goes with a redirect clears EA-fetch's output
 // registers, which are this stage's input, stalled or not.
@@ -516,8 +551,8 @@ reg         mul_busy;
 reg  [63:0] mul_prod;
 wire        mul_req  = eaf_valid && ml && !ml_div;
 wire        mul_wait = mul_req && !mul_busy;
-wire signed [63:0] mul_s_c = $signed(eaf_operand_a) * $signed(eaf_operand_b);
-wire        [63:0] mul_u_c = {32'd0, eaf_operand_a} * {32'd0, eaf_operand_b};
+wire signed [63:0] mul_s_c = $signed(op_a) * $signed(eaf_operand_b);
+wire        [63:0] mul_u_c = {32'd0, op_a} * {32'd0, eaf_operand_b};
 always @(posedge clk) begin
 	if (!nreset) begin
 		mul_busy <= 1'b0;
@@ -552,8 +587,8 @@ wire [4:0]  alu_flags;
 // applied here rather than there.
 wire        alu_bitop = (eaf_alu_op == `AP040_ALU_BTST) || (eaf_alu_op == `AP040_ALU_BCHG) ||
                         (eaf_alu_op == `AP040_ALU_BCLR) || (eaf_alu_op == `AP040_ALU_BSET);
-wire [31:0] alu_a     = (alu_bitop && eaf_size == `AP040_SZ_B) ? {29'd0, eaf_operand_a[2:0]}
-                                                                : eaf_operand_a;
+wire [31:0] alu_a     = (alu_bitop && eaf_size == `AP040_SZ_B) ? {29'd0, op_a[2:0]}
+                                                                : op_a;
 
 ap040_pipe_alu alu
 (

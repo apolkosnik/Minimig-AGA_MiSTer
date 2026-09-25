@@ -35,6 +35,13 @@
 ;        own; the next instruction's base is that An.
 ; 69-70  MOVEC to ISP, then (A7): a stack pointer written from WB's
 ;        auxiliary port, which nothing forwards.
+; 71-75  Loads EA-fetch sends on as their reads go out (phase 5): a load,
+;        then a store to the same longword straight behind it -- the load
+;        sees the old value; a load and its use; a word load sign-extended
+;        into An; a multiply from memory.
+; 76-80  MOVE <memory>,CCR and MOVE <memory>,SR: a status register written
+;        from a load, by a path of its own -- the flags it sets are tested
+;        at once, and SR's interrupt mask is read back.
 ;
 ; Protocol (tb_ap040_program.v, tb_ap040_pipe_program.v): word write to
 ; $F100 = failing test number, $F102 = $BAD0 on failure, $600D when done.
@@ -353,6 +360,58 @@ stl:	move.l	d0,(a0)+
 	move.l	(a0),d3
 	check	d3,$10000019,67
 	check	d1,2,68
+
+;-------------------------------------- 71-75: loads sent on as they issue
+	lea	(SCR+$120).l,a0
+	move.l	#$0F0F0F0F,(a0)
+	move.l	#$12345678,d2
+	move.l	(a0),d1			; the old value...
+	move.l	d2,(a0)			; ...with this store straight behind it
+	check	d1,$0F0F0F0F,71
+	move.l	(SCR+$120).l,d3
+	check	d3,$12345678,72
+	moveq	#5,d4
+	move.l	(a0),d1
+	add.l	d1,d4			; its use, at once
+	check	d4,$1234567D,73
+	move.w	#$8000,(SCR+$124).l
+	lea	(SCR+$124).l,a1
+	movea.l	#$00010000,a2
+	adda.w	(a1),a2			; -$8000
+	move.l	a2,d5
+	check	d5,$00008000,74
+	move.w	#300,(SCR+$126).l
+	moveq	#7,d6
+	mulu.w	(SCR+$126).l,d6
+	check	d6,2100,75
+
+;---------------------------- 76-80: MOVE <memory>,CCR and MOVE <memory>,SR
+	move.w	#$0004,(SCR+$130).l	; Z
+	move.w	#$0011,(SCR+$132).l	; X C
+	lea	(SCR+$130).l,a0
+	moveq	#1,d0			; clears Z
+	move.w	(a0),ccr
+	seq	d1
+	and.l	#$FF,d1
+	check	d1,$FF,76		; Z from the load, seen at once
+	move.w	2(a0),ccr
+	move.w	sr,d3			; before anything else sets flags
+	scs	d2
+	and.l	#$FF,d2
+	check	d2,$FF,77		; C
+	and.l	#$1F,d3
+	check	d3,$11,78		; X and C, nothing else
+	move.w	#$2300,(SCR+$134).l
+	move.w	(SCR+$134).l,sr		; supervisor, mask 3
+	move.w	sr,d4
+	and.l	#$FFFF,d4
+	check	d4,$2300,79
+	move.w	#$2700,(SCR+$136).l
+	lea	(SCR+$136).l,a1
+	move.w	(a1)+,sr
+	move.w	sr,d4
+	and.l	#$FFFF,d4
+	check	d4,$2700,80
 
 ;------------------------------------------ 69-70: MOVEC to ISP, then (A7)
 	move.l	#$600DF00D,(SCR+$100).l

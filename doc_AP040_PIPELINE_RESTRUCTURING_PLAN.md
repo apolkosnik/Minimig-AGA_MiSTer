@@ -307,6 +307,27 @@ reads wr_busy while it presents a write, so membus now gives it wr_busy_w,
 the same with wren_b taken as set; the loop is gone from both tools.
 
 
+A plain load now leaves EA-fetch in the cycle its read goes out (lx): EX
+takes the data from the port as it arrives, holds until then, and owns its
+fault, which is abandoned and owed like a refused store's; port B is the
+load's until its data is in, so nothing younger reaches memory first. A
+plain load is one cycle rather than two locally (5.5 -> 5.0 on the zero-wait
+bus, 8.5 -> 8.0 with two wait states, 13.0 -> 12.5 with five), and two
+independent loads in a row are 2 rather than 4. The same for a read-modify-
+write was built and measured and is not in: locally 4 -> 3, but on the bus
+the store is then accepted in the cycle the read returns, which is the cycle
+membus would have used for a prefetch -- it takes none in a write's accept
+cycle, so a fetch can never overtake the write (d1373fc6) -- and RMW-then-ALU
+lost a cycle at every wait count (9 -> 10, 15 -> 16, 24 -> 25). It waits for
+a membus that can decide the prefetch against a registered write.
+
+The corpus found the one thing no bench had: MOVE <memory>,SR and
+MOVE <memory>,CCR, which decode marks as the ORI/ANDI-to-SR kind
+(is_immsr) and EX writes from eaf_operand_a -- sent on this way, they
+wrote the status register from a stale operand (MV2SR.B/.W in Basic,
+Default and IRQ). They wait for their data in EA-fetch as before, and
+t_agu.s 76-80 now have them.
+
 Primary files: EA-fetch, `ap040_pipe_membus.v`, `ap040_pipe_l1.v`, bus16 and CPU;
 include the FPU wrapper when moving its memory operations.
 

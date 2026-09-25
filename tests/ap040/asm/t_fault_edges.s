@@ -24,6 +24,11 @@
 ;        immediate -- the other store route on a pipelined core.
 ; 30-37  CLR and Scc on a write-protected page: written without being read,
 ;        refused, restarted -- once. ST (A0)+ leaves A0 one byte on, not two.
+; 46-54  A plain load from an invalid page -- one a pipelined core sends on
+;        to EX as its read goes out, so EX sees the fault after the
+;        instruction has left the stage that raises it -- then the same
+;        under T1: the frame is the load's own, its SSW a longword read,
+;        and it is traced once, after the restart has completed it.
 ; 38-45  MOVEM.L (A0),D1-D4 with D3's longword on an invalid page. The
 ;        handler finds D1 and D2 loaded and D3 and D4 as they were: the
 ;        faulted beat writes nothing, and nothing the exception reads after
@@ -284,6 +289,40 @@ tloop:
 	move.w	(last_ssw).l,d0
 	and.l	#$FF9F,d0		; SIZE is how the core read: not judged
 	chkl	d0,$1505,45		; CM + ATC + read + supervisor data
+
+;----------------- 46-53: a plain load faults, then the same under T1
+	move.l	#$0BEEF000,($6008).l	; page 6 is valid again here
+	move.l	#0,($4418).l		; and invalid
+	pflusha
+	moveq	#0,d5
+ld46:	move.l	($6008).l,d5		; refused, restarted
+	chkl	d5,$0BEEF000,46
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,9,47
+	move.l	(last_fa).l,d0
+	chkl	d0,$6008,48
+	moveq	#0,d0
+	move.w	(last_ssw).l,d0
+	chkl	d0,$0505,49		; ATC + long read + supervisor data
+	move.l	(last_pc).l,d0
+	chkl	d0,ld46,54		; the load's own address
+	move.l	#0,($4418).l
+	pflusha
+	clr.w	(cnt_trc).l
+	moveq	#0,d5
+	move.w	#$A700,sr		; T1
+ld50:	move.l	($6008).l,d5		; refused, restarted, then traced
+	move.w	#$2700,sr		; traced: T1 at its start
+	chkl	d5,$0BEEF000,50
+	moveq	#0,d0
+	move.w	(cnt_aerr).l,d0
+	chkl	d0,10,51
+	moveq	#0,d0
+	move.w	(cnt_trc).l,d0
+	chkl	d0,2,52			; not a third, for the refused attempt
+	move.l	(last_pc).l,d0
+	chkl	d0,ld50,53
 
 	moveq	#0,d0
 	movec	d0,tc

@@ -393,6 +393,7 @@ module ap040_ea_fetch
 	// EX abandoned its instruction on a refused store (ap040_execute.v), with
 	// that store: the access error is owed to the instruction's next arrival.
 	input             ex_aerr,
+	input             ex_aerr_rd,   // ...and it was a pipelined load's read (see lx)
 	input      [31:0] ex_st_addr,
 	input      [31:0] ex_st_data,
 	input       [1:0] ex_st_size,
@@ -527,6 +528,10 @@ module ap040_ea_fetch
 	output      [3:0] rf3_addr,
 	output     [31:0] rf3_data,
 	output reg        eaf_is_div,
+	// A pipelined load (restructuring plan, phase 5; see lx): EX takes its
+	// data from the port, and eaf_operand_a is not it.
+	output reg        eaf_ld_pend,
+	output reg        eaf_ld_sxw,
 	output reg        eaf_div_signed,
 	output reg        eaf_is_trapcc,
 	output reg        eaf_is_chk,
@@ -2102,6 +2107,37 @@ wire stop_takes_hold = eac_is_stop && !traced_now;
 // an ALU_MOVE of the finished byte or word. Operand B has to stay Dy: EX's
 // alu_sized takes a Byte/Word result's upper bits from it.
 wire eac_is_packop   = (eac_alu_op == `AP040_ALU_PACK) || (eac_alu_op == `AP040_ALU_UNPK);
+
+// ---- pipelined loads (restructuring plan, phase 5) ----
+// A plain load -- its address from EA-calculate, its data wanted only by
+// EX's ALU or multiplier -- leaves for EX in the cycle its read goes out,
+// rather than waiting here a cycle for the data, so the next instruction's
+// access can go out as that data arrives: one load per cycle rather than
+// one per two. EX takes the data from the port (eaf_ld_pend), holds until
+// it is in, and owns its fault: abandoned there and refetched, and taken
+// here on arrival as a refused store's is (owe). Until the data is in,
+// port B is the load's (ex_ld_busy, in port_taken), so nothing younger
+// reaches memory ahead of it. Not for the loads whose data this stage uses
+// -- a read-modify-write's, CHK's bound, DIV's divisor, CAS, PACK/UNPK, a
+// status-register source (MOVE <ea>,SR/CCR, which is eac_is_immsr from
+// memory: EX writes SR from eaf_operand_a) -- nor for one that is becoming
+// an exception.
+wire lx     = eac_agu_ok && eac_is_mem_src && !eac_is_store && !eac_st_only && !eac_is_rmw &&
+              !eac_immrmw && !eac_is_chk && !eac_is_div && !eac_is_packop && !eac_is_movesr &&
+              !eac_is_immsr && !cas && !xm && !mm && !exc_active;
+wire lx_now = mem_issue && lx;
+// Beside the output registers rather than in each of their branches, so no
+// branch can leave it stale: it is set exactly where the branch that sends
+// a pipelined load on is taken (the output block's flush, then !stall_in,
+// then hold_hazard ahead of the issue).
+always @(posedge clk)
+	if (!nreset) begin
+		eaf_ld_pend <= 1'b0;
+		eaf_ld_sxw  <= 1'b0;
+	end else if (ce && !stall_in) begin
+		eaf_ld_pend <= !flush && !hold_hazard && lx_now;
+		eaf_ld_sxw  <= eac_sxt_w;
+	end
 // EXG and BTST Dn,#imm (milestone 115) leave here as ALU_MOVE and ALU_BTST.
 wire eac_is_exgop    = (eac_alu_op == `AP040_ALU_EXG);
 wire eac_is_btstr    = (eac_alu_op == `AP040_ALU_BTSTR);
@@ -2181,7 +2217,7 @@ always @(posedge clk)
 	end else if (ce) begin
 		if (flush) rd_out <= 1'b0;
 		else if (l1_rd_b) begin
-			rd_out    <= 1'b1;
+			rd_out    <= !lx_now;   // a pipelined load's return is EX's
 			rdq_a     <= l1_addr_b;
 			rdq_sz    <= l1_size_b;
 			rdq_fc    <= l1_fc_ovr ? l1_fc_val : {l1_sup_b, 2'b01};
@@ -2390,7 +2426,7 @@ assign fmterr_now = ret_done && !ret_fmt_ok && !eac_is_rtr;   // RTR's second wo
 // it is not lost, it is late, which is why two NOPs "fixed" it. Waiting
 // puts the read in the commit cycle, where the auxiliary bypass answers
 // it. MOVEC to a stack pointer is setup code, so the cost is nothing.
-assign eaf_stall = stall_in || hold_hazard || mem_issue || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
+assign eaf_stall = stall_in || hold_hazard || (mem_issue && !lx) || (mem_pending && !l1_rvalid_b) || wr_stall || exc_stall ||
                    ret_stall || port_taken || mvm_stall || mvp_stall || bf_stall || ck_stall || m16_stall ||
                    c2_stall || fp_stall || pm_stall || mc_stall ||
                    (eac_valid && xm && !xm_have) ||
@@ -3112,7 +3148,18 @@ always @(posedge clk) begin
 		// The access error EX owes this stage (see owe): set by the refusal,
 		// whose flush clears everything else here; spent when its entry
 		// ends, and dropped if anything else arrives first.
-		if (ex_aerr) begin
+		if (ex_aerr && ex_aerr_rd) begin
+			// A pipelined load's read: the one this stage issued last, whose
+			// address, size and function code rdq_* still hold -- nothing
+			// else has reached the port since (port_taken).
+			owe     <= 1'b1;
+			owe_pc  <= eaf_pc;
+			owe_fa  <= rdq_a;
+			owe_wd  <= 32'd0;
+			owe_ssw <= {3'b000, 1'b0, l1_flt_ma, !l1_flt_bus, 1'b0, 1'b1, 1'b0,
+			            (rdq_sz == `AP040_SZ_B) ? 2'b01 : (rdq_sz == `AP040_SZ_W) ? 2'b10 : 2'b00,
+			            2'b00, rdq_fc};
+		end else if (ex_aerr) begin
 			owe     <= 1'b1;
 			owe_pc  <= eaf_pc;
 			owe_fa  <= ex_st_addr;
@@ -3233,7 +3280,7 @@ always @(posedge clk) begin
 				// next cycle, by which time the MOVEC has committed and
 				// the auxiliary bypass answers its read.
 				eaf_valid      <= 1'b0;
-			end else if (mem_issue) begin
+			end else if (mem_issue && !lx) begin
 				eaf_valid   <= 1'b0;
 				mem_pending <= 1'b1;
 				cas_ea      <= ea_target;
@@ -3247,7 +3294,9 @@ always @(posedge clk) begin
 				mem_pending <= 1'b0;
 				xm_have     <= 1'b1;
 				xm_src      <= mem_lane;
-			end else if (mem_complete) begin
+			end else if (mem_complete || lx_now) begin
+				// ...or a pipelined load leaving as its read goes out (lx):
+				// the same fields, with mem_lane unused -- EX has the data.
 				eaf_valid      <= eac_valid;
 				eaf_pc         <= eac_pc;
 				eaf_next_pc    <= eac_next_pc;
