@@ -26,6 +26,7 @@ top="${2:-ap040_pipe_core}"
 rtlroot="$(cd "$here/../../../rtl" && pwd)"
 sed -e "s#\.\./\.\./\.\./rtl/ap040_pipe#$rtl#g" -e "s#\.\./\.\./\.\./rtl/ap040#$rtl040#g" \
     -e "s#\.\./\.\./\.\./rtl/bram.vhd#$rtlroot/bram.vhd#g" \
+    -e "s#\.\./\.\./\.\./tests/ap040#$here/..#g" \
     -e "s#TOP_LEVEL_ENTITY ap040_pipe_core#TOP_LEVEL_ENTITY $top#" "$here/pipe.qsf" > "$work/pipe.qsf"
 cp "$here/pipe.sdc" "$here/pipe.qpf" "$here/paths40.tcl" "$work/"; cd "$work"
 Q=/opt/intelFPGA_lite/17.0/quartus/bin; echo "quartus pid $$ in $work"
