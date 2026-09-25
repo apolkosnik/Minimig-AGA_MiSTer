@@ -73,8 +73,7 @@ Special accesses, each carried to the DMU as request metadata (below):
 - MOVES to SFC/DFC $2/$6 becomes a data access in $1/$5 and is handled as
   any data access, cache included; $0, $3, $4 and $7 are alternate-space
   accesses, used untranslated as physical addresses (3.2, Table 3-2), and
-  treated here as cache-inhibited. (The pipe's MMU currently translates
-  alternate-space MOVES; stage A corrects that.)
+  treated here as cache-inhibited (both cores since stage A2).
 
 CINV (line, page, all; IC, DC, BC) invalidates, discarding dirty data;
 CPUSH pushes dirty data lines, then invalidates. Neither depends on CACR.
@@ -215,15 +214,15 @@ A. Translation at the ports: I and D lookup ports on the one ATC RAM, the
    two steps: A1, the translation moved (done, "Stage A as built": the DMU
    at port B; the fetch stream translated by membus until the IMU comes in
    B), and A2, alternate-space MOVES ($0/$3/$4/$7) untranslated and $2/$6
-   on the bus as data, with its own test, the one intended change of
-   behaviour. (The sequential core translates them too; A2 makes the
-   pipelined core the one that follows 3.2.) A2 waits on a decision:
-   t_mmu.s tests 55-56, which both cores run, write with MOVES to FC 0 on
-   a write-protected page and expect the MMU's access fault (TT=10, TM=0 in
-   the SSW, after WinUAE's mmu_bus_error); under 3.2 that write is
-   untranslated and lands. Following the manual on the pipelined core means
-   changing those tests, and then either the sequential core's MMU as well
-   or the two cores' expectations apart.
+   on the bus as data, the one intended change of behaviour -- made in
+   both cores, as the user decided: ap040_pipe_dmu.v and membus for the
+   pipelined core, ap040_mmu.v (and ap040_core.v's page split) for the
+   sequential one. t_mmu.s tests 55-56 had expected the MMU's access fault
+   on a MOVES to FC 0 of a write-protected page (TT=10, TM=0, after
+   WinUAE's mmu_bus_error); under 3.2 that write is untranslated and lands,
+   and they now say so. t_moves_alt.s tests each space on both cores, the
+   bus function code of $2, and the TT/TM an alternate-space bus error
+   reports.
 B. The instruction cache: half-line fills and reads, the four-word fetch
    queue, CACR IE, CINV/CPUSH on IC, snoop invalidation.
 C. The data cache, write-through only: fills with the read buffer, write-hit

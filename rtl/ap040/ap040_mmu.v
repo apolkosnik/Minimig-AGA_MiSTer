@@ -242,6 +242,14 @@ wire ttr_hit   = ttr_hit_a | ttr_hit_b;
 wire ttr_w     = ttr_hit_a ? ttra[2]   : ttrb[2];
 wire [1:0] ttr_cm = ttr_hit_a ? ttra[6:5] : ttrb[6:5];
 
+// MOVES to an alternate address space -- SFC/DFC $0, $3, $4 or $7 -- is
+// "immediately used as a physical address without translation" (MC68040UM
+// 3.2, Table 3-2): no ATC lookup, no table search, no protection, and so no
+// MMU fault; cache-inhibited here. MOVES to $2 or $6 is a data reference
+// in $1 or $5, translated as any data access, and goes on the bus as one.
+wire a_alt   = !c_instr && ((c_fc[1:0] == 2'b00) || (c_fc[1:0] == 2'b11));
+wire xl_skip = ttr_hit || a_alt;   // the address is already physical
+
 // PTEST uses DFC to select supervisor/user and instruction/data space.
 wire        pt_instr = (pt_fc[1:0] == 2'b10);
 wire [31:0] pt_ttra  = pt_instr ? itt0 : dtt0;
@@ -255,19 +263,19 @@ wire        pt_ttr_w = pt_ttr_a ? pt_ttra[2] : pt_ttrb[2];
 // translation decision
 //---------------------------------------------------------------------------
 
-wire ttr_fault = ttr_hit && c_write && ttr_w;
-wire atc_fault = tc_e && !ttr_hit && atc_hit &&
+wire ttr_fault = ttr_hit && !a_alt && c_write && ttr_w;
+wire atc_fault = tc_e && !xl_skip && atc_hit &&
                  (!h_r || (c_write && h_w) || (!a_super && h_s));
 // write to a clean page runs a table search to set the M bit
 wire atc_mmiss = atc_hit && h_r && c_write && !h_m && !h_w;
 
 // A copied hit is already a translation verdict; a miss still waits for
 // the synchronous lookup before starting a table walk.
-wire need_walk = tc_e && !ttr_hit && (lk_fresh || u_hit) && (!atc_hit || atc_mmiss) &&
+wire need_walk = tc_e && !xl_skip && (lk_fresh || u_hit) && (!atc_hit || atc_mmiss) &&
                  !atc_fault;
 
 wire [31:0] pa_out =
-	ttr_hit ? c_addr :
+	xl_skip ? c_addr :
 	(tc_e && atc_hit) ? (tc_p ? {h_pa[19:1], c_addr[12], c_addr[11:0]}
 	                          : {h_pa, c_addr[11:0]})
 	: c_addr;
@@ -386,7 +394,7 @@ wire w_denied = !w_pt && ((w_user && w_desc[7]) ||
 // is fresh: with a stale pipe need_walk/atc_fault are still low and the
 // request would otherwise pass untranslated.
 wire pass_ok = c_req && !c_flt && !need_walk && !ttr_fault && !atc_fault &&
-               (!tc_e || ttr_hit || lk_fresh || u_hit) &&
+               (!tc_e || xl_skip || lk_fresh || u_hit) &&
                (wst == W_IDLE) && !w_active && !pf_req && !pt_req;
 
 assign m_req   = pass_ok;
@@ -395,7 +403,7 @@ assign m_instr = c_instr;
 assign m_size  = c_size;
 assign m_addr  = pa_out;
 assign m_wdata = c_wdata;
-assign m_fc    = c_fc;
+assign m_fc    = (!c_instr && (c_fc[1:0] == 2'b10)) ? {c_fc[2], 2'b01} : c_fc;
 
 // w_issued inserts a request-low cycle before each descriptor transaction.
 // Besides making the interface unambiguous for a level-handshake backend,
@@ -414,7 +422,7 @@ assign c_ack   = m_ack;
 assign c_rdata = m_rdata;
 
 assign phys_addr     = pa_out;
-assign cache_inhibit = ttr_hit ? ttr_cm[1]
+assign cache_inhibit = a_alt ? 1'b1 : ttr_hit ? ttr_cm[1]
                      : (tc_e && atc_hit) ? h_cm[1] : 1'b0;
 assign m_nocache     = cache_inhibit;
 

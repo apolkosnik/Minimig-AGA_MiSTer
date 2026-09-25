@@ -63,6 +63,8 @@ def U(top, sources, legs): return {"top": top, "sources": sources, "legs": legs}
 UNIT_RUNS = {
     "atc_reuse":          U("tb_ap040_atc_reuse", [HERE / "tb_ap040_atc_reuse.v", HERE / "sim_dpram.v", AP / "ap040_mmu.v"], [("atc_reuse", [], False)]),
     "atc_reuse_ce4":      U("tb_ap040_atc_reuse", [HERE / "tb_ap040_atc_reuse.v", HERE / "sim_dpram.v", AP / "ap040_mmu.v"], [("atc_reuse_ce4", [], False)]),
+    "mmu_alt":            U("tb_ap040_mmu_alt", [HERE / "tb_ap040_mmu_alt.v", HERE / "sim_dpram.v", AP / "ap040_mmu.v"], [("mmu_alt", [], False)]),
+    "mmu_alt_ce4":        U("tb_ap040_mmu_alt", [HERE / "tb_ap040_mmu_alt.v", HERE / "sim_dpram.v", AP / "ap040_mmu.v"], [("mmu_alt_ce4", [], False)]),
     "reset":              U("tb_ap040_reset", [HERE / "tb_ap040_reset.v", HERE / "sim_dpram.v", *SRC], [("reset", [], False)]),
     "double_fault":       U("tb_ap040_double_fault", [HERE / "tb_ap040_double_fault.v", HERE / "sim_dpram.v", *SRC], [("double_fault", [], False)]),
     "walker_cdc":         U("tb_ap040_walker_cdc", [HERE / "tb_ap040_walker_cdc.v", AP / "ap040_walker_cdc.v"], [("walker_cdc", [], False)]),
@@ -121,7 +123,7 @@ UNIT_RUNS = {
                               [("cache_snoop_post_x_ce4", [], False),
                                ("cache_snoop_post_x_ce4_neg_lkw", ["+inj_look_whole"], True)]),
 }
-UNIT_PARAMS = {"atc_reuse_ce4": ["-GCE_DIV=4"], "sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"],
+UNIT_PARAMS = {"atc_reuse_ce4": ["-GCE_DIV=4"], "mmu_alt_ce4": ["-GCE_DIV=4"], "sdram32_rp1": ["-GREAD_PIPE=1"], "cache_snoop_ce4": ["-GCE_DIV=4"],
                "cache_snoop_x": ["+define+SNOOP_MIXED_X"],
                "cache_snoop_x_ce4": ["+define+SNOOP_MIXED_X", "-GCE_DIV=4"],
                "cache_snoop_post": ["-GPOST_OK=1"],

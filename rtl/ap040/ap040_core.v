@@ -1696,7 +1696,10 @@ endtask
 wire  [2:0] m_nbytes = (m_size == `AP040_SZ_B) ? 3'd1 :
                        (m_size == `AP040_SZ_W) ? 3'd2 : 3'd4;
 wire [31:0] m_pgmask = tc[14] ? 32'h0000_1FFF : 32'h0000_0FFF;
-wire        m_cross  = tc[15] &&
+// MOVES to an alternate space is untranslated (MC68040UM 3.2; ap040_mmu.v's
+// a_alt): nothing to split at a page, nothing to probe.
+wire        m_alt    = fc_ovr_v && ((fc_ovr[1:0] == 2'b00) || (fc_ovr[1:0] == 2'b11));
+wire        m_cross  = tc[15] && !m_alt &&
                        (((m_addr_r & m_pgmask) + {29'd0, m_nbytes}) >
                         (m_pgmask + 32'd1));
 
@@ -1708,7 +1711,7 @@ function cross_of;
 	reg    [2:0] nb;
 	begin
 		nb = (size == `AP040_SZ_B) ? 3'd1 : (size == `AP040_SZ_W) ? 3'd2 : 3'd4;
-		cross_of = tc[15] && (((a & m_pgmask) + {29'd0, nb}) > (m_pgmask + 32'd1));
+		cross_of = tc[15] && !m_alt && (((a & m_pgmask) + {29'd0, nb}) > (m_pgmask + 32'd1));
 	end
 endfunction
 

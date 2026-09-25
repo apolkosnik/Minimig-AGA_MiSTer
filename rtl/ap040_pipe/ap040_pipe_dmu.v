@@ -57,6 +57,13 @@
 // M, and only then accepted and its bytes posted. Every table search a     //
 // write needs is thereby over before it is accepted, and the walker never  //
 // runs while an accepted write has still to reach memory (wr_pend).        //
+//                                                                          //
+// MOVES spaces (MC68040UM 3.2, Table 3-2; stage A2). $0, $3, $4 and $7 are //
+// alternate address spaces: the address is physical, used without          //
+// translation -- no ATC lookup, no search, no protection, no MMU fault --   //
+// and not split at a page. $2 and $6 are converted to the data spaces $1   //
+// and $5: translated as any data access, and on the bus as data (the bus   //
+// controller converts what it is given; this unit its translated reads).  //
 //--------------------------------------------------------------------------//
 
 `include "ap040_pipe_defs.svh"
@@ -154,6 +161,22 @@ function sup_of;
 		sup_of = ovr ? fcv[2] : sup;
 	end
 endfunction
+// MOVES to an alternate space: physical, untranslated.
+function alt_of;
+	input       ovr;
+	input [2:0] fcv;
+	begin
+		alt_of = ovr && ((fcv[1:0] == 2'b00) || (fcv[1:0] == 2'b11));
+	end
+endfunction
+// The function code on the bus: MOVES to program space is a data reference.
+function [2:0] fc_bus;
+	input [2:0] fcv;
+	begin
+		fc_bus = (fcv[1:0] == 2'b10) ? {fcv[2], 2'b01} : fcv;
+	end
+endfunction
+wire c_alt = alt_of(c_fc_ovr, c_fc_val);
 
 //---------------------------------------------------------------------------
 // the write slot (translation can refuse writes)
@@ -179,7 +202,7 @@ wire       w_slot  = (ws != WS_FREE);
 // Crosses a page: from the latched address, not the CPU's (which settles late
 // in its cycle). TC cannot change while the slot holds a write: a MOVEC to it
 // waits for the memory side to be idle.
-wire       w_x     = tc_e && crosses(w_la, w_size, pg_mask);
+wire       w_x     = tc_e && !alt_of(w_ovr, w_fcv) && crosses(w_la, w_size, pg_mask);
 wire [31:0] w_pg2  = (w_la | pg_mask32) + 32'd1;
 wire       w_wants = (ws == WS_CHK1) || (ws == WS_CHK2) || (ws == WS_T1) || (ws == WS_T2);
 // Taken into the slot as it arrives, and translated from there.
@@ -218,7 +241,9 @@ reg        flt_bus_r, flt_ma_r;
 // Untranslated, straight to the bus controller; otherwise latched here.
 wire        r_thru  = !xlat && c_rd && (rs == RS_IDLE) && !w_slot;
 wire        r_new   = c_rd && (rs == RS_IDLE) && !r_thru;
-wire        r_x     = tc_e && crosses(r_la, r_size, pg_mask);   // as w_x
+// As w_x; an alternate-space read never consults it (it goes from the
+// latch straight to RS_RDY, whole).
+wire        r_x     = tc_e && crosses(r_la, r_size, pg_mask);
 wire        r_wants = (rs == RS_XL) || (rs == RS_XL2);
 wire [31:0] r_xaddr = (rs == RS_XL2) ? ((r_la | pg_mask32) + 32'd1) : r_la;
 
@@ -244,7 +269,8 @@ wire r_flt  = r_on && d_flt;
 
 // Accepted -- wr_busy low -- the cycle after its translation (crossing: its
 // second page's) passes.
-wire w_passed = w_pass && (((ws == WS_CHK1) && !w_x) || (ws == WS_T2));
+// An alternate-space write needs no translation: accepted as it is taken.
+wire w_passed = (w_take && c_alt) || (w_pass && (((ws == WS_CHK1) && !w_x) || (ws == WS_T2)));
 
 //---------------------------------------------------------------------------
 // the bus controller's port B
@@ -285,7 +311,7 @@ assign m_fc_val = s_post ? w_fcv : c_fc_val;
 assign m_rx      = r_send_x || r_send_q || r_issue;
 assign m_rx_addr = r_send_x ? d_pa : r_send_q ? r_pa1 : r_byte_pa;
 assign m_rx_size = r_issue ? `AP040_SZ_B : r_size;
-assign m_rx_fc   = r_ovr ? r_fcv : {r_sup, 2'b01};
+assign m_rx_fc   = r_ovr ? fc_bus(r_fcv) : {r_sup, 2'b01};
 
 //---------------------------------------------------------------------------
 // toward the CPU: registers, and the bus controller's registered answers
@@ -337,7 +363,8 @@ always @(posedge clk) begin
 			w_fcv  <= c_fc_val;
 			w_bi   <= 2'd0;
 			w_last <= last_of(c_size);
-			ws     <= WS_CHK1;
+			if (c_alt) begin w_pa1 <= c_addr; ws <= WS_POST; end
+			else ws <= WS_CHK1;
 		end
 		case (ws)
 		WS_CHK1: if (w_flt) begin
@@ -387,7 +414,9 @@ always @(posedge clk) begin
 			own     <= 1'b1;         // answered here until it is sent
 			own_v   <= 1'b0;
 			own_flt <= 1'b0;
-			rs      <= RS_XL;
+			// an alternate space needs no translation: it waits only for the slot
+			if (c_alt) begin r_pa1 <= c_addr; rs <= RS_RDY; end
+			else rs <= RS_XL;
 		end
 		case (rs)
 		RS_XL: if (r_flt) begin

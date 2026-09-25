@@ -31,8 +31,10 @@
 //      does not hold: its search waits for the write to land. Throughout,  //
 //      no table-walker access starts while a write the memory side has     //
 //      committed to has not reached the memory.                           //
-//   5. A translated read goes on the bus with its own function code: a     //
-//      user read, and a supervisor's MOVES from user data, both FC 1.      //
+//   5. A read goes on the bus with its own function code: a user read,    //
+//      and a supervisor's MOVES from user data, both FC 1; a MOVES from    //
+//      user program space as user data, FC 1 (MC68040UM 3.2), translated   //
+//      and -- translation off -- straight through, read and written.       //
 //   6. A fetch held while another read is on the bus is sent later, and    //
 //      may then go through the MMU's peek at its latest instruction        //
 //      translation. When that translation is a page's nonresident entry    //
@@ -238,12 +240,13 @@ always @(posedge clk) if (nreset) begin
 	if (mem_ack && mem_write) committed = committed - sz_bytes(mem_size);
 end
 
-// The function code of each data read the bus controller starts.
+// The function code of each data read and write the bus controller starts.
 reg       mreq_q = 1'b0;
-reg [2:0] last_rd_fc = 3'd0;
+reg [2:0] last_rd_fc = 3'd0, last_wr_fc = 3'd0;
 always @(posedge clk) begin
 	mreq_q <= mem_req;
 	if (mem_req && !mreq_q && !mem_write && !mem_instr) last_rd_fc <= mem_fc;
+	if (mem_req && !mreq_q &&  mem_write)               last_wr_fc <= mem_fc;
 end
 
 //----------------------------------------------------------------- driver
@@ -392,6 +395,22 @@ initial begin
 	c_fc_ovr = 1'b0;
 	if (rd_flt) fail("5: a MOVES read from user data was refused");
 	if (last_rd_fc !== 3'd1) fail("5: a MOVES read from user data did not go on the bus as FC 1");
+	c_fc_ovr = 1'b1; c_fc_val = 3'd2;
+	read_start(32'h0000_5004);
+	read_wait;
+	if (rd_flt) fail("5: a MOVES read from user program space was refused");
+	if (last_rd_fc !== 3'd1) fail("5: a translated MOVES read from program space did not go on the bus as FC 1");
+	tc = 32'd0;                          // untranslated: straight to the bus controller
+	repeat (4) step;
+	read_start(32'h0000_5004);
+	read_wait;
+	if (last_rd_fc !== 3'd1) fail("5: an untranslated MOVES read from program space did not go on the bus as FC 1");
+	write_hold(32'h0000_5014, 32'h2222_2222);
+	repeat (20) step;
+	if (last_wr_fc !== 3'd1) fail("5: an untranslated MOVES write to program space did not go on the bus as FC 1");
+	c_fc_ovr = 1'b0;
+	tc = 32'h0000_8000;
+	repeat (4) step;
 
 	//------------------------------------------------------------- test 6
 	repeat (20) step;

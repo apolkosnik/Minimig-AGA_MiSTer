@@ -318,6 +318,14 @@ function [2:0] fc_of;
 		             : (is_instr ? `AP040_FC_USER_PROG  : `AP040_FC_USER_DATA);
 	end
 endfunction
+// MOVES's function code on the bus: to program space ($2, $6) it is a data
+// reference in $1 or $5 (MC68040UM 3.2, Table 3-2); the others as given.
+function [2:0] fc_moves;
+	input [2:0] fcv;
+	begin
+		fc_moves = (fcv[1:0] == 2'b10) ? {fcv[2], 2'b01} : fcv;
+	end
+endfunction
 
 // This cycle's view of the window, with a prefetch that returns now already
 // in it -- a request in the same cycle must see it.
@@ -517,7 +525,7 @@ always @(posedge clk) begin
 			b_bi     <= 2'd0;
 			b_last   <= last_of(rx ? rx_size : size_b);
 			b_acc    <= 24'd0;
-			b_fc     <= rx ? rx_fc : fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
+			b_fc     <= rx ? rx_fc : fc_ovr ? fc_moves(fc_ovr_val) : fc_of(1'b0, sup_b);
 			b_pend   <= 1'b1;
 			rvalid_b <= 1'b0;
 		end
@@ -529,7 +537,7 @@ always @(posedge clk) begin
 			w_pb   <= (xlat_e && crosses(address_b, size_b, pg_mask)) ? 2'd1 : 2'd0;
 			w_bi   <= 2'd0;
 			w_last <= last_of(size_b);
-			w_fc   <= fc_ovr ? fc_ovr_val : fc_of(1'b0, sup_b);
+			w_fc   <= fc_ovr ? fc_moves(fc_ovr_val) : fc_of(1'b0, sup_b);
 			w_pend <= 1'b1;
 			w_tent <= wr_sync;
 		end
