@@ -283,6 +283,30 @@ single-issue, ordered architectural completion as the initial design.
 
 ## Phase 5 — Stream ordered memory work
 
+Progress (2026-09-24): the local targets below are met -- eight-register
+MOVEM load 19 -> 12 cycles, store 18 -> 11, MOVE16 18 -> 12 -- with no case
+slower. A run of loads now issues each next read in the cycle the last one's
+data arrives (MOVEM, MOVEP, CHK2/CMP2's two bounds, CAS2's two operands);
+the L1 model's write buffer takes a new write in the cycle it drains the
+last one, so a run of stores is one per cycle; and MOVE16 reads its line
+into a four-longword buffer back to back and then writes it, the sequential
+core's own order. FMOVEM's reads are the FPU wrapper's microcoded read
+subroutine and wait for 6B.
+
+The bus16 top meets 40 MHz: 41.05 MHz, +0.642 ns at 25 ns (from 35.84 MHz,
+-2.900 at d1373fc6, and 38.52, -0.959 with phase 4's step 3). Two changes.
+membus's write snoop no longer works out which of two longwords a write
+reaches: it takes both -- a rare extra refetch -- which took the write's
+size and an adder off the worst path (EX's SR forward, the stack bank, the
+address arithmetic, the snoop, pf_base). And a combinational loop that had
+always been in the RTL -- EX's read-modify-write waits on wr_busy, which
+membus formed from wren_b, which EA-fetch formed from its stalls, which EX
+formed; Verilator's UNOPTFLAT on stall_self -- was synthesized as one for
+the first time (22 nodes, a 17.7 ns LOOP element, 26 MHz). The CPU only
+reads wr_busy while it presents a write, so membus now gives it wr_busy_w,
+the same with wren_b taken as set; the loop is gone from both tools.
+
+
 Primary files: EA-fetch, `ap040_pipe_membus.v`, `ap040_pipe_l1.v`, bus16 and CPU;
 include the FPU wrapper when moving its memory operations.
 
@@ -290,11 +314,11 @@ include the FPU wrapper when moving its memory operations.
   address, size, register destination, final-beat and restart information.
   Support response consumption and next-request acceptance without an empty
   bookkeeping cycle when the downstream memory can sustain it.
-- [ ] Allow store-buffer consumption and replacement in the same clock when
-  legal. Preserve byte overlap, ordering, function codes and fault attribution.
+- [x] Allow store-buffer consumption and replacement in the same clock when
+  legal (the L1 model; membus's bus is one transaction at a time). Preserve byte overlap, ordering, function codes and fault attribution.
 - [ ] Feed MOVEM, paired memory operations, CHK2/CMP2 and FMOVEM through this
   engine. Do not expand all their transfer helpers into separate global stalls.
-- [ ] Give MOVE16 a small line buffer and consecutive-transfer path. Only use
+- [x] Give MOVE16 a small line buffer and consecutive-transfer path. Only use
   bursts where the downstream interface and memory attributes permit them.
 - [ ] Keep device/strongly ordered accesses conservative. Preserve MOVEP's
   spaced byte transactions, bitfield boundaries, and CAS/CAS2 atomic ownership.

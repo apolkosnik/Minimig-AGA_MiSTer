@@ -130,7 +130,7 @@ integer errors = 0;
 // tb_ap040_pipe_immmem.v, where the rule this enforces was established.
 integer writes = 0;
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid)
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy)
 		writes = writes + 1;
 
 initial begin

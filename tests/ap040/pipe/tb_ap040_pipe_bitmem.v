@@ -85,7 +85,7 @@ integer btst_writes = 0;
 // The L1 latches a write exactly when wren_b is high and its one-entry
 // buffer is empty (tb_ap040_pipe_storeonce.v).
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid &&
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy &&
 	    (dut.u_l1.address_b == 32'h0000_080C || dut.u_l1.address_b == 32'h0000_0840))
 		btst_writes = btst_writes + 1;
 

@@ -863,9 +863,11 @@ wire [31:0] an_wr_data = fp           ? fp_w2_val            :
 //
 // Stores take one cycle per register when the write buffer is free and
 // retry while it is not, exactly as an exception frame beat does. Loads
-// take two -- drive the address, then capture l1_q_b the cycle after --
-// because the L1 registers its read data. Pipelining the load beats is
-// left for when MOVEM is on a path that cares.
+// drive an address and capture l1_q_b the cycle after, because the L1
+// registers its read data -- and the next address goes out in that same
+// cycle (restructuring plan, phase 5), so a run of loads is one register
+// per cycle rather than one per two. Not past a faulted beat: the fault
+// abandons the instruction, and nothing of it may still be on the port.
 reg         mvm_active;
 reg  [15:0] mvm_mask;
 reg  [31:0] mvm_addr;
@@ -929,7 +931,8 @@ wire [31:0] mvm_start    = cm_use          ? cm_ea :
 // stands, and only a cycle where wr_busy reads low actually advances.
 wire mvm_st_want = mvm_active && !mvm_dir && mvm_any && !port_taken;
 wire mvm_st_go   = mvm_st_want && !l1_wr_busy;
-wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !mvm_rd_pend && !port_taken;
+wire mvm_ld_go   = mvm_active &&  mvm_dir && mvm_any && !port_taken &&
+                   (!mvm_rd_pend || (l1_rvalid_b && !l1_rflt_b));
 
 // Finished: nothing left in the mask and no read still in flight. On that
 // cycle the instruction falls through to the ordinary completion path
@@ -958,7 +961,10 @@ wire  [7:0] mvp_byte   = (mvp_left == 3'd4) ? operand_b[31:24] :
                          (mvp_left == 3'd2) ? operand_b[15:8]  : operand_b[7:0];
 wire        mvp_st_want = mvp_active &&  mvp_wr && (mvp_left != 3'd0) && !port_taken;
 wire        mvp_st_go   = mvp_st_want && !l1_wr_busy;
-wire        mvp_ld_go   = mvp_active && !mvp_wr && (mvp_left != 3'd0) && !mvp_rd_pend && !port_taken;
+// A load's next byte goes out in the cycle the last one arrives, as MOVEM's
+// do (phase 5): still one transaction per byte, each at its own address.
+wire        mvp_ld_go   = mvp_active && !mvp_wr && (mvp_left != 3'd0) && !port_taken &&
+                          (!mvp_rd_pend || (l1_rvalid_b && !l1_rflt_b));
 wire        mvp_fin     = mvp_active && (mvp_left == 3'd0) && !mvp_rd_pend;
 wire        mvp_stall   = eac_valid && mvp && !mvp_fin && !trace_hold && !ae_busy;
 
@@ -1051,8 +1057,11 @@ function [31:0] ck_sx;
 	end
 endfunction
 wire [31:0] ck_step   = (eac_size == `AP040_SZ_B) ? 32'd1 : (eac_size == `AP040_SZ_W) ? 32'd2 : 32'd4;
-wire [31:0] ck_addr   = (ck_ph == CK_RD2) ? (ck_ea + ck_step) : ck_ea;
-wire        ck_ld_go  = ck_active && ((ck_ph == CK_RD1) || (ck_ph == CK_RD2)) && !port_taken;
+// The upper bound's read goes out in the cycle the lower one arrives (phase
+// 5), unless that one faulted; otherwise from CK_RD2, as before.
+wire        ck_rd2_early = (ck_ph == CK_RD1W) && l1_rvalid_b && !l1_rflt_b;
+wire [31:0] ck_addr   = ((ck_ph == CK_RD2) || (ck_ph == CK_RD1W)) ? (ck_ea + ck_step) : ck_ea;
+wire        ck_ld_go  = ck_active && ((ck_ph == CK_RD1) || (ck_ph == CK_RD2) || ck_rd2_early) && !port_taken;
 wire        ck_fin    = ck_active && (ck_ph == CK_DONE);
 wire        ck_stall  = eac_valid && ck && !ck_fin && !trace_hold && !ae_busy;
 wire signed [31:0] ck_rn = ck_an ? operand_b_ea : ck_sx(operand_b_ea, eac_size);   // a verdict: see addr_hz
@@ -1064,26 +1073,36 @@ wire        ck2_trap  = eac_valid && ck && ck_chk && ck_fin && ck_c;
 
 // ---------------------------------------------------------------- MOVE16
 // (milestone 117; see ap040_decode.v). Both lines aligned down to sixteen
-// bytes and latched at the start, then four rounds of one longword read and
-// one longword write. ap040_core.v reads all four before writing; two
-// aligned lines are the same line or disjoint, so the order changes
-// nothing. It retires through the ordinary branch: the source An's +16 on
-// port 2, and for (Ax)+,(Ay)+ Ay's on the main port, through the
-// eaf_is_xm register-result route. Ax = Ay makes the two writes the same
-// value, and the main port wins -- the one +16 of ap040_core.v's S_M16_INC.
-localparam M16_RD = 2'd0, M16_RDW = 2'd1, M16_WR = 2'd2, M16_DONE = 2'd3;
+// bytes and latched at the start, then the source line read into a line
+// buffer and the buffer written out (restructuring plan, phase 5): the four
+// reads back to back, each next one issued in the cycle the last one's data
+// arrives, then the four writes, one per cycle the write buffer takes one --
+// ten port cycles for the line where rounds of read, wait and write took
+// twelve and more. This is ap040_core.v's own order, all four read before
+// any is written, so a read that faults has written nothing. It retires
+// through the ordinary branch: the source An's +16 on port 2, and for
+// (Ax)+,(Ay)+ Ay's on the main port, through the eaf_is_xm register-result
+// route. Ax = Ay makes the two writes the same value, and the main port
+// wins -- the one +16 of ap040_core.v's S_M16_INC.
+localparam M16_RD = 2'd0, M16_WR = 2'd2, M16_DONE = 2'd3;
 wire        m16       = eac_m16[3];
 wire  [2:0] m16_form  = eac_m16[2:0];
 wire        m16_pp    = m16 && (m16_form == 3'd4);
 wire        m16_an_up = m16 && ((m16_form == 3'd0) || (m16_form == 3'd1) || m16_pp);
 reg         m16_active;
 reg   [1:0] m16_ph, m16_i;
-reg  [31:0] m16_s, m16_d, m16_buf;
+reg  [31:0] m16_s, m16_d;
+reg  [31:0] m16_q [0:3];    // the line buffer
+reg   [2:0] m16_n;          // reads issued
+reg   [1:0] m16_k;          // ...and the next one to arrive
+reg         m16_rd_pend;    // one is in flight
 wire [31:0] m16_src_c = ((m16_form == 3'd1) || (m16_form == 3'd3)) ? eac_imm : operand_a;
 wire [31:0] m16_dst_c = ((m16_form == 3'd0) || (m16_form == 3'd2)) ? eac_imm :
                         m16_pp ? operand_b : operand_a;
-wire [31:0] m16_addr  = ((m16_ph == M16_WR) ? m16_d : m16_s) + {28'd0, m16_i, 2'b00};
-wire        m16_ld_go   = m16_active && (m16_ph == M16_RD) && !port_taken;
+wire [31:0] m16_addr  = (m16_ph == M16_WR) ? (m16_d + {28'd0, m16_i, 2'b00}) : (m16_s + {27'd0, m16_n, 2'b00});
+wire        m16_ld_go   = m16_active && (m16_ph == M16_RD) && (m16_n != 3'd4) && !port_taken &&
+                          (!m16_rd_pend || (l1_rvalid_b && !l1_rflt_b));
+wire        m16_arrive  = m16_active && m16_rd_pend && l1_rvalid_b && !l1_rflt_b;
 wire        m16_st_want = m16_active && (m16_ph == M16_WR) && !port_taken;
 wire        m16_st_go   = m16_st_want && !l1_wr_busy;
 wire        m16_fin     = m16_active && (m16_ph == M16_DONE);
@@ -1150,12 +1169,14 @@ wire  [3:0] c2_rc    = (c2_ph == C2_R1)  ? c2x[31:28] :
                        (c2_ph == C2_DU1) ? {1'b0, c2x[24:22]} : {1'b0, c2x[8:6]};
 wire        c2_use_c = c2_active && ((c2_ph == C2_R1) || (c2_ph == C2_R2) || (c2_ph == C2_DC1) ||
                                      (c2_ph == C2_DC2) || (c2_ph == C2_DU1) || (c2_ph == C2_DU2));
-wire        c2_ld_go    = c2_active && ((c2_ph == C2_RD1) || (c2_ph == C2_RD2)) && !port_taken;
+// The second operand's read goes out as the first arrives (phase 5).
+wire        c2_rd2_early = (c2_ph == C2_RD1W) && l1_rvalid_b && !l1_rflt_b;
+wire        c2_ld_go    = c2_active && ((c2_ph == C2_RD1) || (c2_ph == C2_RD2) || c2_rd2_early) && !port_taken;
 wire        c2_st_want  = c2_active && ((c2_ph == C2_WR1) || (c2_ph == C2_WR2)) && !port_taken;
 wire        c2_st_go    = c2_st_want && !l1_wr_busy;
 wire        c2_fin      = c2_active && (c2_ph == C2_DONE);
 wire        c2_stall    = eac_valid && cas2 && !c2_fin && !trace_hold && !ae_busy;
-wire [31:0] c2_addr     = ((c2_ph == C2_RD2) || (c2_ph == C2_WR2)) ? c2_a2 : c2_a1;
+wire [31:0] c2_addr     = ((c2_ph == C2_RD2) || (c2_ph == C2_RD1W) || (c2_ph == C2_WR2)) ? c2_a2 : c2_a1;
 wire [31:0] c2_wdata    = (c2_ph == C2_WR2) ? c2_du2 : c2_du1;
 wire  [3:0] c2_f1       = cas_cmp(c2_m1, c2_dc1, eac_size);
 wire  [3:0] c2_f2       = cas_cmp(c2_m2, c2_dc2, eac_size);
@@ -2746,7 +2767,7 @@ assign l1_size_b = cmr_busy     ? `AP040_SZ_L :
 // operand_a is still the initial value when this beat goes out.
 assign l1_data_b = fp_st_want   ? fp_mem_wdata :
                    mvp_st_want  ? {24'd0, mvp_byte} :
-                   m16_st_want  ? m16_buf :
+                   m16_st_want  ? m16_q[m16_i] :
                    c2_st_want   ? c2_wdata :
                    bf_st_want   ? bf_wdata :
                    mvm_st_want  ? (mvm_base_self ? (operand_a - mvm_step)
@@ -2869,7 +2890,9 @@ always @(posedge clk) begin
 		m16_i          <= 2'd0;
 		m16_s          <= 32'h0;
 		m16_d          <= 32'h0;
-		m16_buf        <= 32'h0;
+		m16_n          <= 3'd0;
+		m16_k          <= 2'd0;
+		m16_rd_pend    <= 1'b0;
 		ck_ph          <= CK_RD1;
 		ck_ea          <= 32'h0;
 		cas_ea         <= 32'h0;
@@ -3128,6 +3151,7 @@ always @(posedge clk) begin
 			bf_ph      <= BF_EA;
 			ck_active  <= 1'b0;
 			m16_active <= 1'b0;
+			m16_rd_pend <= 1'b0;
 			c2_active  <= 1'b0;
 		end
 		if (exc_vec_done)     exc_pend_trace <= 1'b0;
@@ -3157,6 +3181,7 @@ always @(posedge clk) begin
 			mem_pending     <= 1'b0;
 			xm_have         <= 1'b0;
 			m16_active      <= 1'b0;
+			m16_rd_pend     <= 1'b0;
 			c2_active       <= 1'b0;
 			mvm_active      <= 1'b0;
 			mvm_rd_pend     <= 1'b0;
@@ -3410,7 +3435,9 @@ always @(posedge clk) begin
 					mvm_rd_reg  <= 4'h0;
 				end else if (mvm_ld_go) begin
 					// Address driven this cycle; l1_q_b has it next, and
-					// rf3_we commits it then.
+					// rf3_we commits it then -- as it commits the one before
+					// in this cycle, if one is arriving (mvm_rd_reg is still
+					// that one's).
 					mvm_mask    <= mvm_mask & ~mvm_onehot;
 					mvm_addr    <= mvm_nxt_addr;
 					mvm_rd_pend <= 1'b1;
@@ -3442,7 +3469,7 @@ always @(posedge clk) begin
 				CK_RD1:  if (ck_ld_go) ck_ph <= CK_RD1W;
 				CK_RD1W: if (l1_rvalid_b) begin
 					ck_lb <= ck_sx(l1_q_b, eac_size);
-					ck_ph <= CK_RD2;
+					ck_ph <= ck_ld_go ? CK_RD2W : CK_RD2;
 				end
 				CK_RD2:  if (ck_ld_go) ck_ph <= CK_RD2W;
 				CK_RD2W: if (l1_rvalid_b) begin
@@ -3462,7 +3489,7 @@ always @(posedge clk) begin
 				C2_R1:   begin c2_a1  <= operand_c; c2_ph <= C2_R2;  end
 				C2_R2:   begin c2_a2  <= operand_c; c2_ph <= C2_RD1; end
 				C2_RD1:  if (c2_ld_go) c2_ph <= C2_RD1W;
-				C2_RD1W: if (l1_rvalid_b) begin c2_m1 <= l1_q_b; c2_ph <= C2_RD2; end
+				C2_RD1W: if (l1_rvalid_b) begin c2_m1 <= l1_q_b; c2_ph <= c2_ld_go ? C2_RD2W : C2_RD2; end
 				C2_RD2:  if (c2_ld_go) c2_ph <= C2_RD2W;
 				C2_RD2W: if (l1_rvalid_b) begin c2_m2 <= l1_q_b; c2_ph <= C2_DC1; end
 				C2_DC1:  begin c2_dc1 <= operand_c; c2_ph <= C2_DC2; end
@@ -3486,16 +3513,24 @@ always @(posedge clk) begin
 					m16_s      <= m16_src_c & 32'hFFFF_FFF0;
 					m16_d      <= m16_dst_c & 32'hFFFF_FFF0;
 					m16_i      <= 2'd0;
+					m16_n      <= 3'd0;
+					m16_k      <= 2'd0;
+					m16_rd_pend <= 1'b0;
 					m16_ph     <= M16_RD;
 				end else case (m16_ph)
-				M16_RD:  if (m16_ld_go) m16_ph <= M16_RDW;
-				M16_RDW: if (l1_rvalid_b) begin
-					m16_buf <= l1_q_b;
-					m16_ph  <= M16_WR;
+				M16_RD: begin
+					if (m16_ld_go) m16_n <= m16_n + 3'd1;
+					if (m16_arrive) begin
+						m16_q[m16_k] <= l1_q_b;
+						m16_k        <= m16_k + 2'd1;
+						if (m16_k == 2'd3) m16_ph <= M16_WR;
+					end
+					if (m16_ld_go) m16_rd_pend <= 1'b1;
+					else if (m16_arrive) m16_rd_pend <= 1'b0;
 				end
 				M16_WR:  if (m16_st_go) begin
 					m16_i  <= m16_i + 2'd1;
-					m16_ph <= (m16_i == 2'd3) ? M16_DONE : M16_RD;
+					if (m16_i == 2'd3) m16_ph <= M16_DONE;
 				end
 				default: ;
 				endcase
@@ -3608,6 +3643,7 @@ always @(posedge clk) begin
 					mvp_rd_pend <= 1'b1;
 					mvp_addr    <= mvp_addr + 32'd2;
 					mvp_left    <= mvp_left - 3'd1;
+					if (mvp_rd_pend) mvp_acc <= {mvp_acc[23:0], l1_q_b[7:0]};   // the byte arriving now
 				end else if (mvp_rd_pend && l1_rvalid_b) begin
 					mvp_rd_pend <= 1'b0;
 					mvp_acc     <= {mvp_acc[23:0], l1_q_b[7:0]};

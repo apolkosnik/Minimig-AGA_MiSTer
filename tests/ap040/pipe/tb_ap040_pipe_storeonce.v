@@ -116,7 +116,7 @@ integer errors = 0;
 // wren_b is high and its one-entry buffer is empty.
 integer writes = 0;
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid)
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy)
 		writes = writes + 1;
 
 // Port B read requests. A correct core asserts one for exactly one cycle

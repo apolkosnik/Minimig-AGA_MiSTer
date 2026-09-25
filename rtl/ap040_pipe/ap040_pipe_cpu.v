@@ -185,7 +185,7 @@ module ap040_pipe_cpu
 	output        l1_sup_a,
 	output  [1:0] l1_size_b,
 	output [31:0] l1_data_b,
-	input         l1_wr_busy,
+	input         l1_wr_busy,   // for a write presented this cycle; read only then (see ap040_pipe_membus.v wr_busy_w)
 	output        l1_inval_a,   // empty the prefetch stream: CINV/CPUSH's refetch
 	// Access faults from the memory side (2026-09-24): with the return, the
 	// fetch or read faulted; the tentative write being presented faulted;

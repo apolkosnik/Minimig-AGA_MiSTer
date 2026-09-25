@@ -89,7 +89,7 @@ integer errors = 0;
 
 integer writes = 0;
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid)
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy)
 		writes = writes + 1;
 
 integer reads = 0;

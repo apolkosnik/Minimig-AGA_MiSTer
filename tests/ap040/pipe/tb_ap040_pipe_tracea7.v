@@ -85,7 +85,7 @@ integer writes = 0;
 // -- a different claim from where the stack pointer ends up.
 integer first_wr_addr = -1;
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid) begin
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy) begin
 		if (first_wr_addr < 0) first_wr_addr = dut.u_cpu.l1_addr_b;
 		writes = writes + 1;
 	end

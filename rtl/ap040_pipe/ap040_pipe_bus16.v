@@ -78,6 +78,7 @@ wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
+wire        l1_wr_busy_w;   // the CPU's: see ap040_pipe_membus.v
 wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
@@ -116,7 +117,7 @@ ap040_pipe_cpu #(
 	.l1_addr_b (l1_addr_b), .l1_rd_b (l1_rd_b), .l1_wren_b (l1_wren_b),
 	.l1_sup_b  (l1_sup_b), .l1_sup_a (l1_sup_a),
 	.l1_size_b (l1_size_b),   .l1_data_b(l1_data_b),
-	.l1_wr_busy(l1_wr_busy), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
+	.l1_wr_busy(l1_wr_busy_w), .l1_q_b (l1_q_b), .l1_rvalid_b(l1_rvalid_b),
 	.l1_inval_a(l1_inval_a),
 	.l1_rflt_a(l1_rflt_a), .l1_rflt_a_bus(l1_rflt_a_bus), .l1_rflt_b(l1_rflt_b), .l1_wflt(l1_wflt), .l1_flt_bus(l1_flt_bus),
 	.l1_flt_ma(l1_flt_ma), .l1_wr_sync(l1_wr_sync),
@@ -147,7 +148,7 @@ ap040_pipe_membus u_bus
 
 	.address_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
 	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),
-	.wr_busy  (l1_wr_busy), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
+	.wr_busy  (l1_wr_busy), .wr_busy_w(l1_wr_busy_w), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
 
 	.sup      (l1_sup_a),
 	.sup_b    (l1_sup_b),

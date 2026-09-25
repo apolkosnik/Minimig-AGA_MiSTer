@@ -66,6 +66,13 @@ module ap040_pipe_membus
 	input       [1:0] size_b,
 	input             rd_b,
 	output            wr_busy,
+	// wr_busy for a write being presented: the same, with wren_b taken as
+	// set. It is all the CPU ever asks -- it looks at wr_busy only while it
+	// presents a write -- and it does not depend on wren_b, which the CPU
+	// forms from its stalls, which EX forms from wr_busy (a read-modify-
+	// write's store waits on it): the loop Quartus found at the bus16 top,
+	// 22 nodes and 17.7 ns, and Verilator's UNOPTFLAT on stall_self.
+	output            wr_busy_w,
 	output reg [31:0] q_b,
 	output reg        rvalid_b,
 
@@ -237,6 +244,7 @@ wire  [7:0] w_byte     = w_data[{w_bk, 3'b000} +: 8];
 // it is posted like any other, and its bytes cannot be refused.
 wire   w_pass_now = w_pend && w_tent && ((busy && (who == WHO_BW) && mem_pass) || pb_pass2);
 assign wr_busy = w_block || (!w_receipt && (w_pend ? !w_pass_now : (wr_sync && wren_b)));
+assign wr_busy_w = w_block || (!w_receipt && (w_pend ? !w_pass_now : wr_sync));
 // The refusal is a level, not the one-clock pulse the MMU gives: the CPU
 // runs under ce and may not be looking that clock.
 assign wflt    = w_block;
@@ -262,7 +270,7 @@ wire        pf_ack     = busy && mem_ack && (who == WHO_A);
 // it -- the old instruction, behind a store that rewrote it
 // (tb_ap040_pipe_smcdual.v). Dropped instead; the fetch it was for is still
 // pending, and goes out again after the write. (w_* are declared below.)
-wire        pf_wr      = w_accept && ((w_lo == pf_next) || (w_hi == pf_next));
+wire        pf_wr      = w_accept && ((w_lo == pf_next) || (w_lo == pf_next - 30'd1));
 wire        pf_app     = pf_ack && !pf_kill && !pf_wr;
 wire [29:0] pf_next    = pf_base + {27'd0, pf_cnt};
 wire  [2:0] pf_cnt1    = pf_cnt + {2'd0, pf_app};
@@ -278,8 +286,8 @@ wire [29:0] req_k      = req_lw - pf_base;
 // window's copy is stale by then, and a refetch the write itself caused
 // (a store onto an instruction already fetched behind it) asks for exactly
 // that longword in exactly that cycle. It then misses, and queues behind the
-// write. (w_lo/w_hi are declared below; the tools take either order.)
-wire        req_wr     = w_accept && ((w_lo == req_lw) || (w_hi == req_lw));
+// write. (w_lo is declared below; the tools take either order.)
+wire        req_wr     = w_accept && ((w_lo == req_lw) || (w_lo == req_lw - 30'd1));
 wire        req_hit    = !pf_inval && !req_wr && (req_k < {27'd0, pf_cnt1}) && (sup == pf_sup);
 wire [31:0] req_long   = pf_word1(req_lw[1:0]);
 // ...or the one still on the bus, which it will wait for.
@@ -290,20 +298,27 @@ wire        req_onbus  = pf_out && !pf_ack && !pf_kill && (req_lw == pf_next) &&
 // longword. (An address compare here could never be false.)
 wire        pend_fill  = a_pend && pf_app;
 // A write accepted this cycle that touches the window or the read in flight.
+// Its bytes lie in its own longword and at most the next, and it is taken
+// to touch both, whatever its size and alignment (restructuring plan, phase
+// 5): which of them it really reaches was an adder on the address and the
+// size, the latest signals EA-fetch sends, ahead of the prefetch window's
+// compares -- the bus16 top's worst path, EX's SR forward through the stack
+// bank and the address arithmetic into pf_base (-0.959 ns at 25 ns). Taking
+// too much only empties the window once more than it had to, and a write
+// next to the instruction stream is rare; the one-less compares below sit
+// on the fetch and window side, which are earlier.
 wire [29:0] w_lo       = address_b[31:2];
-wire [29:0] w_hi       = w_lo + {29'd0, (size_b == `AP040_SZ_L) && (address_b[1:0] != 2'd0)} +
-                         {29'd0, (size_b == `AP040_SZ_W) && (address_b[1:0] == 2'd3)};
 wire        w_accept   = wren_b && !w_pend && !w_block && !w_receipt;
 // Distances into the window, modular like req_k: a window can span the top
 // of the address space, and ordered compares against pf_base + 4 missed
 // every write into one that did (review 15: a stream from $FFFFFFF8 kept
 // stale words at $FFFFFFFC and at $00000000). Either longword a write
-// touches can be the one inside. The read in flight is always at
-// pf_base + pf_cnt with pf_cnt at most three -- one goes out only while
-// pf_cnt_aft < PF_N -- so the window's four longwords are the whole range.
+// touches can be the one inside -- w_lo + 1 is inside exactly when w_lo is
+// the longword below pf_base. The read in flight is always at pf_base +
+// pf_cnt with pf_cnt at most three -- one goes out only while pf_cnt_aft <
+// PF_N -- so the window's four longwords are the whole range.
 wire [29:0] w_klo      = w_lo - pf_base;
-wire [29:0] w_khi      = w_hi - pf_base;
-wire        w_hits_pf  = w_accept && ((w_klo < {27'd0, PF_N}) || (w_khi < {27'd0, PF_N}));
+wire        w_hits_pf  = w_accept && ((w_klo < {27'd0, PF_N}) || (w_klo == 30'h3FFF_FFFF));
 // What the next prefetch would be once this cycle's request is applied. A
 // hit leaves base + count where it was; a miss starts the new stream, which
 // can go out in the same cycle. Keeping prefetch out of every request cycle

@@ -234,7 +234,10 @@ reg              wbuf_odd;
 reg  [1:0]       wbuf_size;
 reg [31:0]       wbuf_data;
 reg [1:0]        wbuf_hold;    // extra drain cycles left (slow model only)
-assign wr_busy = wbuf_valid;
+// Busy only while the buffered write is still being held: in the cycle it
+// drains, the next one is taken in its place (restructuring plan, phase 5),
+// so a run of stores is one per cycle.
+assign wr_busy = wbuf_valid && (wbuf_hold != 2'd0);
 
 // Latency model. In the normal build every extra count is zero and the
 // xorshift is optimised away.
@@ -372,7 +375,8 @@ always @(posedge clock) begin
 				wbuf_valid <= 1'b0;
 			end else
 				wbuf_hold <= wbuf_hold - 2'd1;
-		end else if (wren_b) begin
+		end
+		if (wren_b && !wr_busy) begin
 			wbuf_valid <= 1'b1;
 			wbuf_addr  <= ib;
 			wbuf_odd   <= ob;

@@ -135,7 +135,7 @@ integer errors = 0;
 integer writes = 0;
 reg [31:0] st_addr [0:7];
 always @(posedge clk)
-	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wbuf_valid) begin
+	if (nreset && dut.u_l1.wren_b && !dut.u_l1.wr_busy) begin
 		if (writes < 8) st_addr[writes] = dut.u_cpu.l1_addr_b;
 		writes = writes + 1;
 	end
