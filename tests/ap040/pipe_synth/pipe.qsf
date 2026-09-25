@@ -17,6 +17,7 @@ set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_alu.
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_core.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_cpu.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_membus.v
+set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_imu.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_sys.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_l1.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_regfile.v

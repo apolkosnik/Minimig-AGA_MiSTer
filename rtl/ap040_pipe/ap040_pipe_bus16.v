@@ -193,20 +193,39 @@ ap040_pipe_mmu u_mmu
 	.walker_berr (walker_berr)
 );
 
+// The instruction memory unit: port A's prefetch window, and the fetch's
+// translation through the MMU's instruction port (TC.E).
+wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus, f_w_accept;
+wire [31:0] f_addr;
+wire [29:0] f_w_sla;
+ap040_pipe_imu u_imu
+(
+	.clk (clk), .nreset (nreset),
+	.address_a(l1_addr_a), .en_a (l1_req_a),
+	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
+	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus),
+	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
+	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
+	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa),
+	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
+	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_ack    (f_ack), .f_rdata (mem_rdata), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
+	.w_accept (f_w_accept), .w_sla (f_w_sla)
+);
+
 ap040_pipe_membus u_bus
 (
 	.clk (clk), .nreset (nreset),
 
-	.address_a(l1_addr_a), .en_a (l1_req_a),
-	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
+	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_ack    (f_ack), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
+	.w_accept (f_w_accept), .w_sla (f_w_sla),
 
 	.address_b(bb_addr), .la_b(bb_la), .data_b(bb_wdata), .wren_b(bb_wr),
 	.size_b   (bb_size),   .rd_b  (bb_rd),
 	.wr_busy  (), .wr_busy_w(bb_wr_busy_w), .q_b  (bb_q), .rvalid_b(bb_rvalid),
 
-	.sup      (l1_sup_a),
 	.sup_b    (bb_sup),
-	.pf_inval (l1_inval_a),
 	.fc_ovr   (bb_fc_ovr), .fc_ovr_val(bb_fc_val),
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
@@ -221,16 +240,12 @@ ap040_pipe_membus u_bus
 	.mem_flt_bus(berr && clkena_in && mem_req),
 	.mem_pass (mem_req),
 	.wr_sync  (1'b0),
-	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (bb_rflt), .wflt (), .flt_bus (bb_flt_bus),
-	.idle     (bb_idle), .quiesce (l1_quiet), .wr_drop (1'b0),
+	.rflt_b   (bb_rflt), .wflt (), .flt_bus (bb_flt_bus),
+	.idle     (bb_idle), .wr_drop (1'b0),
 	// The DMU splits a transfer that crosses a page and probes nothing here.
 	.xlat_e   (1'b0), .xlat_p (1'b0),
 	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),
 	.flt_ma   (bb_flt_ma),
-	// the stream translated through the MMU's instruction port (TC.E)
-	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
-	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa),
-	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
 	// the DMU's translated reads
 	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)
 );

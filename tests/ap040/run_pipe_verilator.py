@@ -22,7 +22,7 @@ TB = HERE / "pipe"
 
 CORE = [RTL / n for n in (
     "ap040_pipe_core.v", "ap040_pipe_cpu.v", "ap040_pipe_sys.v",
-    "ap040_pipe_membus.v", "ap040_inst_fetch.v", "ap040_decode.v",
+    "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
     "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
@@ -116,16 +116,17 @@ def main():
             # write port can be held busy -- see the bench's header.
             src = [x for x in CORE if x.name not in
                    ("ap040_pipe_core.v", "ap040_pipe_sys.v",
-                    "ap040_pipe_membus.v", "ap040_pipe_l1.v")]
+                    "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_pipe_l1.v")]
         elif name.endswith("dmuport"):
-            # the data memory unit, the MMU and the bus controller, driven
-            # at the CPU's ports -- see the bench's header
-            src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_membus.v",
+            # the data and instruction memory units, the MMU and the bus
+            # controller, driven at the CPU's ports -- see the bench's header
+            src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_imu.v",
+                   RTL / "ap040_pipe_membus.v",
                    HERE / "sim_dpram.v"]
         elif name.endswith("busredirect"):
-            # ap040_pipe_membus.v standalone, same reason as l1_wbuf above:
-            # the bench drives the wrapper's ports directly.
-            src = [RTL / "ap040_pipe_membus.v"]
+            # ap040_pipe_imu.v and ap040_pipe_membus.v standalone, same
+            # reason as l1_wbuf above: the bench drives their ports directly.
+            src = [RTL / "ap040_pipe_imu.v", RTL / "ap040_pipe_membus.v"]
         elif name.endswith("dual"):
             # The differential bench instantiates the FSM core beside the
             # pipelined one, so rtl/ap040's whole core comes too.

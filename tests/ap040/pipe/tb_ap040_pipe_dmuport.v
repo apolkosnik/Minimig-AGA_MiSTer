@@ -3,8 +3,9 @@
 //                                                                          //
 // tb_ap040_pipe_dmuport.v - the data memory unit and the MMU's ports       //
 //                                                                          //
-// ap040_pipe_dmu.v, ap040_pipe_mmu.v and ap040_pipe_membus.v as the bus16  //
-// top wires them, driven directly at the CPU's two ports -- the events     //
+// ap040_pipe_dmu.v, ap040_pipe_mmu.v, ap040_pipe_imu.v and                 //
+// ap040_pipe_membus.v as the bus16 top wires them, driven directly at the  //
+// CPU's two ports -- the events                                            //
 // under test are coincidences a program reaches only by luck: a write      //
 // presented while a read's table search is under way, and a fetch refused //
 // by its search. The memory behind the bus controller and the table        //
@@ -48,6 +49,15 @@
 //      and the fetch of $8108 return the written words. The window is     //
 //      logical; the bus controller sees the write's physical address, and  //
 //      matched that against it the window kept the old words.             //
+//   8. A write whose snoop empties the window in a cycle with no read in   //
+//      flight. The next longword was pf_base + pf_cnt before the snoop and //
+//      is pf_base after it; a read for the first must not start in that    //
+//      cycle, or it lands as the second. The bus controller's own read     //
+//      cannot go then (the write is waiting there), but a translation      //
+//      could, and did. The write's arrival is swept across the window's    //
+//      refill on a slow memory, each time in a fresh 64 bytes of page 8,   //
+//      and every longword then fetched must be memory's; the sweep must    //
+//      reach the cycle it is after (snoop_idle).                           //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -160,22 +170,37 @@ ap040_pipe_mmu u_mmu
 	.walker_berr (1'b0)
 );
 
-ap040_pipe_membus u_bus
+wire        ib_req, ib_sup, ib_free, ib_ack, ib_flt, ib_flt_bus, ib_w_accept;
+wire [31:0] ib_addr;
+wire [29:0] ib_w_sla;
+ap040_pipe_imu u_imu
 (
 	.clk (clk), .nreset (nreset),
 	.address_a (a_addr), .en_a (en_a), .q_a (q_a), .q_a2 (q_a2), .rvalid_a (rvalid_a),
+	.rflt_a (rflt_a), .rflt_a_bus (rflt_a_bus),
+	.sup (1'b1), .pf_inval (1'b0), .quiesce (1'b0),
+	.pf_xlat (tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup), .x_pass (i_pass), .x_flt (i_flt), .x_pa (i_pa),
+	.pk_addr (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
+	.f_req (ib_req), .f_addr (ib_addr), .f_sup (ib_sup), .f_free (ib_free),
+	.f_ack (ib_ack), .f_rdata (mem_rdata), .f_flt (ib_flt), .f_flt_bus (ib_flt_bus),
+	.w_accept (ib_w_accept), .w_sla (ib_w_sla)
+);
+
+ap040_pipe_membus u_bus
+(
+	.clk (clk), .nreset (nreset),
+	.f_req (ib_req), .f_addr (ib_addr), .f_sup (ib_sup), .f_free (ib_free),
+	.f_ack (ib_ack), .f_flt (ib_flt), .f_flt_bus (ib_flt_bus),
+	.w_accept (ib_w_accept), .w_sla (ib_w_sla),
 	.address_b (bb_addr), .la_b (bb_la), .data_b (bb_wdata), .wren_b (bb_wr), .size_b (bb_size), .rd_b (bb_rd),
 	.wr_busy (), .wr_busy_w (bb_wr_busy_w), .q_b (bb_q), .rvalid_b (bb_rvalid),
-	.sup (1'b1), .sup_b (bb_sup), .pf_inval (1'b0), .fc_ovr (bb_fc_ovr), .fc_ovr_val (bb_fc_val),
+	.sup_b (bb_sup), .fc_ovr (bb_fc_ovr), .fc_ovr_val (bb_fc_val),
 	.mem_req (mem_req), .mem_write (mem_write), .mem_instr (mem_instr), .mem_size (mem_size),
 	.mem_addr (mem_addr), .mem_wdata (mem_wdata), .mem_fc (mem_fc), .mem_ack (mem_ack), .mem_rdata (mem_rdata),
 	.mem_flt (1'b0), .mem_flt_bus (1'b0), .mem_pass (mem_req), .wr_sync (1'b0),
-	.rflt_a (rflt_a), .rflt_a_bus (rflt_a_bus), .rflt_b (bb_rflt), .wflt (), .idle (bb_idle),
-	.quiesce (1'b0), .wr_drop (1'b0),
+	.rflt_b (bb_rflt), .wflt (), .idle (bb_idle), .wr_drop (1'b0),
 	.xlat_e (1'b0), .xlat_p (1'b0), .pb_req (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0),
 	.flt_ma (bb_flt_ma), .flt_bus (bb_flt_bus),
-	.pf_xlat (tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup), .x_pass (i_pass), .x_flt (i_flt), .x_pa (i_pa),
-	.pk_addr (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
 	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)
 );
 
@@ -246,6 +271,13 @@ always @(posedge clk) if (nreset) begin
 	if (u_dmu.w_thru && !u_dmu.m_wr_busy_w) committed = committed + sz_bytes(c_size);
 	if (mem_ack && mem_write) committed = committed - sz_bytes(mem_size);
 end
+
+// 8: the snoop cycles in which a stream read could start -- the snoop
+// empties a window that was not empty, with nothing in flight and room.
+integer snoop_idle = 0;
+always @(posedge clk)
+	if (nreset && u_imu.w_hits_pf && !u_imu.pf_out && (u_imu.pf_cnt != 3'd0) && (u_imu.pf_cnt < 3'd4))
+		snoop_idle = snoop_idle + 1;
 
 // The function code of each data read and write the bus controller starts.
 reg       mreq_q = 1'b0;
@@ -328,7 +360,8 @@ task fetch;
 	end
 endtask
 
-integer i;
+integer i, d, k;
+reg [15:0] lo16;
 initial begin
 	// tables: every page identity-mapped and resident, page $A invalid
 	for (i = 0; i < 65536; i = i + 1) mem[i] = 8'h00;
@@ -453,6 +486,35 @@ initial begin
 		fail("7: a fetch returned the words a write had replaced (the window kept them)");
 	end
 
+	//------------------------------------------------------------- test 8
+	repeat (20) step;
+	mem_lat = 5;
+	for (d = 0; d < 40; d = d + 1) begin
+		// 64 bytes at logical $8200 + 64d, physical $5200 + 64d
+		for (k = 0; k < 5; k = k + 1) begin
+			lo16 = 16'h1000 + d * 16 + k;
+			wr32(16'h5200 + d * 64 + k * 4, {4'hC, d[5:0], k[5:0], lo16});
+		end
+		fetch(32'h0000_8200 + d * 64);
+		if (f_flt || f_q !== {4'hC, d[5:0], 6'd0}) begin
+			$display("    d=%0d fetched %h", d, f_q);
+			fail("8: the first fetch of a sweep step did not return its word");
+		end
+		repeat (d) step;
+		write_hold(32'h0000_820C + d * 64, 32'h5A5A_0000 + d);
+		repeat (60) step;
+		for (k = 0; k < 4; k = k + 1) begin
+			fetch(32'h0000_8200 + d * 64 + k * 4);
+			if (f_flt || f_q !== rd32(16'h5200 + d * 64 + k * 4) >> 16) begin
+				$display("    d=%0d k=%0d fetched %h, memory %h", d, k, f_q, rd32(16'h5200 + d * 64 + k * 4));
+				fail("8: a fetch after a write into the window returned another longword's word");
+			end
+		end
+	end
+	mem_lat = 1;
+	if (snoop_idle == 0) fail("8: no snoop emptied the window with nothing in flight (the test no longer tests)");
+	$display("test 8: %0d snoop cycle(s) with the window idle", snoop_idle);
+
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("%0d CHECK(S) FAILED", errors);
@@ -460,7 +522,7 @@ initial begin
 end
 
 initial begin
-	#200000;
+	#600000;
 	$display("FAIL: timed out");
 	$finish;
 end

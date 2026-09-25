@@ -20,10 +20,11 @@ bus controller below both units.
 Until stage A the pipelined core translated below its bus controller:
 CPU -> ap040_pipe_membus.v -> ap040_mmu.v -> bus16 adapter. Since stage A
 the operand port translates in the DMU (ap040_pipe_dmu.v) and the fetch
-stream is translated by the bus controller before each of its reads, both
-through ap040_pipe_mmu.v; nothing below the bus controller translates. The
-IMU arrives with the instruction cache (stage B), the data cache joins the
-DMU in stage C. The target:
+stream is translated before each of its reads -- by the bus controller in
+stage A, by the IMU (ap040_pipe_imu.v) since B1 -- both through
+ap040_pipe_mmu.v; nothing below the bus controller translates. The
+instruction cache joins the IMU in stage B, the data cache the DMU in
+stage C. The target:
 
     port A (IF)  -> IMU: I-ATC lookup + I-cache  \
                                                    > membus (bus controller, physical) -> adapter
@@ -271,7 +272,7 @@ port protocols it saw from membus.
   A prefetch in the page the instruction port translated last goes out in
   its own cycle through a peek at that translation (ip_*: combinational from
   the MMU's registers, no search, no fault); a demand miss to another page
-  takes one cycle more than before. The IMU replaces all of this in stage B.
+  takes one cycle more than before. All of this moved to the IMU in B1.
 - Port ownership. A requester holds its MMU port, at the same address, until
   the translation passes or faults -- a walk cannot be recalled and its fault
   belongs to the access it was for. After a fault the port is down for a
@@ -316,6 +317,29 @@ clock-enable holes from the DMU's acceptance; tb_dat_replay_pipe.v drains
 the DMU's writes. A3: t_smc_mmu.s (stores rewriting prefetched code run
 through an alias of it, both cores) and tb_ap040_pipe_dmuport.v test 7 (a
 write into the window through a page mapped elsewhere, no CPU in front).
+
+## Stage B as built
+
+B1, the IMU. membus's port A -- the prefetch window, its reads' translation
+through the MMU's instruction port and peek, and its snoop -- moved unchanged
+into ap040_pipe_imu.v, which asks membus for each read through a fetch port:
+f_req with f_addr and f_sup, taken when the bus is free for it (f_free:
+nothing on it, no write or read waiting -- the order membus's chain always
+had), answered with f_ack (mem_rdata) or f_flt; and membus tells it of every
+write it takes (w_accept, with w_sla, the write's logical longword) for the
+snoop. Every bench was cycle-identical to A3 after the move.
+
+Moving it showed a flaw from stage A: a write whose snoop empties the window
+in a cycle with no read in flight. The next longword was pf_base + pf_cnt
+before the snoop and pf_base after it, and a stream read for the first
+landed as the second -- the window then answered its base with another
+longword's word. The bus controller's own read cannot go in that cycle (the
+write is waiting there, so the bus is not free), but since A1 a translation
+could start then, and did. Nothing new starts in a cycle whose snoop hits
+the window (tb_ap040_pipe_dmuport.v test 8: the write's arrival swept
+across the window's refill on a slow memory, reaching that cycle four
+times; without the fix, fetches returned the longword two or three past the
+one asked for).
 
 ## Tests
 

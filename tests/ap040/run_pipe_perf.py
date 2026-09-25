@@ -29,7 +29,7 @@ VASM = Path(os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"))
 BENCH = HERE / "perf/tb_ap040_pipe_perf.v"
 CORE = [RTL / n for n in (
     "ap040_pipe_core.v", "ap040_pipe_cpu.v", "ap040_pipe_sys.v",
-    "ap040_pipe_membus.v", "ap040_inst_fetch.v", "ap040_decode.v",
+    "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
     "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]

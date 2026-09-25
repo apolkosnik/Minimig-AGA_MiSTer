@@ -3,7 +3,8 @@
 // that lands on an acknowledgement; 2026-09-24: the prefetch stream,       //
 // review 15)                                                               //
 //                                                                          //
-// tb_ap040_pipe_busredirect.v - ap040_pipe_membus.v on its own             //
+// tb_ap040_pipe_busredirect.v - ap040_pipe_imu.v and ap040_pipe_membus.v  //
+// on their own                                                             //
 //                                                                          //
 // Driven directly rather than through the core, for the same reason        //
 // tb_ap040_pipe_l1_wbuf.v drives the array directly: the events under test //
@@ -92,24 +93,39 @@ wire  [2:0] mem_fc;
 reg         mem_ack   = 1'b0;
 reg  [31:0] mem_rdata = 32'd0;
 
+wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus, f_w_accept;
+wire [31:0] f_addr;
+wire [29:0] f_w_sla;
+ap040_pipe_imu imu (
+	.clk(clk), .nreset(nreset),
+	.address_a(address_a), .en_a(en_a), .q_a(q_a), .q_a2(), .rvalid_a(rvalid_a),
+	.rflt_a(), .rflt_a_bus(),
+	// the fetch side alone: no invalidation, no faults, nothing translated
+	.sup(1'b1), .pf_inval(1'b0), .quiesce(1'b0),
+	.pf_xlat(1'b0), .x_req(), .x_addr(), .x_sup(), .x_pass(1'b0), .x_flt(1'b0), .x_pa(32'd0),
+	.pk_addr(), .pk_sup(), .pk_hit(1'b0), .pk_pa(32'd0),
+	.f_req(f_req), .f_addr(f_addr), .f_sup(f_sup), .f_free(f_free),
+	.f_ack(f_ack), .f_rdata(mem_rdata), .f_flt(f_flt), .f_flt_bus(f_flt_bus),
+	.w_accept(f_w_accept), .w_sla(f_w_sla)
+);
 ap040_pipe_membus dut (
 	.clk(clk), .nreset(nreset),
-	.address_a(address_a), .en_a(en_a), .q_a(q_a), .rvalid_a(rvalid_a),
+	.f_req(f_req), .f_addr(f_addr), .f_sup(f_sup), .f_free(f_free),
+	.f_ack(f_ack), .f_flt(f_flt), .f_flt_bus(f_flt_bus),
+	.w_accept(f_w_accept), .w_sla(f_w_sla),
 	.address_b(address_b), .la_b(address_b), .data_b(data_b), .wren_b(wren_b),
 	.size_b(size_b), .rd_b(rd_b), .wr_busy(wr_busy),
 	.q_b(q_b), .rvalid_b(rvalid_b),
-	.sup(1'b1), .sup_b(1'b1),
+	.sup_b(1'b1),
 	.mem_req(mem_req), .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size(mem_size), .mem_addr(mem_addr), .mem_wdata(mem_wdata),
 	.mem_fc(mem_fc),
 	.mem_ack(mem_ack), .mem_rdata(mem_rdata),
-	// the fetch side alone: no invalidation, no FC override, no faults
-	.pf_inval(1'b0), .fc_ovr(1'b0), .fc_ovr_val(3'd0),
-	.mem_flt(1'b0), .mem_flt_bus(1'b0), .mem_pass(mem_req), .wr_sync(1'b0), .quiesce(1'b0), .wr_drop(!wren_b),
-	.rflt_a(), .rflt_a_bus(), .rflt_b(), .wflt(), .idle(), .flt_bus(),
+	// no FC override, no faults
+	.fc_ovr(1'b0), .fc_ovr_val(3'd0),
+	.mem_flt(1'b0), .mem_flt_bus(1'b0), .mem_pass(mem_req), .wr_sync(1'b0), .wr_drop(!wren_b),
+	.rflt_b(), .wflt(), .idle(), .flt_bus(),
 	.xlat_e(1'b0), .xlat_p(1'b0), .pb_req(), .pb_addr(), .pb_fc(), .pb_done(1'b0), .pb_mmusr(32'd0), .flt_ma(),
-	.pf_xlat(1'b0), .x_req(), .x_addr(), .x_sup(), .x_pass(1'b0), .x_flt(1'b0), .x_pa(32'd0),
-	.pk_addr(), .pk_sup(), .pk_hit(1'b0), .pk_pa(32'd0),
 	.rx(1'b0), .rx_addr(32'd0), .rx_size(2'd0), .rx_fc(3'd0)
 );
 

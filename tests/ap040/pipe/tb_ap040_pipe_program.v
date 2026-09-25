@@ -479,7 +479,7 @@ always @(posedge clk)
 		         dut.u_cpu.dbg_wb_valid, dut.u_cpu.dbg_wb_pc,
 		         dut.u_cpu.u_eaf.eaf_stall, dut.u_cpu.u_ex.ex_stall, dut.u_cpu.u_eaf.hold_hazard,
 		         dut.u_bus.busy, dut.l1_wflt, dut.l1_idle, dut.l1_quiet,
-		         dut.u_bus.a_pend, dut.u_bus.b_pend, dut.u_bus.w_pend,
+		         dut.u_imu.a_pend, dut.u_bus.b_pend, dut.u_bus.w_pend,
 		         dut.u_bus.mem_req, dut.u_bus.mem_write, dut.u_bus.mem_addr, dut.u_bus.mem_ack, dut.u_bus.mem_flt,
 		         dut.u_bus.rvalid_b, dut.u_bus.rflt_b,
 		         dut.u_cpu.u_eaf.exc_go, dut.u_cpu.u_eaf.exc_ph, dut.u_cpu.u_eaf.exc_vec_r,

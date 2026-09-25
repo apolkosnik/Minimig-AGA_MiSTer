@@ -104,20 +104,38 @@ ap040_pipe_cpu #(
 	.dbg_ccr(dbg_ccr), .dbg_sr(dbg_sr), .dbg_commits(dbg_commits)
 );
 
+// The instruction memory unit: port A's prefetch window. Nothing to
+// translate on this top.
+wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus, f_w_accept;
+wire [31:0] f_addr;
+wire [29:0] f_w_sla;
+ap040_pipe_imu u_imu
+(
+	.clk (clk), .nreset (nreset),
+	.address_a(l1_addr_a), .en_a (l1_req_a),
+	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
+	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus),
+	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
+	.pf_xlat  (1'b0), .x_req (), .x_addr (), .x_sup (), .x_pass (1'b0), .x_flt (1'b0), .x_pa (32'd0),
+	.pk_addr  (), .pk_sup (), .pk_hit (1'b0), .pk_pa (32'd0),
+	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_ack    (f_ack), .f_rdata (mem_rdata), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
+	.w_accept (f_w_accept), .w_sla (f_w_sla)
+);
+
 ap040_pipe_membus u_bus
 (
 	.clk (clk), .nreset (nreset),
 
-	.address_a(l1_addr_a), .en_a (l1_req_a),
-	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
+	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
+	.f_ack    (f_ack), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
+	.w_accept (f_w_accept), .w_sla (f_w_sla),
 
 	.address_b(l1_addr_b), .la_b(l1_addr_b), .data_b(l1_data_b), .wren_b(l1_wren_b),
 	.size_b   (l1_size_b),   .rd_b  (l1_rd_b),
 	.wr_busy  (l1_wr_busy), .wr_busy_w(l1_wr_busy_w), .q_b  (l1_q_b), .rvalid_b(l1_rvalid_b),
 
-	.sup      (l1_sup_a),
 	.sup_b    (l1_sup_b),
-	.pf_inval (l1_inval_a),
 	.fc_ovr   (l1_fc_ovr), .fc_ovr_val(l1_fc_val),
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
@@ -126,14 +144,12 @@ ap040_pipe_membus u_bus
 	// No MMU on this top: nothing is refused, and a request has passed as
 	// soon as it is on the port.
 	.mem_flt  (1'b0), .mem_flt_bus (1'b0), .mem_pass (mem_req), .wr_sync (l1_wr_sync),
-	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus), .rflt_b (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
-	.idle     (l1_idle), .quiesce (l1_quiet), .wr_drop (l1_wr_drop),
+	.rflt_b   (l1_rflt_b), .wflt (l1_wflt), .flt_bus (l1_flt_bus),
+	.idle     (l1_idle), .wr_drop (l1_wr_drop),
 	// no MMU behind this memory: nothing is translated, nothing crosses
 	.xlat_e   (1'b0), .xlat_p (1'b0),
 	.pb_req   (), .pb_addr (), .pb_fc (), .pb_done (1'b0), .pb_mmusr (32'd0), .flt_ma (l1_flt_ma),
-	// nothing to translate, and the CPU's reads come straight in
-	.pf_xlat  (1'b0), .x_req (), .x_addr (), .x_sup (), .x_pass (1'b0), .x_flt (1'b0), .x_pa (32'd0),
-	.pk_addr (), .pk_sup (), .pk_hit (1'b0), .pk_pa (32'd0),
+	// the CPU's reads come straight in
 	.rx (1'b0), .rx_addr (32'd0), .rx_size (2'd0), .rx_fc (3'd0)
 );
 
