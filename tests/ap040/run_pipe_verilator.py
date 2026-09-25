@@ -37,6 +37,11 @@ PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
                      "t_movem_restart", "t_fault_edges", "t_agu"]
 PROGRAMS_OPEN = {}
+# tb_ap040_pipe_program_local runs the programs that need no bus devices and
+# no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a
+# cycle (phase 8) -- see the bench's header.
+PROGRAMS_LOCAL = ["t_integer", "t_fastpaths", "t_agu", "t_fpu_frames", "t_fpu_resume", "dhry",
+                  "bench_alu", "bench_loop"]
 VASM = Path(os.environ.get("VASM", "/opt/amiga-cc/vbcc/bin/vasmm68k_mot"))
 
 
@@ -167,8 +172,10 @@ def main():
             # A build that fails is still a failure, and says so here.
             if rc != 0:
                 out.write(f"%Error: the build failed, see {blog.name}\n")
-            if rc == 0 and name.endswith("program"):
-                for prog in PROGRAMS_REQUIRED + list(PROGRAMS_OPEN):
+            progs = (PROGRAMS_REQUIRED + list(PROGRAMS_OPEN) if name.endswith("program") else
+                     PROGRAMS_LOCAL if name.endswith("program_local") else None)
+            if rc == 0 and progs is not None:
+                for prog in progs:
                     out.write(f"== {prog}\n"); out.flush()
                     r = subprocess.run([str(obj / ("V" + name)), "+prog=" + str(program_image(prog, work))],
                                        capture_output=True, text=True, timeout=1800, env=env)

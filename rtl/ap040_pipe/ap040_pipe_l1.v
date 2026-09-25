@@ -290,6 +290,34 @@ endfunction
 wire [AW-1:0] wb1 = wbuf_addr + {{(AW-1){1'b0}}, 1'b1};
 wire [AW-1:0] wb2 = wbuf_addr + {{(AW-2){1'b0}}, 2'b10};
 
+// Port A never reads a word a write has not yet put in the array (2026-09-25,
+// found by tb_ap040_pipe_program_local's t_integer 192). A store into the
+// instruction stream raises a refetch in the cycle the write is accepted,
+// and that refetch's read went to the array a cycle before the buffered write
+// did: it fetched the old instruction again. ap040_pipe_membus.v sends writes
+// before fetches, so the bus tops never could. A fetch whose words the
+// buffered write, or the one being accepted, covers now waits for the drain,
+// as port B's reads do; any other fetch goes ahead.
+function covers;
+	input [AW-1:0] wa;      // the write's first word
+	input          odd;
+	input    [1:0] sz;
+	input [AW-1:0] fa;      // the fetch's word; the one after it is read too
+	reg   [AW-1:0] d;
+	begin
+		d = fa - wa;
+		covers = (d == {AW{1'b0}}) ||                                           // fa itself
+		         (d == {AW{1'b1}}) ||                                           // fa+1 is wa
+		         ((d == {{(AW-1){1'b0}}, 1'b1}) && (sz == `AP040_SZ_L || (sz == `AP040_SZ_W && odd))) ||
+		         ((d == {{(AW-2){1'b0}}, 2'b10}) && (sz == `AP040_SZ_L) && odd);
+	end
+endfunction
+wire          wr_acc = wren_b && !wr_busy;
+wire          a_wait_new = (wbuf_valid && covers(wbuf_addr, wbuf_odd, wbuf_size, ia)) ||
+                           (wr_acc && covers(ib, ob, size_b, ia));
+wire          a_wait_old = (wbuf_valid && covers(wbuf_addr, wbuf_odd, wbuf_size, a_addr)) ||
+                           (wr_acc && covers(ib, ob, size_b, a_addr));
+
 always @(posedge clock) begin
 `ifdef AP040_PIPE_L1_SLOW
 	if (!nreset) lfsr <= 16'hACE1;
@@ -305,13 +333,15 @@ always @(posedge clock) begin
 		rvalid_a <= 1'b0;
 	end else if (a_busy) begin
 		if (a_cnt == 2'd0) begin
-			q_a      <= mem[a_addr];
-			rvalid_a <= 1'b1;
-			a_busy   <= 1'b0;
+			if (!a_wait_old) begin
+				q_a      <= mem[a_addr];
+				rvalid_a <= 1'b1;
+				a_busy   <= 1'b0;
+			end
 		end else
 			a_cnt <= a_cnt - 2'd1;
 	end
-	if (en_a && extra_a == 2'd0) begin
+	if (en_a && extra_a == 2'd0 && !a_wait_new) begin
 		q_a      <= mem[ia];
 		rvalid_a <= 1'b1;
 		a_busy   <= 1'b0;

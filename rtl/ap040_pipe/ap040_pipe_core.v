@@ -19,7 +19,8 @@ module ap040_pipe_core
 #(
 	parameter [31:0] PC_RESET   = 32'h0000_0400,
 	parameter         PROG_WORDS = 10,
-	parameter         L1_AW      = 12   // ap040_pipe_l1.v size: 2**L1_AW words
+	parameter         L1_AW      = 12,  // ap040_pipe_l1.v size: 2**L1_AW words
+	parameter         RESET_VECTORS = 0 // see ap040_pipe_cpu.v: SSP and PC from $0/$4
 )
 (
 	input  clk,
@@ -49,7 +50,8 @@ wire        pt_req, pf_req;
 
 ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
-	.PROG_WORDS(PROG_WORDS)
+	.PROG_WORDS(PROG_WORDS),
+	.RESET_VECTORS(RESET_VECTORS)
 ) u_cpu
 (
 	.clk (clk), .nreset (nreset), .ce (ce), .irq_lvl (irq_lvl),
