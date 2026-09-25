@@ -66,6 +66,9 @@ wire        l1_sup_b, l1_sup_a;
 wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pf_req;
+wire        cm_req, cm_ic, cm_done, ic_en;
+wire  [1:0] cm_scope;
+wire [31:0] cm_addr, mmu_itt0, mmu_itt1;
 wire        l1_fc_ovr;
 wire  [2:0] l1_fc_val;
 
@@ -91,6 +94,10 @@ ap040_pipe_cpu #(
 	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (), .pt_addr (), .pt_fc (),
 	.pt_done (pt_req), .pt_mmusr (32'd0), .pf_req (pf_req), .pf_mode (), .pf_addr (), .pf_fc (),
 	.pf_done (pf_req),
+	// the instruction cache is the IMU's: CINV/CPUSH, IE, and the ITTs for
+	// its caching modes
+	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
+	.cm_done (cm_done), .ic_en (ic_en), .mmu_itt0 (mmu_itt0), .mmu_itt1 (mmu_itt1),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
@@ -104,8 +111,8 @@ ap040_pipe_cpu #(
 	.dbg_ccr(dbg_ccr), .dbg_sr(dbg_sr), .dbg_commits(dbg_commits)
 );
 
-// The instruction memory unit: port A's prefetch window. Nothing to
-// translate on this top.
+// The instruction memory unit: port A's prefetch window and the instruction
+// cache. Nothing to translate on this top.
 wire        f_req, f_sup, f_free, f_ack, f_flt, f_flt_bus, f_w_accept;
 wire [31:0] f_addr;
 wire [29:0] f_w_sla;
@@ -116,8 +123,12 @@ ap040_pipe_imu u_imu
 	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus),
 	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
+	.ic_en    (ic_en), .itt0 (mmu_itt0), .itt1 (mmu_itt1),
+	.cm_req   (cm_req), .cm_ic (cm_ic), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done),
+	.sn_req   (1'b0), .sn_addr (32'd0),     // no other master
 	.pf_xlat  (1'b0), .x_req (), .x_addr (), .x_sup (), .x_pass (1'b0), .x_flt (1'b0), .x_pa (32'd0),
-	.pk_addr  (), .pk_sup (), .pk_hit (1'b0), .pk_pa (32'd0),
+	.x_cm     (2'b00),
+	.pk_addr  (), .pk_sup (), .pk_hit (1'b0), .pk_pa (32'd0), .pk_cm (2'b00),
 	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
 	.f_ack    (f_ack), .f_rdata (mem_rdata), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
 	.w_accept (f_w_accept), .w_sla (f_w_sla)

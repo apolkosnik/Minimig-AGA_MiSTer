@@ -214,6 +214,13 @@ module ap040_pipe_cpu
 	output [31:0] pf_addr,
 	output  [2:0] pf_fc,
 	input         pf_done,
+	// CINV/CPUSH at the caches (ap040_ea_fetch.v), and CACR's enables
+	output        cm_req,
+	output        cm_ic, cm_dc, cm_push,
+	output  [1:0] cm_scope,
+	output [31:0] cm_addr,
+	input         cm_done,
+	output        ic_en,        // CACR IE
 	input  [31:0] l1_q_b,
 	input         l1_rvalid_b,
 
@@ -390,7 +397,7 @@ wire [31:0] eaf_ea_target;
 wire        eac_is_bsr, eac_is_jsr, eac_is_trap, eac_is_illegal;
 wire        eac_is_movesr, eac_is_movec;
 wire        eac_is_rts, eac_is_rte, eac_is_nop, eac_is_reset, eac_is_rtr, eac_bnt;
-wire  [2:0] id_cinv, eac_cinv;
+wire  [5:0] id_cinv, eac_cinv;
 wire  [4:0] id_pmmu, eac_pmmu;
 wire  [5:0] id_fflt, eac_fflt;
 wire        pm_mmusr_we;
@@ -724,12 +731,10 @@ ap040_pipe_irq u_irq
 // its aux_we wiring below for how MOVEC reaches them directly, bypassing
 // whichever bank sr_s/sr_m currently have A7 pointed at.
 //
-// CACR is intentionally a plain, behaviorally inert register: this
-// substrate's unified L1 (see section 5a of AP040_IMPLEMENTATION_PLAN.md)
-// has no per-way enable/disable concept to actually gate, the same
-// "diminished capacity" the plan doc already flagged for CINV/CPUSH.
-// Masked identically to ap040_core.v's own S_MOVEC2 (`& 32'h8000_8000`) so
-// a read-back is bit-exact even though neither bit does anything here.
+// CACR: DE (bit 31) and IE (bit 15), masked as ap040_core.v's S_MOVEC2
+// (`& 32'h8000_8000`) so a read-back is bit-exact. IE enables the
+// instruction cache in the IMU (caches stage B); DE is still inert -- the
+// data cache comes with stage C.
 //---------------------------------------------------------------------------
 
 reg [31:0] vbr;
@@ -775,6 +780,7 @@ always @(posedge clk) begin
 	// MOVEC committing in the same cycle, so it is applied after.
 	if (nreset && ce && pm_mmusr_we) mmusr <= pm_mmusr_val;
 end
+assign ic_en = cacr[15];
 
 assign mmu_tc = tc;     assign mmu_urp = urp;   assign mmu_srp = srp;
 assign mmu_itt0 = itt0; assign mmu_itt1 = itt1; assign mmu_dtt0 = dtt0; assign mmu_dtt1 = dtt1;
@@ -1466,6 +1472,8 @@ ap040_ea_fetch #(
 	.pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .mmusr_we (pm_mmusr_we), .mmusr_val (pm_mmusr_val),
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
+	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope),
+	.cm_addr (cm_addr), .cm_done (cm_done),
 	.smc_hit          (smc_hit),
 	.l1_rflt_b        (l1_rflt_b),
 	.l1_wflt          (l1_wflt),

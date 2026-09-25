@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
-Status: design, revision 2 (2026-09-25), after review; stage A built
-(below, "Stage A as built"). Goal: the MC68040's
+Status: design, revision 2 (2026-09-25), after review; stages A and B
+built (below, "Stage A as built", "Stage B as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -340,6 +340,120 @@ the window (tb_ap040_pipe_dmuport.v test 8: the write's arrival swept
 across the window's refill on a slow memory, reaching that cycle four
 times; without the fix, fetches returned the longword two or three past the
 one asked for).
+
+B2, CINV and CPUSH. Decode keeps the instruction's whole field -- caches
+(IC, DC), push, scope -- and reads An as its source. EA-fetch runs it at the
+caches as it runs PFLUSH at the MMU: once EX, WB and the memory side are
+quiet, the request goes out with An and is held until done (cm_*), fetches
+are quiesced meanwhile, and the instruction retires with a refetch -- the
+68040's interlock (10.3: previous writes and pending prefetches complete,
+and nothing behind it reaches the caches until it is done). Line and page
+name a physical address; a page is 4 KB whatever TC.P says (the MC68EC040
+notes of the manual). The IMU does the instruction cache's part once it is
+idle; the data cache's is the DMU's from stage C, and until then there is
+nothing to do. The sequential core keeps widening every form to all lines.
+
+B3, the instruction cache, in the IMU:
+- The window stays the fetch unit's source; with CACR IE set the cache is
+  the source of the window's reads. A read is held in a register (lk_*):
+  its set is read in the next cycle and compared in the one after. The read
+  cannot address the RAM in its own cycle: it forms from port A's address,
+  which on the bus16 top arrives about 19.5 ns into the 25 ns cycle.
+- A hit answers with the half-line (PA3), which is the longword asked for
+  plus the next one when both lie in it. The window may send its next read
+  in the cycle an answer arrives. Hits therefore bring two longwords every
+  two cycles, and the fetch unit takes a longword a cycle, the rate it
+  always could; the plan's four-word fetch queue is not needed for it.
+  Eight cached longwords reach the fetch unit in ten cycles.
+- A miss reads the whole line, the longword asked for first and the rest
+  wrapping (4.1, 4.6.1). Each longword is one bus controller read, since
+  the 16-bit adapter has no burst, and the first goes in the cycle the miss
+  is seen.
+- The longwords gather in the line read buffer, and each answers the
+  window's read for it as it arrives. The stream takes a line in the order
+  the fill reads it, from wherever it came in.
+- Each half-line is written once both its longwords are in. The tag goes
+  in with the last, in the same cycle that makes the line valid; any
+  lookup after that sees it.
+- A read for another line waits until the fill ends.
+- A bus error on any beat abandons the line, and its way stays invalid.
+  Only a read waiting for that very longword is faulted. A read waiting
+  for another longword is looked up again, and fills again from its own
+  longword.
+- Replacement takes the first invalid way, else the way a 2-bit counter
+  names. The counter advances on every half-line looked up, and once more
+  after it names a way (4.1).
+- Reads with IE clear, and reads cache-inhibited by a TTR's or a page's CM
+  (1x), go to the bus controller one longword each, allocate nothing and
+  leave the cache as it was. The MMU's peek now reports its page's CM with
+  the page. With IE clear and the cache idle, the window's reads take B1's
+  path unchanged; a read already out when IE changes is still answered.
+- CPU writes do not reach the cache (4.5). The window's own snoop remains:
+  it empties the window, and the refetch then comes from the cache.
+- A read the window abandons is answered at once, unless its bus read is
+  already out, and the miss it would have made is not filled. A fill
+  already under way completes: the line is wanted, and abandoning a line
+  at a loop's branch would keep that line from ever being cached.
+- CINV/CPUSH on the instruction cache: all ways at once (valid bits in
+  flops); a line reads its set's tag row and invalidates the matching way;
+  a page reads all 64 rows, one a cycle, comparing PA31-PA12. That is 66
+  cycles, where the 68040's CINVP takes 266 (10.3). There is no dirty data
+  here, so CPUSH is CINV.
+- Snoops (sn_*) follow Table 4-3, V5/V6. They read the arrays' copy of the
+  tag rows, never the lookup's port.
+  - A snoop of the line being filled keeps it from being made valid.
+  - A copy row read in the cycle a fill writes that set's tags is
+    undefined in the silicon, and the snoop then takes the whole set.
+  - The valid bits are updated for a snoop's set and one other change
+    (a miss's victim, a fill's end, a maintenance row) in the same cycle,
+    merged when the two are the same set.
+  - Nothing on the tops writes memory behind the CPU yet; the card's
+    chipset will drive the snoop in stage F.
+- The price is on code run once. Each line's first longword waits two
+  cycles longer than a bus read would, and a line entered partway reads
+  longwords the stream never wants. t_integer, which runs its whole battery
+  with the caches on, takes 11,941 cycles on the program bench's first
+  phase against 10,961 with IE clear. Loops gain: dhry takes 652,982
+  against 1,424,493. Burst line reads (the DDR3 line interface) are what
+  would remove the cost.
+- Fit at 25 ns, bus16 top: 40.81 MHz, +0.497 ns, 21,243 ALMs, 21 RAM blocks
+  (B1: +0.310, 20,533 ALMs, 10 blocks) -- the eleven blocks the data and
+  tag rows take; the snoop copy is not in it while the tops tie the snoop
+  off. The worst paths are EA-fetch's own; the IMU's are the window's.
+
+Tests:
+- t_icache.s (pipelined core only). It runs translated, with the code's
+  pages inhibited, so that only the stubs it probes are ever cached. It
+  covers:
+  - stale lines after stores (4.5);
+  - CINV and CPUSH on a line, a page and everything, each leaving the
+    rest, with the data cache's forms leaving the instruction cache;
+  - IE clear, which bypasses the cache and keeps it;
+  - inhibited TTRs and pages, which allocate nothing;
+  - four ways of a set held, and a fifth line replacing one;
+  - an error on a beat nobody asked for, which faults nothing and leaves
+    the line invalid;
+  - one on a beat the program needs;
+  - a physical An through an alias.
+- tb_ap040_pipe_icache.v, which drives the IMU and membus at their ports.
+  It checks timing and order:
+  - the fill order;
+  - the hit latency and a hit's silence on the bus;
+  - the streaming rate;
+  - 4.5 against a port-B write;
+  - the replacement order against a model of the counter;
+  - CINV's scopes, its duration and its wait for a fill;
+  - beat errors;
+  - abandoned reads;
+  - IE changing under a read and under a fill;
+  - inhibited reads;
+  - the line read buffer;
+  - snoops: back to back, swept across a fill and across its tag write,
+    and meeting a CINVP row and a miss's victim in the same cycle.
+- tb_ap040_pipe_dmuport.v test 8 is run with IE clear and with IE set.
+- The programs that turn the caches on now run through the cache: t_integer,
+  t_fastpaths, t_fpu, t_exceptions (fetch bus errors), t_moves_fc, t_mmu,
+  t_bitfield_cache, t_cinv_moves and dhry.
 
 ## Tests
 

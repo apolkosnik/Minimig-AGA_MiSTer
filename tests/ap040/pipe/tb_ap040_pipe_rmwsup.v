@@ -93,6 +93,7 @@ ap040_pipe_cpu #(
 	.mmu_tc(), .mmu_urp(), .mmu_srp(), .mmu_itt0(), .mmu_itt1(), .mmu_dtt0(), .mmu_dtt1(),
 	.pt_req(), .pt_write(), .pt_addr(), .pt_fc(), .pt_done(1'b0), .pt_mmusr(32'd0),
 	.pf_req(), .pf_mode(), .pf_addr(), .pf_fc(), .pf_done(1'b0),
+	.cm_req(), .cm_ic(), .cm_dc(), .cm_push(), .cm_scope(), .cm_addr(), .cm_done(1'b0), .ic_en(),
 
 	.dbg_if_valid (dbg_if_valid),  .dbg_if_pc (dbg_if_pc),
 	.dbg_id_valid (dbg_id_valid),  .dbg_id_pc (dbg_id_pc),

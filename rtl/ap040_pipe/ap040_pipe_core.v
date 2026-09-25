@@ -46,7 +46,7 @@ wire [31:0] l1_addr_a, l1_addr_b, l1_data_b, l1_q_b;
 wire [15:0] l1_rdata_a, l1_rdata_a2;
 wire  [1:0] l1_size_b;
 wire        l1_req_a, l1_rvalid_a, l1_rd_b, l1_rvalid_b, l1_wren_b, l1_wr_busy;
-wire        pt_req, pf_req;
+wire        pt_req, pf_req, cm_req;
 
 ap040_pipe_cpu #(
 	.PC_RESET  (PC_RESET),
@@ -69,6 +69,9 @@ ap040_pipe_cpu #(
 	.l1_idle (1'b1), .l1_quiet (), .l1_wr_drop (), .pt_req (pt_req), .pt_write (), .pt_addr (), .pt_fc (),
 	.pt_done (pt_req), .pt_mmusr (32'd0), .pf_req (pf_req), .pf_mode (), .pf_addr (), .pf_fc (),
 	.pf_done (pf_req),
+	// ...nor caches: CINV/CPUSH at once
+	.cm_req (cm_req), .cm_ic (), .cm_dc (), .cm_push (), .cm_scope (), .cm_addr (), .cm_done (cm_req),
+	.ic_en (),
 	.dbg_if_valid  (dbg_if_valid),
 	.dbg_if_pc     (dbg_if_pc),
 	.dbg_id_valid  (dbg_id_valid),

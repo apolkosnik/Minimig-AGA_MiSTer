@@ -55,9 +55,12 @@
 //      cycle, or it lands as the second. The bus controller's own read     //
 //      cannot go then (the write is waiting there), but a translation      //
 //      could, and did. The write's arrival is swept across the window's    //
-//      refill on a slow memory, each time in a fresh 64 bytes of page 8,   //
+//      refill on a slow memory, each time in a fresh 32 bytes of page 8,   //
 //      and every longword then fetched must be memory's; the sweep must    //
-//      reach the cycle it is after (snoop_idle).                           //
+//      reach the cycle it is after (snoop_idle). Twice: the window's reads //
+//      to the bus controller (IE clear), then to the instruction cache,   //
+//      which takes a read whatever the bus is doing (IE set; the written  //
+//      longword itself is then the cache's to keep, MC68040UM 4.5).       //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -98,6 +101,7 @@ endtask
 reg  [31:0] tc = 32'd0;
 wire [31:0] urp = 32'h4000, srp = 32'h4000, ttr0 = 32'd0;
 reg  [31:0] itt0 = 32'd0;
+reg         ic_en = 1'b0;
 
 //------------------------------------------------------------- CPU, port B
 reg  [31:0] c_addr = 32'd0, c_wdata = 32'd0;
@@ -120,6 +124,7 @@ wire        d_req, d_write, d_acc, d_sup, d_pass, d_flt;
 wire [31:0] d_addr, d_pa;
 wire        i_req, i_sup, i_pass, i_flt, ip_sup, ip_hit;
 wire [31:0] i_addr, i_pa, ip_addr, ip_pa;
+wire  [1:0] i_cm, ip_cm;
 wire [31:0] bb_addr, bb_la, bb_wdata, bb_q, bb_rx_addr;
 wire  [1:0] bb_size, bb_rx_size;
 wire        bb_rd, bb_wr, bb_sup, bb_fc_ovr, bb_rvalid, bb_wr_busy_w, bb_rflt, bb_flt_bus, bb_flt_ma, bb_idle, bb_rx;
@@ -157,8 +162,8 @@ ap040_pipe_mmu u_mmu
 (
 	.clk (clk), .nreset (nreset),
 	.tc (tc), .urp (urp), .srp (srp), .itt0 (itt0), .itt1 (ttr0), .dtt0 (ttr0), .dtt1 (ttr0),
-	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (),
-	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa),
+	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (i_cm),
+	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa), .ip_cm (ip_cm),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (),
 	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
@@ -179,8 +184,12 @@ ap040_pipe_imu u_imu
 	.address_a (a_addr), .en_a (en_a), .q_a (q_a), .q_a2 (q_a2), .rvalid_a (rvalid_a),
 	.rflt_a (rflt_a), .rflt_a_bus (rflt_a_bus),
 	.sup (1'b1), .pf_inval (1'b0), .quiesce (1'b0),
+	.ic_en (ic_en), .itt0 (itt0), .itt1 (ttr0),
+	.cm_req (1'b0), .cm_ic (1'b0), .cm_scope (2'd0), .cm_addr (32'd0), .cm_done (),
+	.sn_req (1'b0), .sn_addr (32'd0),
 	.pf_xlat (tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup), .x_pass (i_pass), .x_flt (i_flt), .x_pa (i_pa),
-	.pk_addr (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
+	.x_cm (i_cm),
+	.pk_addr (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa), .pk_cm (ip_cm),
 	.f_req (ib_req), .f_addr (ib_addr), .f_sup (ib_sup), .f_free (ib_free),
 	.f_ack (ib_ack), .f_rdata (mem_rdata), .f_flt (ib_flt), .f_flt_bus (ib_flt_bus),
 	.w_accept (ib_w_accept), .w_sla (ib_w_sla)
@@ -360,8 +369,8 @@ task fetch;
 	end
 endtask
 
-integer i, d, k;
-reg [15:0] lo16;
+integer i, d, k, ie;
+reg [15:0] lo16, rg;
 initial begin
 	// tables: every page identity-mapped and resident, page $A invalid
 	for (i = 0; i < 65536; i = i + 1) mem[i] = 8'h00;
@@ -489,31 +498,41 @@ initial begin
 	//------------------------------------------------------------- test 8
 	repeat (20) step;
 	mem_lat = 5;
-	for (d = 0; d < 40; d = d + 1) begin
-		// 64 bytes at logical $8200 + 64d, physical $5200 + 64d
-		for (k = 0; k < 5; k = k + 1) begin
-			lo16 = 16'h1000 + d * 16 + k;
-			wr32(16'h5200 + d * 64 + k * 4, {4'hC, d[5:0], k[5:0], lo16});
-		end
-		fetch(32'h0000_8200 + d * 64);
-		if (f_flt || f_q !== {4'hC, d[5:0], 6'd0}) begin
-			$display("    d=%0d fetched %h", d, f_q);
-			fail("8: the first fetch of a sweep step did not return its word");
-		end
-		repeat (d) step;
-		write_hold(32'h0000_820C + d * 64, 32'h5A5A_0000 + d);
-		repeat (60) step;
-		for (k = 0; k < 4; k = k + 1) begin
-			fetch(32'h0000_8200 + d * 64 + k * 4);
-			if (f_flt || f_q !== rd32(16'h5200 + d * 64 + k * 4) >> 16) begin
-				$display("    d=%0d k=%0d fetched %h, memory %h", d, k, f_q, rd32(16'h5200 + d * 64 + k * 4));
-				fail("8: a fetch after a write into the window returned another longword's word");
+	for (ie = 0; ie < 2; ie = ie + 1) begin
+		ic_en = ie[0];
+		snoop_idle = 0;
+		for (d = 0; d < 40; d = d + 1) begin
+			// 32 bytes at logical $8200 + 32d ($8800 + 32d with IE set),
+			// physical $5000 on: the window reads at most 24 bytes past a
+			// step's first longword, so the next step's are fresh
+			rg = 16'h0200 + ie[0] * 16'h0600 + d * 32;
+			for (k = 0; k < 5; k = k + 1) begin
+				lo16 = 16'h1000 + d * 16 + k;
+				wr32(16'h5000 + rg + k * 4, {4'hC, d[5:0], k[5:0], lo16});
+			end
+			fetch(32'h0000_8000 + rg);
+			if (f_flt || f_q !== {4'hC, d[5:0], 6'd0}) begin
+				$display("    ie=%0d d=%0d fetched %h", ie, d, f_q);
+				fail("8: the first fetch of a sweep step did not return its word");
+			end
+			repeat (d) step;
+			write_hold(32'h0000_800C + rg, 32'h5A5A_0000 + d);
+			repeat (60) step;
+			// the written longword is the cache's to keep (4.5): with IE set,
+			// only the three the write left
+			for (k = 0; k < 4 - ie; k = k + 1) begin
+				fetch(32'h0000_8000 + rg + k * 4);
+				if (f_flt || f_q !== rd32(16'h5000 + rg + k * 4) >> 16) begin
+					$display("    ie=%0d d=%0d k=%0d fetched %h, memory %h", ie, d, k, f_q, rd32(16'h5000 + rg + k * 4));
+					fail("8: a fetch after a write into the window returned another longword's word");
+				end
 			end
 		end
+		if (snoop_idle == 0) fail("8: no snoop emptied the window with nothing in flight (the test no longer tests)");
+		$display("test 8, IE %0d: %0d snoop cycle(s) with the window idle", ie, snoop_idle);
 	end
+	ic_en = 1'b0;
 	mem_lat = 1;
-	if (snoop_idle == 0) fail("8: no snoop emptied the window with nothing in flight (the test no longer tests)");
-	$display("test 8: %0d snoop cycle(s) with the window idle", snoop_idle);
 
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");

@@ -86,6 +86,9 @@ wire        l1_inval_a;
 wire        l1_rflt_a, l1_rflt_a_bus, l1_rflt_b, l1_wflt, l1_flt_bus, l1_flt_ma, l1_wr_sync;
 wire [31:0] mmu_tc, mmu_urp, mmu_srp, mmu_itt0, mmu_itt1, mmu_dtt0, mmu_dtt1;
 wire        l1_idle, l1_quiet, l1_wr_drop, pt_req, pt_write, pt_done, pf_req, pf_done;
+wire        cm_req, cm_ic, cm_done, ic_en;
+wire  [1:0] cm_scope;
+wire [31:0] cm_addr;
 wire [31:0] pt_addr, pt_mmusr, pf_addr;
 wire  [2:0] pt_fc, pf_fc;
 wire  [1:0] pf_mode;
@@ -96,6 +99,7 @@ wire  [2:0] l1_fc_val;
 // stream), data (the DMU)
 wire        i_req, i_sup, i_pass, i_flt, ip_sup, ip_hit;
 wire [31:0] i_addr, i_pa, ip_addr, ip_pa;
+wire  [1:0] i_cm, ip_cm;
 wire        d_req, d_write, d_acc, d_sup, d_pass, d_flt;
 wire [31:0] d_addr, d_pa;
 wire        dmu_wr_pend;
@@ -133,6 +137,8 @@ ap040_pipe_cpu #(
 	.l1_idle (l1_idle), .l1_quiet (l1_quiet), .l1_wr_drop (l1_wr_drop), .pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr),
 	.pf_fc (pf_fc), .pf_done (pf_done),
+	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (), .cm_push (), .cm_scope (cm_scope), .cm_addr (cm_addr),
+	.cm_done (cm_done), .ic_en (ic_en),
 	.mmu_tc(mmu_tc), .mmu_urp(mmu_urp), .mmu_srp(mmu_srp), .mmu_itt0(mmu_itt0), .mmu_itt1(mmu_itt1),
 	.mmu_dtt0(mmu_dtt0), .mmu_dtt1(mmu_dtt1),
 	.l1_fc_ovr (l1_fc_ovr), .l1_fc_val (l1_fc_val),
@@ -180,8 +186,8 @@ ap040_pipe_mmu u_mmu
 	.clk (clk), .nreset (nreset),
 	.tc (mmu_tc), .urp (mmu_urp), .srp (mmu_srp),
 	.itt0 (mmu_itt0), .itt1 (mmu_itt1), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
-	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (),
-	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa),
+	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (i_cm),
+	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa), .ip_cm (ip_cm),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (),
 	.pt_req (pt_req), .pt_write (pt_write), .pt_access (1'b0), .pt_addr (pt_addr), .pt_fc (pt_fc),
@@ -205,9 +211,14 @@ ap040_pipe_imu u_imu
 	.q_a      (l1_rdata_a), .q_a2 (l1_rdata_a2), .rvalid_a(l1_rvalid_a),
 	.rflt_a   (l1_rflt_a), .rflt_a_bus (l1_rflt_a_bus),
 	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
+	.ic_en    (ic_en), .itt0 (mmu_itt0), .itt1 (mmu_itt1),
+	.cm_req   (cm_req), .cm_ic (cm_ic), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done),
+	// nothing here writes memory behind the CPU: the chipset's snoop comes
+	// with the card's integration (caches stage F)
+	.sn_req   (1'b0), .sn_addr (32'd0),
 	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
-	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa),
-	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa),
+	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa), .x_cm (i_cm),
+	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa), .pk_cm (ip_cm),
 	.f_req    (f_req), .f_addr (f_addr), .f_sup (f_sup), .f_free (f_free),
 	.f_ack    (f_ack), .f_rdata (mem_rdata), .f_flt (f_flt), .f_flt_bus (f_flt_bus),
 	.w_accept (f_w_accept), .w_sla (f_w_sla)

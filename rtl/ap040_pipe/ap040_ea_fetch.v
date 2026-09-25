@@ -357,7 +357,7 @@ module ap040_ea_fetch
 	input             eac_is_rts,
 	input             eac_is_rte,
 	input             eac_is_nop,
-	input       [2:0] eac_cinv,        // CINV/CPUSH {valid, IC, DC}, see ap040_decode.v
+	input       [5:0] eac_cinv,        // CINV/CPUSH {valid, IC, DC, push, scope}, see ap040_decode.v
 	// A store this instruction made, accepted last cycle, overlaps an
 	// instruction fetched behind it (ap040_pipe_cpu.v's snoop, registered:
 	// it is judged a cycle late, on the store's registered address, to keep
@@ -388,6 +388,12 @@ module ap040_ea_fetch
 	output     [31:0] pf_addr,
 	output      [2:0] pf_fc,
 	input             pf_done,
+	// CINV/CPUSH at the caches: the field and An, held until cm_done
+	output            cm_req,
+	output            cm_ic, cm_dc, cm_push,
+	output      [1:0] cm_scope,     // 01 line, 10 page, 11 all
+	output     [31:0] cm_addr,
+	input             cm_done,
 	input             l1_wflt,
 	input             l1_flt_bus,
 	input             l1_flt_ma,   // the fault was past the boundary of a transfer crossing pages
@@ -1768,7 +1774,13 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // flushes its prefetch: what was fetched behind it went through the old
 // translation. The MMU's done is one clock long and this stage runs under
 // ce, so it is caught outside ce.
-wire       pm       = eac_pmmu[4];
+// CINV/CPUSH (caches stage B) go the same way to the caches, with An's
+// physical line or page: the 68040 lets previous writes and pending
+// prefetches complete first and interlocks the stages behind until the
+// caches are done (MC68040UM 10.3), and what follows is refetched -- from
+// caches that no longer hold what was invalidated.
+wire       pm_cinv  = eac_cinv[5];
+wire       pm       = eac_pmmu[4] || pm_cinv;
 wire       pm_ptest = eac_pmmu[3];
 localparam [1:0] PM_IDLE = 2'd0, PM_REQ = 2'd1, PM_DONE = 2'd2;
 reg  [1:0] pm_ph;
@@ -1799,7 +1811,7 @@ assign     mmu_quiet = eac_valid && (pm || mc);
 always @(posedge clk)
 	if (!nreset) begin pm_ack <= 1'b0; pm_mmusr <= 32'd0; end
 	else if (pm_ph != PM_REQ) pm_ack <= 1'b0;
-	else if (pm_ptest ? pt_done : pf_done) begin pm_ack <= 1'b1; pm_mmusr <= pt_mmusr; end
+	else if (pm_ptest ? pt_done : pm_cinv ? cm_done : pf_done) begin pm_ack <= 1'b1; pm_mmusr <= pt_mmusr; end
 always @(posedge clk)
 	if (!nreset) begin pm_ph <= PM_IDLE; pm_addr <= 32'd0; end
 	else if (ce) begin
@@ -1811,10 +1823,16 @@ assign pt_req    = (pm_ph == PM_REQ) && pm_ptest && !pm_ack;
 assign pt_write  = eac_pmmu[2];
 assign pt_addr   = pm_addr;
 assign pt_fc     = dfc_in3;
-assign pf_req    = (pm_ph == PM_REQ) && !pm_ptest && !pm_ack;
+assign pf_req    = (pm_ph == PM_REQ) && !pm_ptest && !pm_cinv && !pm_ack;
 assign pf_mode   = eac_pmmu[1:0];
 assign pf_addr   = pm_addr;
 assign pf_fc     = dfc_in3;
+assign cm_req    = (pm_ph == PM_REQ) && pm_cinv && !pm_ack;
+assign cm_ic     = eac_cinv[4];
+assign cm_dc     = eac_cinv[3];
+assign cm_push   = eac_cinv[2];
+assign cm_scope  = eac_cinv[1:0];
+assign cm_addr   = pm_addr;
 assign mmusr_we  = (pm_ph == PM_REQ) && pm_ptest && pm_ack;
 assign mmusr_val = pm_mmusr;
 
@@ -2037,7 +2055,7 @@ reg       exc_vec_pending;
 // cycle -- see header for why the check couldn't happen any earlier.
 // The SR forms of ORI/ANDI/EORI are privileged; the CCR forms are not, and
 // that is the whole difference between them at this level.
-wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset || eac_cinv[2] || eac_pmmu[4] ||
+wire eac_is_priv_capable = eac_is_movesr || eac_is_movec || (eac_is_rte && !eac_is_rtr) || eac_moves[2] || eac_is_reset || eac_cinv[5] || eac_pmmu[4] ||
                             (eac_mvfsr[1] && !eac_mvfsr[0]) ||
                             (eac_is_immsr && eac_immsr_to_sr);
 wire eac_is_priv         = eac_is_priv_capable && !sr_in[13];
@@ -3293,7 +3311,7 @@ always @(posedge clk) begin
 			// CINV/CPUSH, or a store that landed on an instruction already
 			// fetched behind this one (smc_seen). An exception entry
 			// redirects anyway.
-			eaf_refetch <= eac_valid && !eaf_stall && !exc_go && (eac_cinv[2] || pm || mc || sr_wr_refetch || smc_seen || smc_now);
+			eaf_refetch <= eac_valid && !eaf_stall && !exc_go && (pm || mc || sr_wr_refetch || smc_seen || smc_now);
 			if (hold_hazard) begin
 				// The bubble, and it has to come FIRST. Below mem_issue it
 				// set mem_pending for a read that stall_self had already

@@ -102,8 +102,11 @@ ap040_pipe_imu imu (
 	.rflt_a(), .rflt_a_bus(),
 	// the fetch side alone: no invalidation, no faults, nothing translated
 	.sup(1'b1), .pf_inval(1'b0), .quiesce(1'b0),
-	.pf_xlat(1'b0), .x_req(), .x_addr(), .x_sup(), .x_pass(1'b0), .x_flt(1'b0), .x_pa(32'd0),
-	.pk_addr(), .pk_sup(), .pk_hit(1'b0), .pk_pa(32'd0),
+	.ic_en(1'b0), .itt0(32'd0), .itt1(32'd0),
+	.cm_req(1'b0), .cm_ic(1'b0), .cm_scope(2'd0), .cm_addr(32'd0), .cm_done(),
+	.sn_req(1'b0), .sn_addr(32'd0),
+	.pf_xlat(1'b0), .x_req(), .x_addr(), .x_sup(), .x_pass(1'b0), .x_flt(1'b0), .x_pa(32'd0), .x_cm(2'b00),
+	.pk_addr(), .pk_sup(), .pk_hit(1'b0), .pk_pa(32'd0), .pk_cm(2'b00),
 	.f_req(f_req), .f_addr(f_addr), .f_sup(f_sup), .f_free(f_free),
 	.f_ack(f_ack), .f_rdata(mem_rdata), .f_flt(f_flt), .f_flt_bus(f_flt_bus),
 	.w_accept(f_w_accept), .w_sla(f_w_sla)

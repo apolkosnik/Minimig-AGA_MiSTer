@@ -166,7 +166,7 @@ module ap040_ea_calc
 	input             id_is_movec,
 	input             id_is_rts,
 	input             id_is_nop,
-	input       [2:0] id_cinv,
+	input       [5:0] id_cinv,
 	input       [4:0] id_pmmu,
 	input       [5:0] id_fflt,
 	input             id_bnt,
@@ -262,7 +262,7 @@ module ap040_ea_calc
 	output reg        eac_is_movec,
 	output reg        eac_is_rts,
 	output reg        eac_is_nop,
-	output reg  [2:0] eac_cinv,
+	output reg  [5:0] eac_cinv,
 	output reg  [4:0] eac_pmmu,
 	output reg  [5:0] eac_fflt,
 	output reg        eac_bnt,
@@ -292,7 +292,7 @@ module ap040_ea_calc
 // MOVEM in EA-fetch (asserted there), whose write set is all sixteen.
 wire        agu_special = id_mm[5] || id_mm[6] || id_moves[2] || id_movep[2] || id_ml[6] || id_bf[4] ||
                           id_ck2[2] || id_cas[3] || id_cas[4] || id_m16[3] || id_fp || id_fx[5] ||
-                          id_is_movem || id_is_rts || id_is_rte || id_is_rtr || id_cinv[2] || id_pmmu[4] ||
+                          id_is_movem || id_is_rts || id_is_rte || id_is_rtr || id_cinv[5] || id_pmmu[4] ||
                           id_fflt[5] || id_mvfsr[1];   // mvfsr[0] is CCR-or-SR: opcode bit 9, whatever the instruction
 // A plain store's base is its destination register; a displacement
 // store's, like a load's, is the source field's (decode points it at An,
@@ -449,7 +449,7 @@ always @(posedge clk) begin
 		eac_is_movec     <= 1'b0;
 		eac_is_rts       <= 1'b0;
 		eac_is_nop       <= 1'b0;
-		eac_cinv         <= 3'd0;
+		eac_cinv         <= 6'd0;
 		eac_pmmu         <= 5'd0;
 		eac_fflt         <= 6'd0;
 		eac_bnt          <= 1'b0;

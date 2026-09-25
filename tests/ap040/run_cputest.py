@@ -70,6 +70,8 @@ PIPE_SOURCES = [
     PIPE / "ap040_pipe_dmu.v",   # ap040_pipe_bus16.v's data memory unit
     PIPE / "ap040_pipe_mmu.v",   # ...and its MMU
     PIPE / "ap040_pipe_imu.v",   # ...and instruction memory unit
+    PIPE / "ap040_pipe_cache_arr.v",   # its cache's arrays
+    HERE / "sim_pipe_ram.v",     # ...their block RAMs
     HERE / "sim_dpram.v",        # its ATC rows
 ]
 RTL_SOURCES = [

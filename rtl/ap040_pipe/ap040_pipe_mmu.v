@@ -57,14 +57,15 @@ module ap040_pipe_mmu
 	output      [1:0] i_cm,        // caching mode: 00 WT, 01 CB, 10/11 inhibited
 
 	// A peek at the instruction port's most recent translation: whether an
-	// address's page is the one it translated last (or a TTR's), and where
-	// that page is -- combinational from this unit's registers, no search,
-	// no fault. The bus controller's stream sends a prefetch in its own cycle
-	// when this covers it.
+	// address's page is the one it translated last (or a TTR's), where that
+	// page is and its caching mode -- combinational from this unit's
+	// registers, no search, no fault. The IMU's stream sends a prefetch in
+	// its own cycle when this covers it.
 	input      [31:0] ip_addr,
 	input             ip_sup,
 	output            ip_hit,
 	output     [31:0] ip_pa,
+	output      [1:0] ip_cm,
 
 	// data translation port (the DMU)
 	// Both are driven from registers: a translation's compare and its
@@ -252,10 +253,12 @@ wire        dh_w = dh_ent[0];
 // transparent translation
 //---------------------------------------------------------------------------
 
-wire ip_ttr  = ttr_match(itt0, ip_addr, ip_sup) || ttr_match(itt1, ip_addr, ip_sup);
+wire ip_ttr_a = ttr_match(itt0, ip_addr, ip_sup);
+wire ip_ttr   = ip_ttr_a || ttr_match(itt1, ip_addr, ip_sup);
 // resident and allowed at this privilege: a peek never reports a fault
 assign ip_hit = tc_e && (ip_ttr || (ip_uhit && iu_ent[45] && !(!ip_sup && iu_ent[4])));
 assign ip_pa  = ip_ttr ? ip_addr : tc_p ? {iu_ent[27:9], ip_addr[12:0]} : {iu_ent[27:8], ip_addr[11:0]};
+assign ip_cm  = ip_ttr ? (ip_ttr_a ? itt0[6:5] : itt1[6:5]) : iu_ent[3:2];
 wire i_ttr_a = ttr_match(itt0, i_addr, i_sup);
 wire i_ttr_b = ttr_match(itt1, i_addr, i_sup);
 wire i_ttr   = i_ttr_a | i_ttr_b;

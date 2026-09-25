@@ -32,7 +32,8 @@ CORE = [RTL / n for n in (
     "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
-    "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
+    "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v",
+    "ap040_pipe_cache_arr.v")] + [ROOT / "rtl/ap040/ap040_fpu.v", HERE / "sim_pipe_ram.v"]
 
 # (name, block). Registers at the start: D1 27, D2 3, D3 8, A0 $1000,
 # A1 $1800, A4 $1800, A5 $2000. The review's 60 primary sequences, its

@@ -32,8 +32,9 @@ set_global_assignment -name VERILOG_FILE ../../../rtl/ap040/ap040_bus16_adapter.
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_dmu.v
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_mmu.v
 set_global_assignment -name VHDL_FILE ../../../rtl/bram.vhd
-# The memory units' arrays (doc_AP040_PIPELINE_CACHES.md), and the stage-0
-# fit of them alone (run.sh <work> ap040_pipe_cache_fit).
+# The memory units' arrays (doc_AP040_PIPELINE_CACHES.md) -- the IMU's on
+# the sys and bus16 tops -- and the stage-0 fit of them alone (run.sh <work>
+# ap040_pipe_cache_fit).
 set_global_assignment -name VHDL_FILE ../../../rtl/ap040_pipe/ap040_pipe_ram.vhd
 set_global_assignment -name VERILOG_FILE ../../../rtl/ap040_pipe/ap040_pipe_cache_arr.v
 set_global_assignment -name VERILOG_FILE ../../../tests/ap040/pipe_synth/ap040_pipe_cache_fit.v

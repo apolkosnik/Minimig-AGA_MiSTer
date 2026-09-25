@@ -389,7 +389,7 @@ module ap040_decode
 	output reg        id_is_movec,
 	output reg        id_is_rts,
 	output reg        id_is_nop,       // T0 trace treats NOP as a change of flow (milestone 79)
-	output reg  [2:0] id_cinv,         // CINV/CPUSH: {valid, IC, DC}
+	output reg  [5:0] id_cinv,         // CINV/CPUSH: {valid, IC, DC, push, scope[1:0]}
 	output reg  [4:0] id_pmmu,         // PTEST/PFLUSH: {valid, PTEST, write, mode}
 	// An instruction whose fetch faulted: {valid, bus error, the faulted
 	// word's offset in words from id_pc}. It issues as the ILLEGAL it was
@@ -2355,9 +2355,11 @@ endfunction
 
 wire is_aline = (if_opcode[15:12] == 4'hA);
 // CINV/CPUSH (2026-09-24): F4xx with a scope; scope 00 stays an F-line
-// exception, classified ahead of privilege as ap040_core.v does. This core
-// has no caches of its own, so both are a refetch of what follows -- and an
-// emptied prefetch stream -- behind a privilege check.
+// exception, classified ahead of privilege as ap040_core.v does. The whole
+// field goes on -- caches (bits 7-6: IC, DC), push (5), scope (4-3: line,
+// page, all) -- with An, the physical address of a line or page, read as
+// the source (caches stage B); EA-fetch runs it at the caches as it runs
+// PFLUSH at the MMU.
 wire is_cinv  = (if_opcode[15:8] == 8'hF4) && (if_opcode[4:3] != 2'b00);
 // PFLUSH (F500-F51F) and PTEST (F548-F54F write, F568-F56F read), for
 // rtl/ap040/ap040_mmu.v beside the bus (2026-09-24). The rest of PTEST's
@@ -3447,7 +3449,7 @@ always @(posedge clk) begin
 		id_is_movec     <= 1'b0;
 		id_is_rts       <= 1'b0;
 		id_is_nop       <= 1'b0;
-		id_cinv         <= 3'd0;
+		id_cinv         <= 6'd0;
 		id_pmmu         <= 5'd0;
 		id_fflt         <= 6'd0;
 		id_bnt          <= 1'b0;
@@ -4003,7 +4005,7 @@ always @(posedge clk) begin
 					id_is_movec     <= h_is_movec;
 					id_is_rts       <= h_is_rtd;
 					id_is_nop       <= 1'b0;
-					id_cinv         <= 3'd0;
+					id_cinv         <= 6'd0;
 					id_pmmu         <= 5'd0;
 					id_bnt          <= bnt_gather;
 					id_is_reset     <= 1'b0;
@@ -4075,7 +4077,7 @@ always @(posedge clk) begin
 						id_is_movec <= 1'd0;
 						id_is_rts <= 1'd0;
 						id_is_nop <= 1'd0;
-						id_cinv         <= 3'd0;
+						id_cinv         <= 6'd0;
 						id_pmmu         <= 5'd0;
 						id_is_reset <= 1'd0;
 						id_is_rte <= 1'd0;
@@ -4146,7 +4148,7 @@ always @(posedge clk) begin
 				// mem_complete path (id_is_mem_src below) instead of
 				// getting its own sequencer the way RTE needs.
 				id_src_reg      <= is_xm ? {1'b1, d_rn} :
-				                   is_pmmu ? {1'b1, d_rn} :
+				                   (is_pmmu || is_cinv) ? {1'b1, d_rn} :
 				                   (is_move_usp && usp_to) ? {1'b1, d_rn} :
 				                   is_exg ? {!exg_dd, d_rn} :
 				                   is_tst_an ? {1'b1, d_rn} :
@@ -4317,7 +4319,7 @@ always @(posedge clk) begin
 				id_is_movec     <= if_valid && is_move_usp;
 				id_is_rts       <= if_valid && is_rts;
 				id_is_nop       <= if_valid && is_nop;
-				id_cinv         <= {if_valid && is_cinv, if_opcode[7:6]};
+				id_cinv         <= {if_valid && is_cinv, if_opcode[7:3]};
 				id_pmmu         <= {if_valid && is_pmmu, is_ptest, !if_opcode[5], if_opcode[4:3]};
 				id_bnt          <= if_valid && bnt_byte;
 				id_is_reset     <= if_valid && is_reset;

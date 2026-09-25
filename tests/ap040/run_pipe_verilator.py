@@ -25,17 +25,23 @@ CORE = [RTL / n for n in (
     "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_inst_fetch.v", "ap040_decode.v",
     "ap040_ea_calc.v", "ap040_ea_fetch.v", "ap040_execute.v",
     "ap040_writeback.v", "ap040_pipe_alu.v", "ap040_pipe_regfile.v",
-    "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v")] + [ROOT / "rtl/ap040/ap040_fpu.v"]
+    "ap040_pipe_l1.v", "ap040_pipe_fpu.v", "ap040_pipe_irq.v",
+    # the IMU's instruction cache arrays, and their block RAMs' models
+    "ap040_pipe_cache_arr.v")] + [ROOT / "rtl/ap040/ap040_fpu.v", HERE / "sim_pipe_ram.v"]
 # tb_ap040_pipe_program runs tests/ap040/asm's self-checking programs, the
 # ones tests/ap040/run_verilator.py runs on the sequential core. REQUIRED
 # must each print ALL TESTS PASSED; OPEN run too and are reported with the
 # gap that holds them, so a known gap is visible on every run without
 # hiding a regression anywhere else -- none is open since the MMU
 # (bundle 10). t_cache and bench_* are the sequential core's no-cache
-# exclusions as well (run_verilator.py): this core has no internal caches.
+# exclusions as well (run_verilator.py): this core has no data cache yet
+# (caches stage C). t_icache is this core's alone: the sequential core
+# widens every CINV/CPUSH to all lines, and t_icache tests that a line or
+# page operation leaves the others.
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
-                     "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order", "t_moves_alt", "t_smc_mmu"]
+                     "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order", "t_moves_alt", "t_smc_mmu",
+                     "t_icache"]
 PROGRAMS_OPEN = {}
 # tb_ap040_pipe_program_local runs the programs that need no bus devices and
 # no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a
@@ -116,17 +122,23 @@ def main():
             # write port can be held busy -- see the bench's header.
             src = [x for x in CORE if x.name not in
                    ("ap040_pipe_core.v", "ap040_pipe_sys.v",
-                    "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_pipe_l1.v")]
+                    "ap040_pipe_membus.v", "ap040_pipe_imu.v", "ap040_pipe_l1.v",
+                    "ap040_pipe_cache_arr.v", "sim_pipe_ram.v")]
         elif name.endswith("dmuport"):
             # the data and instruction memory units, the MMU and the bus
             # controller, driven at the CPU's ports -- see the bench's header
             src = [RTL / "ap040_pipe_dmu.v", RTL / "ap040_pipe_mmu.v", RTL / "ap040_pipe_imu.v",
-                   RTL / "ap040_pipe_membus.v",
+                   RTL / "ap040_pipe_membus.v", RTL / "ap040_pipe_cache_arr.v", HERE / "sim_pipe_ram.v",
                    HERE / "sim_dpram.v"]
+        elif name.endswith("icache"):
+            # the IMU and the bus controller on their own, as busredirect
+            src = [RTL / "ap040_pipe_imu.v", RTL / "ap040_pipe_membus.v",
+                   RTL / "ap040_pipe_cache_arr.v", HERE / "sim_pipe_ram.v"]
         elif name.endswith("busredirect"):
             # ap040_pipe_imu.v and ap040_pipe_membus.v standalone, same
             # reason as l1_wbuf above: the bench drives their ports directly.
-            src = [RTL / "ap040_pipe_imu.v", RTL / "ap040_pipe_membus.v"]
+            src = [RTL / "ap040_pipe_imu.v", RTL / "ap040_pipe_membus.v",
+                   RTL / "ap040_pipe_cache_arr.v", HERE / "sim_pipe_ram.v"]
         elif name.endswith("dual"):
             # The differential bench instantiates the FSM core beside the
             # pipelined one, so rtl/ap040's whole core comes too.
