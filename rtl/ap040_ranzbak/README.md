@@ -41,8 +41,14 @@ Local RTL changes to upstream:
   the tick grid. `post_drain` exposes the cache's `post_busy`.
 * `rtl/cpu_wrapper.v` instantiates that wrapper and ties the unused
   interfaces off.
-* The multiply/divide unit and EX's use of it follow ap040-pipelined's
-  (their own commit).
+* Multiply and divide are ap040-pipelined's (`ap040_pipe_muldiv.v`,
+  `ap040_execute.v`): the word multiply is a 16x16 product in EX's own
+  clock; a long multiply's product is registered in its first clock (two
+  in EX); a divide is 32 restoring steps, four a clock, after a check of
+  the high dividend word for overflow (ten in EX). Upstream's unit took
+  four clocks for every multiply and about twenty for a divide.
+  `tests/ap040/ranzbak_ref/` keeps upstream's EX and unit, which
+  `tb_ap040_rz_muldiv.v` runs beside these.
 
 The `FAST_CLOCK` timing exceptions in Minimig.sdc were written for the
 sequential core and are not validated for this one; this build uses the
@@ -56,7 +62,13 @@ Verilator, with vasm/vbcc for the programs:
 python3 tests/ap040/run_ranzbak.py --bench boot --work <dir>
 python3 tests/ap040/run_ranzbak.py --bench chip --work <dir> --param DBR_MODE=1 --program t_integer,dhry
 python3 tests/ap040/run_ranzbak.py --bench chip --work <dir> --param DBR_MODE=1 --param CACHE_ALLOW_ALL=1 --require-overlap --program t_integer,dhry
+python3 tests/ap040/run_ranzbak.py --bench muldiv --work <dir>
 ```
+
+The muldiv bench runs EX with this multiply/divide beside upstream's, the
+same MUL/DIV micro-ops through both (every form over edge operands,
+quotients on each overflow boundary, random), and requires identical WB
+records and forwards; it also checks the new stage's clocks per form.
 
 The boot bench uses production `amiga_clk`, `minimig_m68k_bridge` and CIA-A,
 over four clock phases and two arbitration modes. The chip bench runs

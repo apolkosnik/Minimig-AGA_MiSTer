@@ -1,30 +1,28 @@
 //--------------------------------------------------------------------------//
-// AP040_PIPE - ap040_pipe_muldiv.v: the reference core's multiply/divide   //
-// unit (apolkosnik/AP68040 lib/AP68040 rtl/ap040_muldiv.v, e2-fixes 530fc72) //
-// forked unchanged except the module name (Minimig plan M3: "forked from   //
-// ap040_muldiv.v, driven as a multi-cycle EX unit with a busy stall").      //
-// The pipeline's own files must never share a module name with rtl_old/.  //
-//--------------------------------------------------------------------------//
-
-//--------------------------------------------------------------------------//
-// AP040 - MC68040 compatible CPU                                           //
+// AP040_PIPE - ap040_pipe_muldiv.v: the long multiply and the divides      //
 //                                                                          //
-// ap040_muldiv.v - iterative multiply and divide unit                      //
+// Upstream forked the reference core's iterative unit (apolkosnik/AP68040  //
+// rtl/ap040_muldiv.v): every multiply four clocks in EX, every divide      //
+// twenty. This is ap040-pipelined's EX multiplier and divider             //
+// (rtl/ap040_pipe/ap040_execute.v) behind the same ports:                  //
 //                                                                          //
-// MUL: 32x32 -> 64, unsigned or signed (one registered DSP product)       //
-// DIV: 64/32 -> q32,r32, unsigned or signed (restoring, 4 bits/cycle)      //
-//      ovf set when the true quotient does not fit in 32 bits; for signed  //
-//      division the quotient truncates toward zero and the remainder       //
-//      carries the dividend sign                                           //
+// MUL: 32x32 -> 64, unsigned or signed. The product is registered in the   //
+//      clock start is taken, from the operands as they arrive, and done    //
+//      follows: two clocks in EX. The word multiply does not come here --  //
+//      ap040_execute.v forms it itself, in one.                            //
+// DIV: 64/32 -> q32,r32, unsigned or signed, restoring, on magnitudes.     //
+//      A quotient that needs more than 32 bits has a high dividend word    //
+//      not below the divisor; that is checked at the start, so 32 steps    //
+//      are enough, not 64: eight rounds of four. The last round forms the  //
+//      signed results, and done follows it: ten clocks in EX, the same     //
+//      as ap040-pipelined's divider.                                       //
+//      ovf when the quotient does not fit 32 bits (signed: the magnitude   //
+//      may reach 2^31 only when negative). The quotient truncates toward   //
+//      zero; the remainder takes the DIVIDEND's sign.                      //
 //                                                                          //
-// The core is responsible for divide-by-zero detection (exception) and     //
-// for the additional 16-bit range checks of the word DIVU/DIVS forms.      //
-// All state advances only when ce is high (clkena discipline).             //
-//                                                                          //
-// Divide layout: acc = {R[32:0], D/Q[63:0]}. Each step shifts the whole    //
-// accumulator left one bit (top dividend bit enters R) and subtracts the   //
-// divisor from R when it fits, setting the new quotient LSB. After 64      //
-// steps acc[96:64] is the remainder and acc[63:0] the raw quotient.        //
+// The core detects divide by zero (it never starts one) and applies the    //
+// word forms' 16-bit range checks. All state advances only when ce is     //
+// high.                                                                    //
 //--------------------------------------------------------------------------//
 
 module ap040_pipe_muldiv
@@ -46,110 +44,100 @@ module ap040_pipe_muldiv
 	output reg        ovf
 );
 
-reg        running;
-reg        div_r;
-reg        neg_q;                 // negate quotient / product
-reg        neg_r;                 // negate remainder
-reg  [6:0] count;
-reg [31:0] den;                   // divisor / multiplier (absolute)
-reg [31:0] mcand;                 // multiplicand (absolute)
-reg [63:0] prod;                  // registered DSP product
-reg [96:0] acc;
-
-// absolute values for signed operations
-wire [31:0] abs_a  = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
-wire [63:0] dvd    = {op_hi, op_lo};
-wire [63:0] abs_d  = (sign_op && op_hi[31]) ? (64'd0 - dvd) : dvd;
-wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;
-
-// divide: four cascaded restoring steps per cycle (64 bits = 16 rounds),
-// each exactly one former one-bit iteration; the divisor is an explicit
-// argument so the function stays pure (module-level variables read from
-// inside a function are unreliable in continuous assignments under iverilog)
-function [96:0] div_step;
-	input [96:0] a;
-	input [31:0] d;
-	reg   [96:0] sh;
-	reg   [33:0] t;
+// Four restoring steps a round, as ap040-pipelined's DIV_STEP: the chained
+// compare-subtracts stay inside this unit's registers.
+localparam integer DIV_STEP = 4;
+localparam [3:0]   DIV_ROUNDS = 32 / DIV_STEP;
+function [64:0] div_steps;   // {remainder[32:0], dividend/quotient[31:0]}
+	input [32:0] rem;
+	input [31:0] dvd;
+	input [31:0] dsr;
+	integer k;
+	reg   [32:0] r, sh;
+	reg   [31:0] d;
 	begin
-		sh = {a[95:0], 1'b0};
-		t  = {1'b0, sh[96:64]} - {2'b00, d};
-		if (!t[33]) div_step = {t[32:0], sh[63:1], 1'b1};
-		else        div_step = sh;
+		r = rem; d = dvd;
+		for (k = 0; k < DIV_STEP; k = k + 1) begin
+			sh = {r[31:0], d[31]};
+			if (sh >= {1'b0, dsr}) begin
+				r = sh - {1'b0, dsr};
+				d = {d[30:0], 1'b1};
+			end else begin
+				r = sh;
+				d = {d[30:0], 1'b0};
+			end
+		end
+		div_steps = {r, d};
 	end
 endfunction
 
-wire [96:0] div4 = div_step(div_step(div_step(div_step(acc, den), den), den), den);
+// Divide: magnitudes at the start. The remainder starts from the dividend's
+// high half; if that is not below the divisor the quotient cannot fit 32
+// bits, which is the overflow, caught before the steps.
+wire        dvd_neg = sign_op && op_hi[31];
+wire        dsr_neg = sign_op && op_a[31];
+wire [63:0] dvd_mag = dvd_neg ? (~{op_hi, op_lo} + 64'd1) : {op_hi, op_lo};
+wire [31:0] dsr_mag = dsr_neg ? (~op_a + 32'd1) : op_a;
 
-wire [63:0] q_raw = div_r ? acc[63:0] : prod;
-wire [31:0] r_raw = acc[95:64];
+// Multiply: one DSP product of the operands as they arrive, signed or not.
+wire [65:0] mul_c = $signed({sign_op && op_a[31], op_a}) * $signed({sign_op && op_lo[31], op_lo});
+
+reg        running;
+reg  [3:0] count;                 // rounds left
+reg [32:0] div_rem;
+reg [31:0] div_dvd;               // shifts left; its low bits collect the quotient
+reg [31:0] div_dsr;
+reg        div_qneg, div_rneg, div_sgn, div_pre;
+
+wire [64:0] div_next = div_steps(div_rem, div_dvd, div_dsr);
+wire [31:0] q_mag    = div_next[31:0];
+wire [31:0] r_mag    = div_next[63:32];
 
 always @(posedge clk) begin
 	if (!nreset) begin
-		running <= 0;
-		done    <= 0;
-		div_r   <= 0;
-		neg_q   <= 0;
-		neg_r   <= 0;
-		count   <= 0;
-		den     <= 0;
-		mcand   <= 0;
-		prod    <= 0;
-		acc     <= 0;
-		res_hi  <= 0;
-		res_lo  <= 0;
-		ovf     <= 0;
+		running  <= 1'b0;
+		done     <= 1'b0;
+		count    <= 4'd0;
+		div_rem  <= 33'd0;
+		div_dvd  <= 32'd0;
+		div_dsr  <= 32'd0;
+		div_qneg <= 1'b0;
+		div_rneg <= 1'b0;
+		div_sgn  <= 1'b0;
+		div_pre  <= 1'b0;
+		res_hi   <= 32'd0;
+		res_lo   <= 32'd0;
+		ovf      <= 1'b0;
 	end
 	else if (ce) begin
-		done <= 0;
-
-		if (start) begin
-			div_r   <= is_div;
-			running <= 1;
-			ovf     <= 0;
-			if (is_div) begin
-				den   <= abs_a;
-				acc   <= {33'd0, abs_d};
-				count <= 7'd16;
-				neg_q <= sign_op && (op_hi[31] ^ op_a[31]);
-				neg_r <= sign_op && op_hi[31];
-			end
-			else begin
-				den   <= abs_a;
-				mcand <= abs_m;
-				count <= 7'd1;
-				neg_q <= sign_op && (op_a[31] ^ op_lo[31]) && (op_a != 0) && (op_lo != 0);
-				neg_r <= 0;
-			end
+		done <= 1'b0;
+		if (start && !is_div) begin
+			res_lo <= mul_c[31:0];
+			res_hi <= mul_c[63:32];
+			ovf    <= 1'b0;
+			done   <= 1'b1;
+		end
+		else if (start) begin
+			running  <= 1'b1;
+			count    <= DIV_ROUNDS;
+			div_rem  <= {1'b0, dvd_mag[63:32]};
+			div_dvd  <= dvd_mag[31:0];
+			div_dsr  <= dsr_mag;
+			div_qneg <= dvd_neg ^ dsr_neg;
+			div_rneg <= dvd_neg;
+			div_sgn  <= sign_op;
+			div_pre  <= (dvd_mag[63:32] >= dsr_mag);
 		end
 		else if (running) begin
-			if (count != 0) begin
-				count <= count - 7'd1;
-				if (div_r) begin
-					acc <= div4;
-				end
-				else begin
-					// one registered 32x32 DSP-tree product, exactly the
-					// value the former 32-cycle shift-add loop accumulated
-					prod <= mcand * den;
-				end
-			end
-			else begin
+			div_rem <= div_next[64:32];
+			div_dvd <= div_next[31:0];
+			count   <= count - 4'd1;
+			if (count == 4'd1) begin
 				running <= 1'b0;
 				done    <= 1'b1;
-				if (div_r) begin
-					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
-					res_hi <= neg_r ? (32'd0 - r_raw) : r_raw;
-					ovf    <= (|q_raw[63:32]) |
-					          (sign_op & (neg_q ? (q_raw[31:0] > 32'h8000_0000)
-					                            : q_raw[31]));
-				end
-				else begin
-					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
-					res_hi <= neg_q ? (~q_raw[63:32] + {31'd0, (q_raw[31:0] == 32'd0)})
-					                : q_raw[63:32];
-					ovf    <= 0;
-				end
+				res_lo  <= div_qneg ? (~q_mag + 32'd1) : q_mag;
+				res_hi  <= div_rneg ? (~r_mag + 32'd1) : r_mag;
+				ovf     <= div_pre || (div_sgn && (div_qneg ? (q_mag > 32'h8000_0000) : q_mag[31]));
 			end
 		end
 	end

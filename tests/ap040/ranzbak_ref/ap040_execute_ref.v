@@ -1,3 +1,7 @@
+// tests/ap040/ranzbak_ref/ap040_execute_ref.v: rtl/ap040_ranzbak/ap040_execute.v as the integration commit
+// (1d8b131f) has it -- upstream 9efe490d, ap040_execute.v with the final_uop rename --
+// with the modules renamed. tb_ap040_rz_muldiv.v runs it beside the current one: it is
+// the multiply/divide ranzbak validated on the WinUAE cputest corpus.
 //--------------------------------------------------------------------------//
 // AP040_PIPE - MC68040-style pipelined core                                //
 //                                                                          //
@@ -16,7 +20,7 @@
 
 `include "ap040_pipe_defs.svh"
 
-module ap040_execute
+module ap040_execute_ref
 	import ap040_pipe_pkg::*;
 #(
 	// 1: the FPU is present, so CL_FPU can occur (plan M10.1).  With 0 it
@@ -64,26 +68,15 @@ module ap040_execute
 );
 
 //--------------------------------------------------------------- MUL/DIV
-// The long multiply and the divides run in ap040_pipe_muldiv.v for the
-// micro-op in EX, which holds (ex_stall) until it is done: two clocks for a
-// long multiply, ten for a divide (ap040-pipelined's multiplier and
-// divider). The word multiply is formed here, a 16x16 product in the
-// micro-op's own clock, as ap040-pipelined's ALU forms it. Operand setup
-// and flag/overflow rules follow the reference (ap040_core.v EK_MD_W /
-// S_MDL_RDQ / S_MD_WAIT, all validated on the cputest corpus).
-// imm4 = {64-bit, long, signed, divide}.
+// The reference's multiply/divide unit, run for the micro-op in EX; EX
+// holds (ex_stall) until it is done.  Operand setup and flag/overflow rules
+// follow the reference (ap040_core.v EK_MD_W / S_MDL_RDQ / S_MD_WAIT, all
+// validated on the cputest corpus).  imm4 = {64-bit, long, signed, divide}.
 wire        md_div  = x.imm4[0];
 wire        md_sgn  = x.imm4[1];
 wire        md_long = x.imm4[2];
 wire        md_64   = x.imm4[3];
-wire        md_uop  = eaf_valid && (x.cls == CL_MULDIV) && !x.cc && (md_div || md_long);   // (cc: divide by zero)
-// MULU.W / MULS.W: 17-bit operands, zero- or sign-extended, so the product
-// is signed or not by its operands alone (a signed product inside a ?: with
-// an unsigned arm would be evaluated unsigned).
-wire [16:0] mw_a = {md_sgn && x.a[15], x.a[15:0]};
-wire [16:0] mw_b = {md_sgn && x.b[15], x.b[15:0]};
-wire signed [33:0] mw_p = $signed(mw_a) * $signed(mw_b);
-wire [31:0] mw_prod = mw_p[31:0];
+wire        md_uop  = eaf_valid && (x.cls == CL_MULDIV) && !x.cc;   // (cc: divide by zero)
 reg         md_busy;
 wire        md_done;
 wire [31:0] md_rhi, md_rlo;
@@ -95,7 +88,7 @@ wire [31:0] md_hi = !md_div ? 32'd0 :
                     (md_sgn ? {32{x.b[31]}} : 32'd0);
 wire [31:0] md_lo = (md_div || md_long) ? x.b : (md_sgn ? sext16(x.b[15:0]) : {16'd0, x.b[15:0]});
 
-ap040_pipe_muldiv u_md
+ap040_pipe_muldiv_ref u_md
 (
 	.clk(clk), .nreset(nreset), .ce(ce),
 	.start(md_start), .is_div(md_div), .sign_op(md_sgn),
@@ -348,8 +341,8 @@ always @* begin
 						w.ccr_val = {ccr_in[4], md_rlo[15], (md_rlo[15:0] == 16'd0), 2'b00};
 					end
 				end else begin
-					w.w0_v = 1'b1; w.w0_r = x.dr; w.w0_val = mw_prod;
-					w.ccr_v = 1'b1; w.ccr_val = {ccr_in[4], mw_prod[31], (mw_prod == 32'd0), 2'b00};
+					w.w0_v = 1'b1; w.w0_r = x.dr; w.w0_val = md_rlo;
+					w.ccr_v = 1'b1; w.ccr_val = {ccr_in[4], md_rlo[31], (md_rlo == 32'd0), 2'b00};
 				end
 			end else if (md_div) begin
 				// 68040 divide overflow: V=1 C=0, N Z and the registers unchanged
