@@ -182,6 +182,8 @@ ap040_pipe_mmu u_mmu
 (
 	.clk (clk), .nreset (nreset),
 	.tc (tc), .urp (urp), .srp (srp), .itt0 (itt0), .itt1 (ttr0), .dtt0 (ttr0), .dtt1 (ttr0),
+	.cache_allow_all (1'b1), .cache_z2_ena (1'b0), .cache_z3_base0 (5'd0), .cache_z3_ena0 (1'b0),
+	.cache_z3_base1 (4'd0), .cache_z3_ena1 (1'b0),
 	.i_req (i_req), .i_addr (i_addr), .i_sup (i_sup), .i_pass (i_pass), .i_flt (i_flt), .i_pa (i_pa), .i_cm (i_cm),
 	.ip_addr (ip_addr), .ip_sup (ip_sup), .ip_hit (ip_hit), .ip_pa (ip_pa), .ip_cm (ip_cm),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),

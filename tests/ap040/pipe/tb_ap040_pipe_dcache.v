@@ -5,35 +5,35 @@
 //                                                                          //
 // ap040_pipe_dmu.v, ap040_pipe_mmu.v and ap040_pipe_membus.v as the bus16  //
 // top wires them, driven at the CPU's port B against a memory whose        //
-// latency each test sets and which can answer one read with a bus error,  //
-// every transaction it takes logged. What a program cannot see, because   //
-// it is timing or order: which longwords a miss reads and in what order,  //
+// latency each test sets and which can answer one read with a bus error,   //
+// every transaction it takes logged. What a program cannot see, because    //
+// it is timing or order: which longwords a miss reads and in what order,   //
 // what a hit costs, which bytes a write puts in a line, how a write meets  //
 // a line being read, which way a fill takes, what CINV leaves and how its  //
 // done behaves, what an error on a fill's later beat does, and what a      //
 // snoop meeting a fill does. Translation off except where a test says.     //
 //                                                                          //
 //   1. A miss at a line's third longword reads it first, then the fourth,  //
-//      the first and the second (MC68040UM 4.1, 4.6.1); the line is valid //
-//      only after the fourth, and the read is answered from the first.    //
-//   2. A hit: answered three cycles after the request's, no bus read; every //
+//      the first and the second (MC68040UM 4.1, 4.6.1); the line is valid  //
+//      only after the fourth, and the read is answered from the first.     //
+//   2. A hit: answered three cycles after the request's, no bus read; every//
 //      size at every offset inside a longword, right-aligned.              //
 //   3. A write hit puts exactly its bytes in the line (byte enables), and  //
 //      memory takes the write; one spanning two longwords, and two lines,  //
 //      updates both. A read right after a write sees it.                   //
 //   4. A write meeting a line being read: swept from the cycle after the   //
 //      read's (port B takes one address a cycle) to after the fill's last  //
-//      read, the line ends valid holding the write's bytes.               //
-//   5. Not cached: a data TTR's CM 10 (a read that hits invalidates the     //
+//      read, the line ends valid holding the write's bytes.                //
+//   5. Not cached: a data TTR's CM 10 (a read that hits invalidates the    //
 //      line and goes to the bus), a locked access, MOVES to an alternate   //
 //      space; allocating nothing: a miss is one bus read, a hit is served; //
 //      a MOVE16 write that hits invalidates the line.                      //
 //   6. CINV: a line, a page, everything; done one clock per request, even  //
-//      when the request is held after it; the instruction cache's alone   //
-//      -- all, a line, a page -- is done at once and leaves the data cache. //
+//      when the request is held after it; the instruction cache's alone    //
+//      -- all, a line, a page -- is done at once and leaves the data cache.//
 //   7. An error on a fill's later beat: the answered read is not faulted,  //
-//      the line is not valid; a read waiting in the line for that longword  //
-//      is faulted; one waiting for another longword is answered after the //
+//      the line is not valid; a read waiting in the line for that longword //
+//      is faulted; one waiting for another longword is answered after the  //
 //      line is read again from it. And the way the abandoned line took     //
 //      still holds the tag of the line that was there before: that line,   //
 //      invalidated earlier, must still miss.                               //
@@ -42,8 +42,8 @@
 //      is raised, including the cycle the fill writes its tag: the line    //
 //      ends invalid, or valid holding what memory held after the write --  //
 //      never the longword from before it.                                  //
-//   9. Replacement: first invalid, else the counter's -- which counts every //
-//      read looked up and every write sent, and once more after naming a  //
+//   9. Replacement: first invalid, else the counter's -- which counts every//
+//      read looked up and every write sent, and once more after naming a   //
 //      way (4.1).                                                          //
 //  10. DE cleared under a fill: a read then waits for it, the fill         //
 //      completes, the line valid and whole; the reads after it go to the   //
@@ -51,7 +51,7 @@
 //  11. Translated: a page whose descriptor says CM 10 is not cached.       //
 // Copyback (caches stage D; a data TTR with CM 01 makes every access so):  //
 //  12. A write that misses reads its line and stays in it; one that hits   //
-//      stays in it; neither reaches memory; CPUSHL pushes exactly the       //
+//      stays in it; neither reaches memory; CPUSHL pushes exactly the      //
 //      dirty longwords, CINVL drops them. A byte write that misses lands   //
 //      in the longword the line read brought: its other bytes memory's.    //
 //  13. A dirty line replaced: its longwords are read out before the new    //
@@ -63,15 +63,15 @@
 //      one invalidated, only the dirty longword written), CPUSHA the rest. //
 //  15. The table walker through the cache: a read that hits reads nothing  //
 //      from its port; a write that hits updates the line, goes to memory,  //
-//      and leaves its longword clean (a CPUSH after it writes nothing).   //
+//      and leaves its longword clean (a CPUSH after it writes nothing).    //
 //  16. A copyback write that allocates nothing and misses is one bus write;//
 //      an inhibited read that hits a dirty line has its pushes on the bus  //
 //      first; a copyback write meeting a line being read waits, then hits. //
 //  17. A copyback write whose line read errs -- on the longword written,   //
 //      or a later one -- goes to the bus alone, and nothing hangs.         //
 //  18. A write-through write to a longword a replaced line is pushing: the //
-//      push reaches memory first. Swept across the push.                  //
-//  19. DE clear, CPUSHA pushing a line whose last longword is a page        //
+//      push reaches memory first. Swept across the push.                   //
+//  19. DE clear, CPUSHA pushing a line whose last longword is a page       //
 //      descriptor, memory's copy stale: an instruction-side translation    //
 //      started once the push has begun walks the tables (ap040_pipe_mmu.v's//
 //      walker, held by the DMU's wr_pend) and must read the pushed         //
@@ -86,24 +86,34 @@
 //      a copyback write allocating nothing reported by its logical address;//
 //      a second fault dropped while one is held, and taken when it comes   //
 //      in the cycle the first is let go.                                   //
-//  21. A replaced dirty line is written only after its new line is in     //
-//      (4.6.1); if the new line's read errs it goes back to its place,    //
+//  21. A replaced dirty line is written only after its new line is in      //
+//      (4.6.1); if the new line's read errs it goes back to its place,     //
 //      valid and dirty, nothing written (4.6.2) -- swept over the longword //
 //      asked for and the beat that errs; a snoop on it, swept from before  //
 //      the line read to after the replacement, leaves it invalid and       //
 //      unwritten whenever it lands.                                        //
 // The store buffer (caches stage E):                                       //
 //  22. On a slow bus, write-through writes are taken into the buffer       //
-//      without waiting for the bus: four behind the one the bus           //
-//      controller holds, the next waiting; they reach the bus in order.   //
-//      A read that hits is answered while they wait; one that misses, and //
-//      one with DE clear, go to the bus only after them -- a read of a    //
-//      longword a buffered write holds returns the write. A bus error on  //
-//      a buffered write reports that write; the writes around it land.   //
-//      The window's snoop sees each write as the buffer takes it. A miss  //
+//      without waiting for the bus: four behind the one the bus            //
+//      controller holds, the next waiting; they reach the bus in order.    //
+//      A read that hits is answered while they wait; one that misses, and  //
+//      one with DE clear, go to the bus only after them -- a read of a     //
+//      longword a buffered write holds returns the write. A bus error on   //
+//      a buffered write reports that write; the writes around it land.     //
+//      The window's snoop sees each write as the buffer takes it. A miss   //
 //      behind buffered writes -- a read's, a copyback write's -- is looked //
-//      up once more when they are out, not over and over: the way it      //
-//      replaces is the counter's after exactly those lookups.             //
+//      up once more when they are out, not over and over: the way it       //
+//      replaces is the counter's after exactly those lookups.              //
+// The platform's cacheable windows (caches stage F, in the MMU):           //
+//  23. With the windows on, chip RAM is cached and ROM/IO space is not --  //
+//      even through a copyback TTR, whose write then goes to the bus; the  //
+//      Zorro II and both Zorro III windows only while enabled, each its    //
+//      whole extent and no more; and the instruction side's caching mode,  //
+//      and its peek's, the same -- the peek, untranslated, never the mode  //
+//      of the entry the ATC last held for the instruction side. A snoop    //
+//      on a dirty copyback line invalidates it: its data is lost, memory   //
+//      keeps the chipset's (the platform's boundary: nothing here can      //
+//      take it).                                                           //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -143,6 +153,10 @@ endtask
 reg  [31:0] tc = 32'd0;
 wire [31:0] urp = 32'h4000, srp = 32'h4000, ttr0 = 32'd0;
 reg  [31:0] dtt1 = 32'd0;
+// the platform's cacheable windows (caches stage F; test 23)
+reg         win_all = 1'b1, win_z2 = 1'b0, win_z3e0 = 1'b0, win_z3e1 = 1'b0;
+reg   [4:0] win_z3b0 = 5'd0;
+reg   [3:0] win_z3b1 = 4'd0;
 
 //------------------------------------------------------------- CPU, port B
 reg  [31:0] c_addr = 32'd0, c_wdata = 32'd0;
@@ -195,6 +209,11 @@ reg         i_req_b = 1'b0;
 reg  [31:0] i_addr_b = 32'd0;
 wire        i_pass_b, i_flt_b;
 wire [31:0] i_pa_b;
+wire  [1:0] i_cm_b;
+reg  [31:0] ip_addr_b = 32'd0;   // the instruction side's peek (test 23)
+reg  [31:0] itt0_b = 32'd0;      // ITT0 (test 23)
+wire [31:0] ip_pa_b;
+wire  [1:0] ip_cm_b;
 reg         pf_req_b = 1'b0;   // PFLUSHA
 wire        pf_done_b;
 
@@ -232,9 +251,11 @@ ap040_pipe_dmu u_dmu
 ap040_pipe_mmu u_mmu
 (
 	.clk (clk), .nreset (nreset),
-	.tc (tc), .urp (urp), .srp (srp), .itt0 (ttr0), .itt1 (ttr0), .dtt0 (ttr0), .dtt1 (dtt1),
-	.i_req (i_req_b), .i_addr (i_addr_b), .i_sup (1'b1), .i_pass (i_pass_b), .i_flt (i_flt_b), .i_pa (i_pa_b), .i_cm (),
-	.ip_addr (32'd0), .ip_sup (1'b1), .ip_hit (), .ip_pa (), .ip_cm (),
+	.tc (tc), .urp (urp), .srp (srp), .itt0 (itt0_b), .itt1 (ttr0), .dtt0 (ttr0), .dtt1 (dtt1),
+	.cache_allow_all (win_all), .cache_z2_ena (win_z2), .cache_z3_base0 (win_z3b0), .cache_z3_ena0 (win_z3e0),
+	.cache_z3_base1 (win_z3b1), .cache_z3_ena1 (win_z3e1),
+	.i_req (i_req_b), .i_addr (i_addr_b), .i_sup (1'b1), .i_pass (i_pass_b), .i_flt (i_flt_b), .i_pa (i_pa_b), .i_cm (i_cm_b),
+	.ip_addr (ip_addr_b), .ip_sup (1'b1), .ip_hit (), .ip_pa (ip_pa_b), .ip_cm (ip_cm_b),
 	.d_req (d_req), .d_write (d_write), .d_acc (d_acc), .d_addr (d_addr), .d_sup (d_sup),
 	.d_pass (d_pass), .d_flt (d_flt), .d_pa (d_pa), .d_cm (d_cm),
 	.pt_req (1'b0), .pt_write (1'b0), .pt_access (1'b0), .pt_addr (32'd0), .pt_fc (3'd0),
@@ -1468,6 +1489,130 @@ initial begin
 	cinv_p(2'b11, 32'd0, 1'b1);
 	dtt1 = 32'd0;
 	mem_lat = 1;
+
+	//------------------------------------------------------------- test 23
+	cinv_p(2'b11, 32'd0, 1'b1);
+	win_all = 1'b0;
+	repeat (2) step;
+	// chip RAM: cached
+	want_rd(32'h0000_7A00, `AP040_SZ_L, rd32(16'h7A00), "23: chip RAM");
+	quiet;
+	if (!lvalid(32'h0000_7A00)) fail("23: chip RAM was not cached with the windows on");
+	// ROM/IO space: never ($F0xxxx; the bench's memory aliases it)
+	want_rd(32'h00F0_7A10, `AP040_SZ_L, rd32(16'h7A10), "23: ROM space");
+	quiet;
+	if (lvalid(32'h00F0_7A10)) fail("23: ROM space was cached");
+	// ...not through a copyback TTR either: the write goes to the bus
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	lg = log_n;
+	wr(32'h00F0_7A20, `AP040_SZ_L, 32'h2300_7A20);
+	quiet;
+	if (log_n != lg + 1 || !log_write[lg] || rd32(16'h7A20) !== 32'h2300_7A20)
+		fail("23: a copyback write outside the windows did not go to the bus");
+	if (lvalid(32'h00F0_7A20)) fail("23: a copyback write outside the windows was cached");
+	dtt1 = 32'd0;
+	repeat (2) step;
+	// Zorro II ($200000-$9FFFFF), Zorro III (base0 $40000000, base1 $50000000):
+	// only while enabled
+	for (k = 0; k < 2; k = k + 1) begin
+		win_z2 = k[0]; win_z3b0 = 5'd8; win_z3e0 = k[0]; win_z3b1 = 4'd5; win_z3e1 = k[0];
+		repeat (2) step;
+		want_rd(32'h0020_7A30, `AP040_SZ_L, rd32(16'h7A30), "23: Zorro II");
+		want_rd(32'h009F_7A40, `AP040_SZ_L, rd32(16'h7A40), "23: Zorro II, its top");
+		want_rd(32'h4000_7A50, `AP040_SZ_L, rd32(16'h7A50), "23: Zorro III, base 0");
+		want_rd(32'h5000_7A60, `AP040_SZ_L, rd32(16'h7A60), "23: Zorro III, base 1");
+		// base 0 is 128 MB (five bits), base 1 256 MB (four)
+		want_rd(32'h5800_7A68, `AP040_SZ_L, rd32(16'h7A68), "23: Zorro III, base 1's upper half");
+		want_rd(32'h4800_7A58, `AP040_SZ_L, rd32(16'h7A58), "23: past Zorro III base 0");
+		want_rd(32'h00A0_7A70, `AP040_SZ_L, rd32(16'h7A70), "23: past Zorro II");
+		quiet;
+		if (lvalid(32'h0020_7A30) != k[0] || lvalid(32'h009F_7A40) != k[0] ||
+		    lvalid(32'h4000_7A50) != k[0] || lvalid(32'h5000_7A60) != k[0] ||
+		    lvalid(32'h5800_7A68) != k[0]) begin
+			$display("    windows %0s: %b %b %b %b %b", k[0] ? "on" : "off", lvalid(32'h0020_7A30),
+			         lvalid(32'h009F_7A40), lvalid(32'h4000_7A50), lvalid(32'h5000_7A60),
+			         lvalid(32'h5800_7A68));
+			fail("23: a Fast RAM window's caching did not follow its enable");
+		end
+		if (lvalid(32'h00A0_7A70)) fail("23: the space past Zorro II was cached");
+		if (lvalid(32'h4800_7A58)) fail("23: the space past Zorro III base 0 was cached");
+		cinv_p(2'b11, 32'd0, 1'b1);
+	end
+	// the instruction side: chip RAM write-through, ROM space inhibited
+	for (k = 0; k < 2; k = k + 1) begin
+		i_addr_b = k[0] ? 32'h00F0_7B00 : 32'h0000_7B00;
+		i_req_b = 1'b1;
+		#0;
+		t0 = 0;
+		while (!i_pass_b && !i_flt_b && t0 < 100) begin step; #0; t0 = t0 + 1; end
+		if (!i_pass_b || i_cm_b !== (k[0] ? 2'b10 : 2'b00)) begin
+			$display("    fetch %h: pass %b cm %b", i_addr_b, i_pass_b, i_cm_b);
+			fail("23: the instruction side's caching mode did not follow the windows");
+		end
+		step;
+		i_req_b = 1'b0;
+		step;
+	end
+	// ...and its peek, whose caching mode the prefetch window sends every
+	// untranslated read by: the address itself, write-through or the TTR's
+	// mode, then the windows -- never the mode or the address of whatever
+	// entry the ATC last held. An instruction translation of page 6 (CM 10
+	// in its descriptor) leaves that entry inhibited; translation then off.
+	tc = 32'h0000_8000;
+	repeat (4) step;
+	i_addr_b = 32'h0000_6B00;
+	i_req_b = 1'b1;
+	#0;
+	t0 = 0;
+	while (!i_pass_b && !i_flt_b && t0 < 400) begin step; #0; t0 = t0 + 1; end
+	if (!i_pass_b) fail("23: an instruction translation of page 6 did not pass");
+	step;
+	// the port's entry register loads from the lookup the clock after
+	if (u_mmu.iu_ent[3:2] !== 2'b10)
+		fail("23: the instruction entry the peek must not use is not an inhibited one (the test no longer tests)");
+	i_req_b = 1'b0;
+	step;
+	tc = 32'd0;
+	repeat (2) step;
+	ip_addr_b = 32'h00F0_7B20;
+	#1;
+	if (ip_pa_b !== 32'h00F0_7B20 || ip_cm_b !== 2'b10) begin
+		$display("    peek %h: pa %h cm %b", ip_addr_b, ip_pa_b, ip_cm_b);
+		fail("23: the instruction side's peek cached ROM space");
+	end
+	ip_addr_b = 32'h0000_7B20;
+	#1;
+	if (ip_pa_b !== 32'h0000_7B20 || ip_cm_b !== 2'b00) begin
+		$display("    peek %h: pa %h cm %b", ip_addr_b, ip_pa_b, ip_cm_b);
+		fail("23: the instruction side's peek did not cache chip RAM write-through");
+	end
+	itt0_b = 32'h0000_C040;   // chip RAM, inhibited, by ITT0
+	repeat (2) step;
+	#1;
+	if (ip_cm_b !== 2'b10) fail("23: the instruction side's peek ignored a TTR's caching mode");
+	itt0_b = 32'd0;
+	repeat (2) step;
+	ip_addr_b = 32'd0;
+	win_all = 1'b1; win_z2 = 1'b0; win_z3e0 = 1'b0; win_z3e1 = 1'b0;
+	// a dirty line snooped
+	dtt1 = 32'h0000_C020;
+	repeat (2) step;
+	cinv_p(2'b11, 32'd0, 1'b1);
+	wr(32'h0000_7C04, `AP040_SZ_L, 32'h2301_7C04);         // copyback: the line read, dirty
+	quiet;
+	if (!lvalid(32'h0000_7C00)) fail("23: the copyback line is not cached (the test no longer tests)");
+	wr32(16'h7C04, 32'h2302_7C04);                          // the chipset writes memory...
+	sn_addr = 32'h0000_7C04; sn_req = 1'b1;                 // ...and is snooped
+	step;
+	sn_req = 1'b0;
+	quiet;
+	if (lvalid(32'h0000_7C00)) fail("23: a snooped dirty line is still valid");
+	want_rd(32'h0000_7C04, `AP040_SZ_L, 32'h2302_7C04, "23: a snooped dirty line's longword");
+	cinv_p(2'b11, 32'd0, 1'b1);
+	quiet;
+	if (rd32(16'h7C04) !== 32'h2302_7C04) fail("23: a snooped dirty line's data reached memory");
+	dtt1 = 32'd0;
 
 	repeat (20) step;
 	if (errors == 0) $display("ALL TESTS PASSED");

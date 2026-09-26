@@ -16,6 +16,8 @@
 //            behind the CPU (the data cache's tests; caches stage C)       //
 //   $F138 w  a peek's address          $F13A r  memory's word there,       //
 //            whatever the data cache holds (copyback; caches stage D)      //
+//   $F15C w  a chipset write's address $F15E w  write the word there, as   //
+//            the chipset would: behind the CPU, and snooped (stage F)      //
 //   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N   //
 //   $F150 w  two devices: level, then a lower one after N cycles           //
 //   $F144 w  level 2 while TRAP #0 is stacked (1), or once its vector has  //
@@ -74,6 +76,8 @@ reg         wberr_arm = 0;
 reg         berr_armed;
 reg         fberr_armed = 0;
 reg  [15:0] poke_addr = 0;
+reg  [15:0] dma_addr = 0;        // $F15C/$F15E: a chipset write, snooped
+reg         dma_snoop = 0;
 reg  [15:0] peek_addr = 0;
 reg  [15:0] fberr_addr = 0;
 // $F156: a one-shot bus error on the next data write sub-cycle to the
@@ -130,6 +134,10 @@ ap040_pipe_bus16 #(
 (
 	.clk (clk), .nreset (nreset), .ce (ce), .clkena_in (bus_clkena),
 	.irq_lvl (ipl_lvl), .berr (berr),
+	// production's windows: chip RAM (every program here) cacheable, the
+	// rest not; the chipset's writes from $F15C/$F15E (caches stage F)
+	.cache_allow_all (1'b0), .cache_z2_ena (1'b1), .cache_z3_base0 (5'd8), .cache_z3_ena0 (1'b1),
+	.cache_z3_base1 (4'd0), .cache_z3_ena1 (1'b0), .snoop_stb (dma_snoop), .snoop_addr ({16'd0, dma_addr}),
 	.walker_req (walker_req), .walker_we (walker_we), .walker_addr (walker_addr),
 	.walker_wdat (walker_wdat), .walker_ack (walker_ack), .walker_data (walker_data),
 	.walker_berr (walker_berr_r),
@@ -442,6 +450,7 @@ end
 //---------------------------------------------------------------------------
 
 always @(posedge clk) begin
+	dma_snoop <= 1'b0;
 	if (nreset && mem_ready) begin
 		if (addr_out[31:16] != 0) begin
 			errors = errors + 1;
@@ -476,6 +485,11 @@ always @(posedge clk) begin
 			if (addr_out[15:0] == 16'hF134) poke_addr = data_write;
 			if (addr_out[15:0] == 16'hF138) peek_addr = data_write;
 			if (addr_out[15:0] == 16'hF136) mem[poke_addr[15:1]] = data_write;
+			if (addr_out[15:0] == 16'hF15C) dma_addr = data_write;
+			if (addr_out[15:0] == 16'hF15E) begin
+				mem[dma_addr[15:1]] = data_write;
+				dma_snoop <= 1'b1;
+			end
 		end
 	end
 end

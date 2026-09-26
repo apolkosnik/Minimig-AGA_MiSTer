@@ -1,7 +1,7 @@
 # AP040 pipelined core: instruction and data memory units
 
 Status: design, revision 2 (2026-09-25), after review; stages A-E and R
-built (below, "Stage A as built" through "Stage E as built"). Goal: the MC68040's
+built, F in part (below, "Stage A as built" through "Stage F as built"). Goal: the MC68040's
 integrated caches in the pipelined core -- a 4 KB instruction cache and a
 4 KB data cache, each beside its own ATC at one of the pipeline's two memory
 ports, the data cache write-through or copyback page by page through the
@@ -881,6 +881,60 @@ Tests:
 - The benches that assumed one write held: tb_ap040_pipe_dmuport.v test 2
   (the second write now waits in the buffer), and tb_ap040_pipe_program.v's
   write-ordering monitor (a buffered write has not landed).
+
+## Stage F as built
+
+The platform's side, on the bus16 top (F1).
+
+- Cacheable windows, as the FSM core's wrapper has them
+  (rtl/ap040/ap040_tg68k_compat.v): cache_allow_all, cache_z2_ena and two
+  Zorro III bases with enables.
+  - Applied in ap040_pipe_mmu.v, to the caching mode of every translation,
+    the data side's, the instruction side's and its peek's.
+  - Outside the windows the mode is inhibited, whatever a TTR or a page
+    says: IO, ROM and unconfigured space are never cached.
+  - Chip RAM ($000000-$1FFFFF) and configured Fast RAM may be cached.
+  - The FSM core's wrapper keeps instruction fetches from chip RAM out of
+    its instruction cache, because that cache is not snooped (Phenomena's
+    Enigma). This core's is, so chip RAM fetches are cached here.
+- Fix, in the MMU's instruction peek (ip_*), there since stage B: the IMU
+  takes the peek's caching mode for every prefetch it sends untranslated,
+  but with TC.E clear and no TTR match the peek gave the mode and address
+  of whatever entry its ATC register last held, not write-through and the
+  address itself (MC68040UM 4.3), as the instruction port does. Checked
+  against that address, the windows would have cached ROM and IO fetches
+  while translation is off -- the card at boot.
+- Snoops: snoop_stb/snoop_addr, one a cycle (cpu_wrapper.v's arbiter
+  gives exactly that), to both caches' snoop ports.
+  - A line holding the address is invalidated (Table 4-3). A dirty data
+    line loses its data, the platform boundary above.
+  - The data cache's snoop tag copy, pruned since stage D, is back.
+- Fit at 25 ns, bus16 top: 40.49 MHz, +0.303 ns, 25,621 ALMs, 42 RAM
+  blocks (E: 41.89 MHz, +1.127, 24,135, 36). The six new blocks are both
+  caches' snoop tag copies, which nothing drove before; the ALMs are their
+  compare paths and the window checks. The worst paths are the fetch
+  queue's count into the bus controller's request; none goes through a
+  window, a snoop or the peek.
+
+Tests:
+- tb_ap040_pipe_dcache.v test 23, with the windows on. It covers:
+  - chip RAM cached; ROM space not, even through a copyback TTR, whose
+    write then goes to the bus;
+  - the Zorro II and both Zorro III windows following their enables;
+  - the instruction side's caching mode, and its peek's: untranslated, the
+    address itself, write-through or the TTR's mode, then the windows;
+  - a dirty line snooped losing its data.
+- t_snoop.s (pipelined core only), with the program bench's new $F15C/$F15E
+  (a chipset write: memory changed behind the CPU, and snooped). It covers:
+  - a stale read after an unsnooped poke, showing the line cached;
+  - a chipset write then seen, from the data cache and the instruction
+    cache alike.
+  The program waits for each chipset write to have happened before reading,
+  as a program starting DMA would: the write that starts it may still be in
+  the store buffer while a read that hits is answered.
+- The program bench now runs with production's windows (chip RAM
+  cacheable, the rest not). The other benches that instantiate the bus16
+  top tie the windows open.
 
 ## Tests
 

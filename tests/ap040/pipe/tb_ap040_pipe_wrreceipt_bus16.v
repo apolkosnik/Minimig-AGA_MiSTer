@@ -130,6 +130,8 @@ ap040_pipe_bus16 #(.PC_RESET(32'h400), .PROG_WORDS(32'h7FFF_FFFF), .RESET_VECTOR
 (
 	.clk (clk), .nreset (nreset), .ce (ce16), .irq_lvl (3'd0), .clkena_in (clkena_in),
 	.berr (1'b0),   // no bus errors: the forward is the MMU's, not a fault
+	.cache_allow_all (1'b1), .cache_z2_ena (1'b0), .cache_z3_base0 (5'd0), .cache_z3_ena0 (1'b0),
+	.cache_z3_base1 (4'd0), .cache_z3_ena1 (1'b0), .snoop_stb (1'b0), .snoop_addr (32'd0),
 	.walker_req (), .walker_we (), .walker_addr (), .walker_wdat (),
 	.walker_ack (1'b0), .walker_data (32'd0), .walker_berr (1'b0),   // DTT0 only: no walks
 	.data_in (data_in), .addr_out (addr_out), .data_write (data_write),

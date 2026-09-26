@@ -42,6 +42,19 @@ module ap040_pipe_bus16
 	input  [2:0] irq_lvl,   // the requested interrupt level, active high; 0 none
 	input  clkena_in,    // advances the bus: one pulse per 16-bit sub-cycle
 	input  berr,         // a physical bus error on the current sub-cycle
+	// Caches stage F: the platform's cacheable windows (ap040_pipe_mmu.v:
+	// outside them nothing is cached; cache_allow_all lifts them) and the
+	// chipset's writes to memory, one a cycle, which invalidate a line
+	// holding them in either cache (MC68040UM Table 4-3; a dirty data line
+	// loses its data -- the platform's boundary, doc_AP040_PIPELINE_CACHES.md)
+	input         cache_allow_all,
+	input         cache_z2_ena,
+	input   [4:0] cache_z3_base0,
+	input         cache_z3_ena0,
+	input   [3:0] cache_z3_base1,
+	input         cache_z3_ena1,
+	input         snoop_stb,
+	input  [31:0] snoop_addr,
 	// The MMU's table walker has its own physical longword port, as
 	// rtl/ap040/ap040_tg68k_compat.v's does: descriptor traffic never
 	// crosses the 16-bit CPU bus.
@@ -195,7 +208,7 @@ ap040_pipe_dmu u_dmu
 	.dc_en (dc_en), .dtt0 (mmu_dtt0), .dtt1 (mmu_dtt1),
 	.cm_req (cm_req), .cm_dc (cm_dc), .cm_push_in (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr),
 	.cm_done (cm_done_d),
-	.sn_req (1'b0), .sn_addr (32'd0),     // no other master yet (stage F)
+	.sn_req (snoop_stb), .sn_addr (snoop_addr),
 	// The table walker's port goes through the data cache (MC68040UM
 	// 4.3.3): its reads use a hit, its U/M writes update a line holding
 	// the descriptor.
@@ -260,9 +273,7 @@ ap040_pipe_imu u_imu
 	.sup      (l1_sup_a), .pf_inval (l1_inval_a), .quiesce (l1_quiet),
 	.ic_en    (ic_en), .itt0 (mmu_itt0), .itt1 (mmu_itt1),
 	.cm_req   (cm_req), .cm_ic (cm_ic), .cm_scope (cm_scope), .cm_addr (cm_addr), .cm_done (cm_done_i),
-	// nothing here writes memory behind the CPU: the chipset's snoop comes
-	// with the card's integration (caches stage F)
-	.sn_req   (1'b0), .sn_addr (32'd0),
+	.sn_req   (snoop_stb), .sn_addr (snoop_addr),
 	.pf_xlat  (mmu_tc[15]), .x_req (i_req), .x_addr (i_addr), .x_sup (i_sup),
 	.x_pass   (i_pass), .x_flt (i_flt), .x_pa (i_pa), .x_cm (i_cm),
 	.pk_addr  (ip_addr), .pk_sup (ip_sup), .pk_hit (ip_hit), .pk_pa (ip_pa), .pk_cm (ip_cm),

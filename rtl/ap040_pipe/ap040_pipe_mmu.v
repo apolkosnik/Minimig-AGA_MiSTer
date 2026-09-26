@@ -46,6 +46,17 @@ module ap040_pipe_mmu
 	input      [31:0] itt1,
 	input      [31:0] dtt0,
 	input      [31:0] dtt1,
+	// The platform's cacheable windows (caches stage F; ap040_tg68k_compat's
+	// own): outside them nothing is cached, whatever a TTR or a page says --
+	// IO, ROM and unconfigured space must never be. Chip RAM and configured
+	// Fast RAM (Zorro II, two Zorro III bases) may be; cache_allow_all lifts
+	// the windows for benches with flat memory.
+	input             cache_allow_all,
+	input             cache_z2_ena,
+	input       [4:0] cache_z3_base0,
+	input             cache_z3_ena0,
+	input       [3:0] cache_z3_base1,
+	input             cache_z3_ena1,
 
 	// instruction translation port (membus's stream; the IMU from stage B)
 	input             i_req,
@@ -257,8 +268,25 @@ wire ip_ttr_a = ttr_match(itt0, ip_addr, ip_sup);
 wire ip_ttr   = ip_ttr_a || ttr_match(itt1, ip_addr, ip_sup);
 // resident and allowed at this privilege: a peek never reports a fault
 assign ip_hit = tc_e && (ip_ttr || (ip_uhit && iu_ent[45] && !(!ip_sup && iu_ent[4])));
-assign ip_pa  = ip_ttr ? ip_addr : tc_p ? {iu_ent[27:9], ip_addr[12:0]} : {iu_ent[27:8], ip_addr[11:0]};
-assign ip_cm  = ip_ttr ? (ip_ttr_a ? itt0[6:5] : itt1[6:5]) : iu_ent[3:2];
+// Untranslated -- TC.E clear, or a TTR match -- the peek is the address
+// itself, as the instruction port's own translation is: the IMU takes the
+// peek's caching mode for every prefetch it sends untranslated
+// (ap040_pipe_imu.v, rd_cm), not only for the ones a hit sends.
+wire ip_xl    = tc_e && !ip_ttr;
+assign ip_pa  = !ip_xl ? ip_addr : tc_p ? {iu_ent[27:9], ip_addr[12:0]} : {iu_ent[27:8], ip_addr[11:0]};
+// A physical address in a cacheable window (see the ports).
+function win_ok;
+	input [31:0] pa;
+	begin
+		win_ok = cache_allow_all ||
+		         (pa[31:21] == 11'd0) ||                                           // chip RAM
+		         (!(|pa[31:24]) && (pa[23] ^ (|pa[22:21])) && cache_z2_ena) ||    // $200000-$9FFFFF
+		         ((pa[31:27] == cache_z3_base0) && cache_z3_ena0) ||
+		         ((pa[31:28] == cache_z3_base1) && cache_z3_ena1);
+	end
+endfunction
+wire  [1:0] ip_cm_raw = ip_ttr ? (ip_ttr_a ? itt0[6:5] : itt1[6:5]) : ip_xl ? iu_ent[3:2] : 2'b00;
+assign ip_cm  = win_ok(ip_pa) ? ip_cm_raw : 2'b10;
 wire i_ttr_a = ttr_match(itt0, i_addr, i_sup);
 wire i_ttr_b = ttr_match(itt1, i_addr, i_sup);
 wire i_ttr   = i_ttr_a | i_ttr_b;
@@ -313,8 +341,11 @@ assign d_pa = d_ttr ? d_addr :
               d_addr;
 // Caching mode (MC68040UM 4.3): the matching TTR's, else the page's; with
 // translation disabled and no TTR match, write-through.
-assign i_cm = i_ttr ? i_ttr_cm : (tc_e && iatc_hit) ? ih_cm : 2'b00;
-assign d_cm = d_ttr ? d_ttr_cm : (tc_e && datc_hit) ? dh_cm : 2'b00;
+// The caching mode, then the platform's windows: outside them, inhibited.
+wire  [1:0] i_cm_raw = i_ttr ? i_ttr_cm : (tc_e && iatc_hit) ? ih_cm : 2'b00;
+wire  [1:0] d_cm_raw = d_ttr ? d_ttr_cm : (tc_e && datc_hit) ? dh_cm : 2'b00;
+assign i_cm = win_ok(i_pa) ? i_cm_raw : 2'b10;
+assign d_cm = win_ok(d_pa) ? d_cm_raw : 2'b10;
 
 //---------------------------------------------------------------------------
 // the walker

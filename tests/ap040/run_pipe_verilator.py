@@ -41,7 +41,7 @@ CORE = [RTL / n for n in (
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
                      "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order", "t_moves_alt", "t_smc_mmu",
-                     "t_icache", "t_cache", "t_dcache", "t_copyback", "t_wberr"]
+                     "t_icache", "t_cache", "t_dcache", "t_copyback", "t_wberr", "t_snoop"]
 PROGRAMS_OPEN = {}
 # tb_ap040_pipe_program_local runs the programs that need no bus devices and
 # no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a

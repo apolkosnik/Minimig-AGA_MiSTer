@@ -101,6 +101,8 @@ ap040_pipe_bus16 #(
 (
 	.irq_lvl (3'd0),   // no interrupt source in this bench
 	.berr (1'b0),   // no bus errors in this bench
+	.cache_allow_all (1'b1), .cache_z2_ena (1'b0), .cache_z3_base0 (5'd0), .cache_z3_ena0 (1'b0),
+	.cache_z3_base1 (4'd0), .cache_z3_ena1 (1'b0), .snoop_stb (1'b0), .snoop_addr (32'd0),
 	.walker_req (), .walker_we (), .walker_addr (), .walker_wdat (),
 	.walker_ack (1'b0), .walker_data (32'd0), .walker_berr (1'b0),   // no MMU walks here
 	.clk (clk), .nreset (nreset), .ce (ce), .clkena_in (clkena_in),
