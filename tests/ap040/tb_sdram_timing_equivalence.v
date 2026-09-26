@@ -52,7 +52,7 @@ sdram_reference #(.CPU_CACHE(CPU_CACHE),.CACHE_READ_PIPE(READ_PIPE)) reference (
 `undef PORTS
 integer cycles=0, cpu_gap=0, walker_gap=0;
 integer slots[0:5], reads=0, writes=0, chip_reads=0, chip_writes=0;
-integer resets=0, phase_jumps=0;
+integer resets=0, phase_jumps=0, walker_cas2_resets=0, t;
 reg [15:0] reset_phases=0;
 // Stimulus changes on the opposite clock edge. Requests stay held until ack;
 // chipset ownership varies by slot, and the read input changes every cycle.
@@ -129,14 +129,29 @@ initial begin
     repeat(1+phase%3) @(negedge sysclk);
     #1 reset_n=1;
   end
+  // A reset on the edge between a walker write's states 3 and 4: the walker's
+  // data is cleared by reset_n on that edge, and the second CAS at state 4
+  // writes the cleared value. Random resets almost never land there.
+  for(k=0;k<4;k=k+1) begin
+    wait(dut.init_done);
+    t=0;
+    while(!(dut.slot_type==5 && dut.sdram_state==3) && t<200000) begin
+      @(negedge sysclk); t=t+1;
+    end
+    if(t>=200000) $fatal(1,"FAIL: no walker write slot to reset in");
+    #1 reset_n=0; walker_cas2_resets=walker_cas2_resets+1;
+    repeat(1+k%2) @(negedge sysclk);
+    #1 reset_n=1;
+  end
   wait(dut.init_done);
   repeat(2000) @(negedge sysclk);
   for(k=0;k<6;k=k+1)
     if(slots[k]==0) $fatal(1,"FAIL: no coverage of slot type %0d",k);
-  if(reads==0 || writes==0 || chip_reads==0 || chip_writes==0 || reset_phases!=16'hffff)
+  if(reads==0 || writes==0 || chip_reads==0 || chip_writes==0 || reset_phases!=16'hffff ||
+     walker_cas2_resets!=4)
     $fatal(1,"FAIL: incomplete coverage");
-  $display("ALL TESTS PASSED: %0d cycles; slots=%0d/%0d/%0d/%0d/%0d/%0d; walker=%0d/%0d chip=%0d/%0d; resets=%0d phase_jumps=%0d",
-    cycles,slots[0],slots[1],slots[2],slots[3],slots[4],slots[5],reads,writes,chip_reads,chip_writes,resets,phase_jumps);
+  $display("ALL TESTS PASSED: %0d cycles; slots=%0d/%0d/%0d/%0d/%0d/%0d; walker=%0d/%0d chip=%0d/%0d; resets=%0d phase_jumps=%0d walker_cas2_resets=%0d",
+    cycles,slots[0],slots[1],slots[2],slots[3],slots[4],slots[5],reads,writes,chip_reads,chip_writes,resets,phase_jumps,walker_cas2_resets);
   $finish;
 end
 initial begin #1000000; $fatal(1,"FAIL: timeout"); end

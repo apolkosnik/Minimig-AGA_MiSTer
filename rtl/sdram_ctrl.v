@@ -315,6 +315,11 @@ reg        old_7m_q;
 always @ (posedge sysclk) old_7m_q <= c_7m;
 wire [3:0] next_sdram_state = (~old_7m_q & c_7m) ? 4'd0 : (sdram_state + 4'd1);
 wire       slot_start       = (next_sdram_state == 4'd0);
+// The next values of init_done and of the walker write's second-CAS flag:
+// each register's own D input, named so the data and mask pins' next-value
+// registers (by the pin block) can take the same terms a clock ahead.
+wire       init_done_nx     = reset && (init_done || (slot_start && (&initstate)));
+wire       walker_cas2_nx   = (slot_type == WALKER_WRITE) && (next_sdram_state == 4'd4);
 
 //// init counter ////
 always @ (posedge sysclk) begin
@@ -403,7 +408,7 @@ always @ (posedge sysclk) begin
 	                  ((sdram_state == 4'd1) ||
 	                   ((slot_type == WALKER_WRITE) &&
 	                    (next_sdram_state == 4'd4)));
-	walker_cas2_go <= (slot_type == WALKER_WRITE) && (next_sdram_state == 4'd4);
+	walker_cas2_go <= walker_cas2_nx;
 	walker_snoop_hi <= (slot_type == WALKER_WRITE) &&
 	                   (next_sdram_state >= 4'd2) && (next_sdram_state <= 4'd5);
 	walker_snoop_lo <= (slot_type == WALKER_WRITE) &&
@@ -467,9 +472,13 @@ reg        cas_sd_we;
 // routes directly into every data-pin OE register.  Use the next init_done
 // value (including reset and a shortened slot) to preserve the old pin timing.
 reg        cas_write_go;
+wire       cas_write_nx = init_done_nx && (sdram_state == 4'd1) && !cas_sd_we;
 always @(posedge sysclk)
-	cas_write_go <= reset && (init_done || (slot_start && (&initstate))) &&
-	                (sdram_state == 4'd1) && !cas_sd_we;
+	cas_write_go <= cas_write_nx;
+// The data and mask pins' next values (the pin block).
+reg [15:0] sd_data_nx;
+reg        sd_data_oe_nx;
+reg  [1:0] sd_dqm_nx;
 reg  [1:0] cas_dqm;
 reg  [9:0] casaddr;
 reg  [1:0] pre_ba;
@@ -626,14 +635,46 @@ always @ (posedge sysclk) begin
 		                         (ras_refresh && !((~chipDMA) | (~chipRW))))) ||
 		             walker_cas2_go || (init_done && cas_go && !cas_sd_cas));
 		sd_we   <= !((ras_go && init_we) || walker_cas2_go || cas_write_go);
-		// Same argument, same enable: the data bus is driven only by the two
-		// CAS states and released everywhere else, and chipWE is raised only
-		// by the chipset's own RAS.
-		sd_data <= walker_cas2_go            ? walker_wdata_latch[15:0] :
-		           cas_write_go                    ? datawr
-		                                              : 16'hZZZZ;
+		// Same argument, same enable: chipWE is raised only by the chipset's
+		// own RAS.
 		chipWE  <= ras_go && init_done && ((~chipDMA) | (~chipRW)) && !chipRW;
 	end
+
+	// The data and mask pins, each loaded every edge from one register.
+	//
+	// Their pin registers are in the I/O elements, far from this module's
+	// logic. The mux in front of each was placed by its sources, and the route
+	// from it to the pin took most of the clk_114 period: on 4889b21d's fit
+	// ram1|walker_cas2_go -> sd_data[11] was 2.7 ns to the mux, 5.6 ns on to
+	// the pin, and -0.085 ns (+2.626 on the fit before, by placement alone);
+	// init_done -> sd_dqm[0] was -0.007. Now the pin takes sd_*_nx, a
+	// register loaded one edge ahead with what the pin was going to load:
+	// the flags' next values (their own D inputs, the *_nx wires) and the
+	// sources as they will stand. The pin's only predecessor is a flop with
+	// one load, which the fitter puts beside it; the mux moves back a clock,
+	// into the fabric.
+	//
+	// The data bus loaded at the end of each even state and held through the
+	// odd ones, so sd_data_nx takes a new value when the next state is even
+	// and holds when it is odd -- which keeps the pins exact across the 7 MHz
+	// resynchronisation, when a state is cut short. The sources hold across
+	// the edge: datawr is written only at the RAS, and the walker's data only
+	// at its grant in state 0 (or cleared by reset_n, which is carried here).
+	// The mask loads on its own four conditions, and holds otherwise.
+	// tests/ap040/check_sdram_timing_equivalence.py compares every pin cycle
+	// by cycle against the controller before this.
+	if (~next_sdram_state[0]) begin
+		sd_data_oe_nx <= walker_cas2_nx || cas_write_nx;
+		sd_data_nx    <= !walker_cas2_nx ? datawr :
+		                 reset_n         ? walker_wdata_latch[15:0] : 16'd0;
+	end
+	sd_data <= sd_data_oe_nx ? sd_data_nx : 16'hZZZZ;
+
+	if (!init_done_nx || slot_start || walker_cas2_nx || (sdram_state == 4'd1))
+		sd_dqm_nx <= (!init_done_nx || slot_start) ? 2'd3 :
+		             walker_cas2_nx                ? 2'd0 :
+		             (!cas_sd_we)                  ? cas_dqm : 2'd0;
+	sd_dqm <= sd_dqm_nx;
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
 
@@ -643,17 +684,12 @@ always @ (posedge sysclk) begin
 		sd_addr <= row_col;
 	// otherwise hold
 
-	// The mask and the bank hold across the whole burst rather than across the
-	// odd states, so their enable is not ~sdram_state[0] -- but it is still a
-	// short list of registered flags, and writing them once each keeps their
-	// own outputs out of their own cones.  The bank is loaded at every RAS,
-	// taking pre_ba on the slots that do not belong to the chipset; on a slot
-	// that issues no command at all it is a don't-care, exactly as the row in
-	// row_col is.
-	if (!init_done || ras_go || walker_cas2_go || cas_go)
-		sd_dqm <= (!init_done || ras_go)  ? 2'd3 :
-		          walker_cas2_go          ? 2'd0 :
-		          (!cas_sd_we)            ? cas_dqm : 2'd0;
+	// The bank holds across the whole burst rather than across the odd states,
+	// so its enable is not ~sdram_state[0] -- but it is still a short list of
+	// registered flags, and writing it once keeps its own output out of its
+	// own cone.  It is loaded at every RAS, taking pre_ba on the slots that do
+	// not belong to the chipset; on a slot that issues no command at all it is
+	// a don't-care, exactly as the row in row_col is.
 	if (!init_done || ras_go)
 		sd_ba  <= !init_done ? 2'd0 :
 		          ((~chipDMA) | (~chipRW)) ? chipAddr[24:23] : pre_ba;

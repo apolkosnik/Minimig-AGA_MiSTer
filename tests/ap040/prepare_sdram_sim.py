@@ -41,6 +41,14 @@ if registered_driver in source:
     new_driver = new_driver.replace(
         "(init_done && cas_go && !cas_sd_we)", "cas_write_go"
     )
+# ...and the pin loaded every edge from its next-value registers.
+nx_driver = "\tsd_data <= sd_data_oe_nx ? sd_data_nx : 16'hZZZZ;"
+if nx_driver in source:
+    old_driver = nx_driver
+    new_driver = """\tbegin
+\t\tsd_data_en <= sd_data_oe_nx;
+\t\tsd_data_r  <= sd_data_nx;
+\tend"""
 if old_driver not in source:
     sys.stderr.write("prepare_sdram_sim: sd_data's driver is not the shape "
                      "this script knows how to split; update both together.\n")
