@@ -264,7 +264,7 @@ module ap040_ea_fetch
 	output            eaf_redir_soon
 );
 
-wire id_t i = eac_i.i;
+id_t i; assign i = eac_i.i;
 
 //--------------------------------------------------------------- state
 localparam [3:0] P_START = 4'd0,  // examine / wait for serialisation
@@ -528,7 +528,7 @@ endfunction
 
 // RTR's second read (the PC at 2(SP)) is a long, its first (the CCR) a word
 // a bitfield's longword at the field address, its fifth byte as the "source"
-wire rdreq_t nx = next_rd(need_smi, done_smi, need_dmi, done_dmi, needs_ld_src, done_sld, needs_ld_dst, done_dld,
+rdreq_t nx; assign nx = next_rd(need_smi, done_smi, need_dmi, done_dmi, needs_ld_src, done_sld, needs_ld_dst, done_dld,
                           eac_i.src_ea, eac_i.dst_ea,
                           is_bf ? bf_addr + ((bf_n == 3'd3) ? 32'd2 : 32'd4) : s_addr_now, is_bf ? bf_addr : d_addr_now,
                           is_bf ? SZ_B : i.size,
@@ -596,7 +596,7 @@ function automatic ex_t base_uop(input id_t i);
 	x.cls = i.cls; x.alu = i.alu; x.size = i.size; x.cond = i.cond;
 	x.dr = R_NONE; x.u0_r = R_NONE; x.u1_r = R_NONE; x.sp_r = R_NONE;
 	x.btarget = i.btarget;
-	x.last = 1'b1;
+	x.final_uop = 1'b1;
 	return x;
 endfunction
 
@@ -639,7 +639,7 @@ function automatic ex_t xord(input eac_t e, input logic [31:0] opa, input logic 
 		CL_RTS, CL_RTD: begin x.target = sv; x.redirect = 1'b0; end
 		CL_RTR:         begin x.target = dv; x.redirect = 1'b0; x.dk = DK_NONE; end
 		CL_MOVE2SR, CL_SROP: begin x.target = i.next_pc; x.redirect = 1'b1; end
-		CL_STOP:  begin x.cls = CL_MOVE2SR; x.a = i.imm; x.dk = DK_NONE; x.redirect = 1'b0; x.last = 1'b0; end
+		CL_STOP:  begin x.cls = CL_MOVE2SR; x.a = i.imm; x.dk = DK_NONE; x.redirect = 1'b0; x.final_uop = 1'b0; end
 		CL_RSTO:  begin x.cls = CL_NOP; x.dk = DK_NONE; end
 		// LINK A7: the value pushed is the decremented SP (PRM LINK: SP-4 -> SP;
 		// An -> (SP)), i.e. the push address
@@ -672,7 +672,7 @@ function automatic ex_t xord(input eac_t e, input logic [31:0] opa, input logic 
 	return x;
 endfunction
 
-wire ex_t x_ord1 = xord(eac_i, op_a, op_b, op_c, s_addr_c, s_val_c, d_addr_c, d_val_c);
+ex_t x_ord1; assign x_ord1 = xord(eac_i, op_a, op_b, op_c, s_addr_c, s_val_c, d_addr_c, d_val_c);
 
 // Bitfield evaluation on a 64-bit window: {Dn, Dn} for a register field
 // (offset mod 32; a field past bit 0 wraps to bit 31), or the memory bytes
@@ -737,7 +737,7 @@ function automatic logic [63:0] bf_win(input logic [2:0] n, input logic [31:0] d
 		default: return {dv, sb, 24'd0};
 	endcase
 endfunction
-wire bfres_t bfr = bf_eval(i.alu[2:0],
+bfres_t bfr; assign bfr = bf_eval(i.alu[2:0],
                            bf_mem ? bf_win(bf_n, d_val, s_val[7:0]) : {rd_b, rd_b},   // (vhold: loads captured,
                            bf_mem ? {3'd0, bf_off[2:0]} : {1'b0, bf_off[4:0]},
                            bf_w, rd_a, bf_off, !bf_mem);   //  no EX hazard: the register file)
@@ -765,14 +765,14 @@ function automatic ex_t bf_uop(input ex_t x0, input logic sec, input eac_t e, in
 			default:    begin x.st_size = SZ_L; x.st_data = r.nw[63:32]; end
 		endcase
 	end
-	x.last = !two;
+	x.final_uop = !two;
 	if (sec) begin
 		x.wr_ccr = 1'b0; x.dk = DK_NONE; x.dr = R_NONE;
 		x.u0_v = 1'b0; x.u1_v = 1'b0;
 		x.st_size = SZ_B;
 		x.st_addr = a + ((n == 3'd3) ? 32'd2 : 32'd4);
 		x.st_data = {24'd0, (n == 3'd3) ? r.nw[47:40] : r.nw[31:24]};
-		x.last = 1'b1;
+		x.final_uop = 1'b1;
 	end
 	return x;
 endfunction
@@ -804,11 +804,11 @@ function automatic ex_t cas2_uop(input ex_t x0, input logic sec, input eac_t e,
 	x.dk = DK_NONE; x.dr = R_NONE;
 	x.u0_v = 1'b0; x.u1_v = 1'b0;
 	x.st_v = 1'b1; x.st_size = sz; x.st_rb = 1'b0;
-	x.last = 1'b1;
+	x.final_uop = 1'b1;
 	if (eq1 && eq2) begin
 		x.st_addr = sec ? a2 : a1;
 		x.st_data = (sec ? du2 : du1) & szmask(sz);
-		x.last = sec;
+		x.final_uop = sec;
 		if (sec) x.wr_ccr = 1'b0;
 	end else begin
 		// w0 beats u1 in WB, so the register w0 names wins when Dc1 = Dc2
@@ -831,7 +831,7 @@ wire cas2_two = (i.cls == CL_CAS2) &&
                 ((i.size == SZ_W) ? (d_val[15:0] == rd_b[15:0]) : (d_val == rd_b));
 
 reg bf_step;               // the second micro-op (bitfield trailing byte, CAS2 Du2) is next
-wire ex_t x_ord0 = is_bf ? bf_uop(x_ord1, bf_step, eac_i, bfr, bf_mem, bf_modify, bf_two, bf_n, bf_addr) :
+ex_t x_ord0; assign x_ord0 = is_bf ? bf_uop(x_ord1, bf_step, eac_i, bfr, bf_mem, bf_modify, bf_two, bf_n, bf_addr) :
                    (i.cls == CL_CAS2) ? cas2_uop(x_ord1, bf_step, eac_i, rd_a, rd_b, rd_c, rd_d,   // (vhold: no EX hazard)
                                                  s_addr_c, s_val, d_addr_c, d_val,     // (vhold: loads captured)
                                                  CAS2_DC_ORDER_020 != 0) :
@@ -882,7 +882,7 @@ wire [7:0] trap_vec = divz ? 8'd5 : trap_n ? 8'd7 : 8'd6;
 // value are selected by a register, not by its own compare (timing)
 wire       cas_eq = (i.size == SZ_B) ? (x_ord0.a[7:0] == x_ord0.b[7:0]) :
                     (i.size == SZ_W) ? (x_ord0.a[15:0] == x_ord0.b[15:0]) : (x_ord0.a == x_ord0.b);
-wire ex_t  x_ord       = with_cc(x_ord0, (i.cls == CL_MULDIV) ? divz : (i.cls == CL_CAS) ? cas_eq : br_cc);
+ex_t x_ord; assign x_ord = with_cc(x_ord0, (i.cls == CL_MULDIV) ? divz : (i.cls == CL_CAS) ? cas_eq : br_cc);
 
 function automatic logic [31:0] fsize(input logic [3:0] f);
 	case (f)
@@ -902,7 +902,7 @@ function automatic ex_t exc_uop(input id_t i, input logic [3:0] k, input logic [
 	ex_t x;
 	x = base_uop(i);
 	x.cls  = CL_EXC;
-	x.last = 1'b0;
+	x.final_uop = 1'b0;
 	x.st_v = 1'b1; x.st_size = SZ_L;
 	x.st_addr = sp + {26'd0, k, 2'b00};
 	case (k)
@@ -943,7 +943,7 @@ function automatic ex_t exc_final(input id_t i, input logic [4:0] bank, input lo
 	x.irq = irq;    // (the core acknowledges the interrupt when this commits)
 	x.target = target;
 	x.redirect = !target[0];
-	x.last = !target[0];
+	x.final_uop = !target[0];
 	return x;
 endfunction
 
@@ -957,7 +957,7 @@ function automatic ex_t rte_final(input id_t i, input logic [4:0] bank, input lo
 	x.sr_v = 1'b1; x.sr_val = sr & `AP040_SR_MASK;
 	x.target = pc;
 	x.redirect = (fv[15:12] != 4'd1) && !pc[0];
-	x.last = x.redirect;
+	x.final_uop = x.redirect;
 	return x;
 endfunction
 
@@ -1185,12 +1185,12 @@ wire tr_arm_stop = sr_in[15] || (sr_in[14] && tr_stop_t0);
 wire trapn_arm = ((ph == P_START) || (ph == P_OPS)) && eac_v_use && !rst_pending &&
                  !(i.serialize && older_busy && ph == P_START) && !(i.priv && !s_bit) &&
                  ops_done && !(rd_pend && !rd_ack);
-wire stp_t st0_nt = stepf(ph, eac_v_use, rst_pending, i, older_busy, !bf_rdblk, rd_pend, rd_ack, cap,
+stp_t st0_nt; assign st0_nt = stepf(ph, eac_v_use, rst_pending, i, older_busy, !bf_rdblk, rd_pend, rd_ack, cap,
                       s_bit, stall_in, nx, ops_done, jmp_odd, rts_odd, rtr_odd, trap_u, 1'b0, trap_vec,
                       indexed_mode, two_uop, bf_step, sync_busy, s_addr_c, s_val_c,
                       d_val_c, x_step, vbr_in, x_vec, x_target, r_step, rd_a, rte_fmt_ok, rte_goes,
                       r_fv[15:12] == 4'd7, rs_cnt == 10'd0, HAS_FPU != 0, tr_arm_stop);
-wire stp_t st0 = trapn_ov(st0_nt, trap_n && trapn_arm, trap_vec, i.next_pc, i.pc);
+stp_t st0; assign st0 = trapn_ov(st0_nt, trap_n && trapn_arm, trap_vec, i.next_pc, i.pc);
 
 //--------------------------------------------------------------- access errors
 // A data read that ends in an access error (M68040UM 8.2.1, p. 8-6): the
@@ -1351,17 +1351,17 @@ endfunction
 wire mm_sblk = hz(ex_w0_v, ex_w0_r, ra_c, ra_c, ra_c, ra_c) || hz(ex_u0_v, ex_u0_r, ra_c, ra_c, ra_c, ra_c) ||
                hz(ex_u1_v, ex_u1_r, ra_c, ra_c, ra_c, ra_c);
 reg  mm_tail;              // the trailing An-update micro-op is next
-wire mms_t mms = mm_step(mm_lde, mm_mask, mm_empty, rd_pend, cap, mm_have, stall_in, mm_rlast, mm_hlast, mm_one,
+mms_t mms; assign mms = mm_step(mm_lde, mm_mask, mm_empty, rd_pend, cap, mm_have, stall_in, mm_rlast, mm_hlast, mm_one,
                          mm_p, mm_sblk, mm_16, (MM_TAIL != 0) && mm_pre && !mm_ld && !mm_p && !mm_16, mm_tail);
 
 function automatic ex_t mm_uop(input id_t i, input mms_t m, input logic ld, input logic [4:0] r,
-                               input logic [31:0] v, input logic [31:0] addr, input logic last,
+                               input logic [31:0] v, input logic [31:0] addr, input logic final_uop,
                                input logic upd, input logic [4:0] br, input logic [31:0] bval,
                                input logic skipw, input logic mp, input logic [3:0] k);
 	ex_t x;
 	x = base_uop(i);
 	x.cls = CL_MOVEM;
-	x.last = last;
+	x.final_uop = final_uop;
 	if (m.empty) ;
 	else if (ld) begin
 		if (!skipw) begin
@@ -1375,7 +1375,7 @@ function automatic ex_t mm_uop(input id_t i, input mms_t m, input logic ld, inpu
 		x.st_v = 1'b1; x.st_addr = addr; x.st_size = i.size;
 		x.st_data = (i.size == SZ_W) ? {16'd0, v[15:0]} : v;
 	end
-	if (last && upd && (!m.empty || m.tailu)) begin x.u1_v = 1'b1; x.u1_r = br; x.u1_val = bval; end
+	if (final_uop && upd && (!m.empty || m.tailu)) begin x.u1_v = 1'b1; x.u1_r = br; x.u1_val = bval; end
 	return x;
 endfunction
 wire  [4:0] mm_dreg = mm_lde ? (mms.from_buf ? mm_hreg : mm_rreg) : mm_sreg;
@@ -1385,10 +1385,10 @@ wire  [4:0] mm_dreg = mm_lde ? (mms.from_buf ? mm_hreg : mm_rreg) : mm_sreg;
 wire [31:0] mp_val  = (i.size == SZ_W) ? {op_b[31:16], mp_acc[7:0], rd_data[7:0]} : {mp_acc, rd_data[7:0]};
 wire [31:0] mm_dval = mm_ld ? (mms.from_buf ? mm_hdata : mm_p ? mp_val : rd_data) :
                       (mm_pre && mm_sreg == mm_base) ? rd_c - mm_sz : rd_c;
-function automatic ex_t m16_upd(input ex_t x0, input logic m16, input logic last, input eac_t e);
+function automatic ex_t m16_upd(input ex_t x0, input logic m16, input logic final_uop, input eac_t e);
 	ex_t x;
 	x = x0;
-	if (m16 && last) begin
+	if (m16 && final_uop) begin
 		x.u0_v = e.i.imm[3]; x.u0_r = e.src_r; x.u0_val = e.src_ea + 32'd16;
 		x.u1_v = e.i.imm[4]; x.u1_r = e.dst_r;
 		x.u1_val = ((e.src_r == e.dst_r) ? e.src_ea : e.dst_ea) + 32'd16;
@@ -1406,12 +1406,12 @@ reg  [31:0] mm_bval;
 wire        mm_upd  = (mm_pre || mm_post) || mm_bv || mm_bnow;
 wire [31:0] mm_uval = mm_tail ? mm_addr + mm_sz :              // (the trailing micro-op: after the last decrement)
                       (mm_pre || mm_post) ? mm_addr : mm_bnow ? mm_lval : mm_bval;
-wire ex_t   mm_x0   = mm_uop(i, mms, mm_lde, mm_dreg, mm_dval, mm_addr, mms.fin, mm_upd,
+ex_t mm_x0; assign mm_x0 = mm_uop(i, mms, mm_lde, mm_dreg, mm_dval, mm_addr, mms.fin, mm_upd,
                              mm_base, mm_uval, mm_ld && !mm_p && mm_dreg == mm_base, mm_p, mm_k);
-wire ex_t   m16_x   = m16_upd(mm_uop(i, '0, 1'b0, 5'd0, m16_buf[m16_ks], m16_saddr, m16_sf, 1'b0,
+ex_t m16_x; assign m16_x = m16_upd(mm_uop(i, '0, 1'b0, 5'd0, m16_buf[m16_ks], m16_saddr, m16_sf, 1'b0,
                                      5'd0, 32'd0, 1'b0, 1'b0, 4'd0),
                               1'b1, m16_sf, eac_i);
-wire ex_t   mm_x    = mm_16 ? m16_x : mm_x0;
+ex_t mm_x; assign mm_x = mm_16 ? m16_x : mm_x0;
 
 function automatic stp_t mm_st(input mms_t m, input logic [31:0] a, input logic [1:0] sz);
 	stp_t t;
@@ -1425,7 +1425,7 @@ function automatic stp_t m16_st_f(input stp_t t0, input logic sd, input logic sf
 	t = t0; t.disp = sd; t.fin = sf;
 	return t;
 endfunction
-wire stp_t st1 = (ph != P_MOVEM) ? st0 :
+stp_t st1; assign st1 = (ph != P_MOVEM) ? st0 :
                  mm_16 ? m16_st_f(mm_st(mms, mm_addr, i.size), m16_sd, m16_sf) :
                  mm_st(mms, mm_addr, mm_p ? SZ_B : i.size);
 //--------------------------------------------------------------- the FPU
@@ -1748,7 +1748,7 @@ function automatic ex_t fp_cnd_uop(input ex_t x0, input logic bcc, input logic d
 	end
 	return y;
 endfunction
-wire ex_t fp_x = fp_cnd ? fp_cnd_uop(x_ord, fp_bcc, fp_dbcc, fp_scc, fp_ctk,
+ex_t fp_x; assign fp_x = fp_cnd ? fp_cnd_uop(x_ord, fp_bcc, fp_dbcc, fp_scc, fp_ctk,
                                      i.pc + 32'd2 + i.imm, i.pc + 32'd4 + i.imm,
                                      {1'b0, i.opcode[2:0]}, {op_a[31:16], fp_dbn},
                                      fp_dbn == 16'hFFFF, fp_sccv)
@@ -1758,11 +1758,11 @@ wire ex_t fp_x = fp_cnd ? fp_cnd_uop(x_ord, fp_bcc, fp_dbcc, fp_scc, fp_ctk,
 // ap040_core.v:4593-4625), and as the trailing micro-op of a memory store, so
 // that an access error on any beat leaves An as it was and the restart
 // recalculates the same effective address.
-function automatic ex_t fp_upd_uop(input ex_t x0, input logic last);
+function automatic ex_t fp_upd_uop(input ex_t x0, input logic final_uop);
 	ex_t y;
 	y = x0;
 	y.dk = DK_NONE; y.dr = R_NONE; y.st_v = 1'b0; y.redirect = 1'b0;
-	y.wr_ccr = 1'b0; y.cls = CL_NOP; y.last = last;
+	y.wr_ccr = 1'b0; y.cls = CL_NOP; y.final_uop = final_uop;
 	return y;
 endfunction
 // (M10.7) AN EXPLICIT ADDRESS-REGISTER UPDATE VALUE FROM EA-FETCH.  Worth
@@ -1799,7 +1799,7 @@ function automatic ex_t fp_st_uop(input ex_t x0, input logic beat, input logic [
 	end
 	return y;
 endfunction
-wire ex_t fp_w = (fp_stt == FS_WR) ? an_ov(fp_st_uop(x_ord,
+ex_t fp_w; assign fp_w = (fp_stt == FS_WR) ? an_ov(fp_st_uop(x_ord,
                                               (fp_mvm || fp_sv || fp_scc) ? !(fp_crd && fp_k == 2'd3)
                                                                             : (fp_k != fp_beats),
                                               fp_baddr, fp_bdata, fp_bsz),
@@ -2012,7 +2012,7 @@ reg  [2:0] irq_take_lvl;
 wire [31:0] irq_take_pc = (ph == P_STOP) ? i.next_pc : i.pc;
 wire irq_go = irq_take && eac_v_use && !rst_pending && !older_busy &&
               ((ph == P_START) || (ph == P_STOP));
-wire stp_t st_i = aerr_st(irq_st(fp_st(pm_st(st1, ph == P_PMMU || ph == P_CINV, pm_got, stall_in),
+stp_t st_i; assign st_i = aerr_st(irq_st(fp_st(pm_st(st1, ph == P_PMMU || ph == P_CINV, pm_got, stall_in),
                                      (HAS_FPU != 0) && (ph == P_FPU), stall_in, fp_live, fp_unimp, fp_unsupp,
                                      i.next_pc, fp_ea_v ? fp_addr : i.pc, fp_ea_v ? fp_addr : 32'd0,
                                      (fp_stt == FS_RD) && !rd_pend && !((fp_cr || fp_mvm || fp_rs) && fp_crd) && !fp_mw,
@@ -2051,7 +2051,7 @@ wire tr_go = tr_take && eac_v_use && !rst_pending && !older_busy &&
 // interrupt is not acknowledged here -- `tr_st` clears the `irq` flag -- so
 // the request simply stays pending and is taken in front of the trace
 // handler's first instruction.
-wire stp_t st = tr_st(st_i, ph, tr_take, tr_go, i.pc, tr_pc);
+stp_t st; assign st = tr_st(st_i, ph, tr_take, tr_go, i.pc, tr_pc);
 
 //--------------------------------------------------------------- PFLUSH / PTEST
 // M68040UM 3.7 (MMU instructions): privileged; they wait for everything
@@ -2083,20 +2083,20 @@ function automatic ex_t pmmu_uop(input id_t i, input logic [31:0] mmusr);
 	x.redirect = 1'b1; x.target = i.next_pc;
 	return x;
 endfunction
-wire ex_t pm_x = pmmu_uop(i, pm_mmusr);
+ex_t pm_x; assign pm_x = pmmu_uop(i, pm_mmusr);
 
 
 // RTR to an odd PC: the CCR alone commits
 function automatic ex_t ccr_only_uop(input ex_t x);
 	ex_t y;
-	y = x; y.u0_v = 1'b0; y.u1_v = 1'b0; y.redirect = 1'b0; y.last = 1'b0;
+	y = x; y.u0_v = 1'b0; y.u1_v = 1'b0; y.redirect = 1'b0; y.final_uop = 1'b0;
 	return y;
 endfunction
 
 // a trapping CHK/CHK2/DIV: the micro-op commits, the exception follows
 function automatic ex_t no_last(input ex_t x);
 	ex_t y;
-	y = x; y.redirect = 1'b0; y.last = 1'b0;
+	y = x; y.redirect = 1'b0; y.final_uop = 1'b0;
 	return y;
 endfunction
 
@@ -2114,7 +2114,7 @@ function automatic ex_t dmux(input logic [2:0] sel, input ex_t o, input ex_t f, 
 	endcase
 endfunction
 
-wire ex_t disp_x0 = dmux(st.dsel, x_ord,
+ex_t disp_x0; assign disp_x0 = dmux(st.dsel, x_ord,
                         exc_uop(i, x_k, x_sp, x_sr, x_pc, x_fmt, x_vec, x_addr, x7[(x_k < 4'd2) ? 4'd2 : x_k]),
                         exc_final(i, x_bank, x_sp, x_sr, x_target, x_irq, x_lvl, x_pass2, x_sp1),
                         rte_final(i, bank_now, rd_a, r_fv, r_sr, r_pc),
@@ -2139,7 +2139,7 @@ function automatic ex_t with_fc(input ex_t x, input logic [2:0] fc, input id_t i
 	y.stf.cmt = cmt;
 	return y;
 endfunction
-wire ex_t disp_x = with_fc(disp_x0, (st.dsel == 3'd1) ? 3'd5 : (st.dsel == 3'd0 && i.fcsel == 2'd2) ? dfc_in : fc_data,
+ex_t disp_x; assign disp_x = with_fc(disp_x0, (st.dsel == 3'd1) ? 3'd5 : (st.dsel == 3'd0 && i.fcsel == 2'd2) ? dfc_in : fc_data,
                            i, ph == P_EXC, aer_m16, aer_lk, ph == P_MOVEM && mm_cmi, mm_tag);
 
 // the early read goes out when this stage leaves the port free and is

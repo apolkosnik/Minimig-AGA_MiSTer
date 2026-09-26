@@ -276,7 +276,7 @@ typedef struct packed {
 	logic        u1_v;  logic [4:0] u1_r;  logic [31:0] u1_val;
 	logic [31:0] target;       // redirect target (JMP/JSR/RTS/RTE/exception vector)
 	logic [31:0] btarget;      // taken-branch target
-	logic        last;         // final micro-op of the instruction (retires)
+	logic        final_uop;         // final micro-op of the instruction (retires)
 	// sequenced micro-op fields (exception entry, RTE, reset)
 	logic        st_v;         // store st_data (size st_size) at st_addr
 	logic [31:0] st_addr;
@@ -306,7 +306,7 @@ typedef struct packed {
 
 typedef struct packed {
 	logic [31:0] pc;
-	logic        last;
+	logic        final_uop;
 	logic        w0_v;  logic [4:0] w0_r;  logic [31:0] w0_val;
 	logic        u0_v;  logic [4:0] u0_r;  logic [31:0] u0_val;
 	logic        u1_v;  logic [4:0] u1_r;  logic [31:0] u1_val;

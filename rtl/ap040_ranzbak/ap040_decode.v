@@ -745,8 +745,8 @@ function automatic len_t lenf(input logic [10:0][15:0] vb, input logic [3:0] vc)
 	return l;
 endfunction
 
-wire len_t   ln  = lenf(vbuf, vcnt);
-wire shape_t sh  = ln.sh;
+len_t ln; assign ln = lenf(vbuf, vcnt);
+shape_t sh; assign sh = ln.sh;
 wire [4:0]   tot = ln.tot;
 wire complete = (vcnt != 4'd0) && !ln.more && ({1'b0, vcnt} >= tot);
 
@@ -1587,7 +1587,7 @@ function automatic id_t decf(input logic [10:0][15:0] vbuf, input logic [31:0] v
 	return d;
 endfunction
 
-wire id_t d0 = decf(vbuf, vpc, sh, tot, ln.ea_bad);
+id_t d0; assign d0 = decf(vbuf, vpc, sh, tot, ln.ea_bad);
 
 // A word the instruction needs came from a fetch that faulted (M6): the
 // instruction becomes an access error (vector 2, format $7, PC = its first
@@ -1609,7 +1609,7 @@ function automatic id_t ifault(input id_t x, input logic [31:0] pc, input logic 
 	f.src.kind = EK_NONE; f.dst.kind = EK_NONE;
 	return f;
 endfunction
-wire id_t d = fbad ? ifault(d0, vpc, pf_addr, pf_long, pf_atc) : d0;
+id_t d; assign d = fbad ? ifault(d0, vpc, pf_addr, pf_long, pf_atc) : d0;
 
 // the code gathered here (self-modifying-code check in the core)
 assign g_lo = g_pc;

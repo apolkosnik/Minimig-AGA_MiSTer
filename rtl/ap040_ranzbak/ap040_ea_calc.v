@@ -173,11 +173,11 @@ endfunction
 // comparison must not survive into the LC040 build, because `nb` becomes a
 // mux in the address computation.
 wire [31:0] fp_step = ((HAS_FPU != 0) && (id_i.cls == CL_FPU)) ? {25'd0, id_i.imm[6:0]} : 32'd0;
-wire eares_t sres = eacomp(id_i.src, id_i.size, r_sb, f_sb[31:0], f_si[31:0], fp_step);
+eares_t sres; assign sres = eacomp(id_i.src, id_i.size, r_sb, f_sb[31:0], f_si[31:0], fp_step);
 // the destination sees the source's update of the same register
 wire [31:0]  db_v = (sres.upd && r_sb == r_db) ? sres.nv : f_db[31:0];
 wire [31:0]  di_v = (sres.upd && r_sb == r_di) ? sres.nv : f_di[31:0];
-wire eares_t dres = eacomp(id_i.dst, id_i.size2, r_db, db_v, di_v, fp_step);   // size2: PACK/UNPK
+eares_t dres; assign dres = eacomp(id_i.dst, id_i.size2, r_db, db_v, di_v, fp_step);   // size2: PACK/UNPK
 
 // the result register this instruction will write (w0), for the stages behind
 function automatic logic w0_of(input id_t i);
@@ -254,7 +254,7 @@ function automatic eac_t mk(input id_t i, input eares_t s, input eares_t d,
 	return o;
 endfunction
 
-wire eac_t o = mk(id_i, sres, dres, r_sb, r_db, s_bit, m_bit);
+eac_t o; assign o = mk(id_i, sres, dres, r_sb, r_db, s_bit, m_bit);
 
 // Early read: issued in the clock the instruction moves into EA-fetch, so
 // its answer arrives with it (an operand load then costs EA-fetch one clock,

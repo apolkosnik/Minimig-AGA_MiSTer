@@ -288,7 +288,7 @@ wire commit   = exe_valid;
 // (a fault on the last micro-op: the instruction is complete, its write pending in WB1)
 // (a faulted store retires only on an instruction's last micro-op, and never
 // for MOVEM: its fault restarts the instruction with CM set, M68040UM 8.4.6.7)
-wire retire   = exe_valid && !wb_hold && !(wb_fault && (!exe_o.last || exe_o.stf.cm));
+wire retire   = exe_valid && !wb_hold && !(wb_fault && (!exe_o.final_uop || exe_o.stf.cm));
 
 reg [15:0] sr;
 reg [31:0] vbr;
@@ -725,7 +725,7 @@ ap040_ea_fetch #(.STFWD(BUS ? 0 : 1), .CAS2_DC_ORDER_020(CAS2_DC_ORDER_020), .HA
 	.fp_dout(fp_dout),
 	.wb_fault(ce && wb_fault), .wb_fatm(st_fatc), .wb_fma(st_fma),
 	.wb_st_a(exe_o.st_addr), .wb_st_s(exe_o.st_size), .wb_st_d(exe_o.st_data), .wb_st_f(exe_o.st_fc),
-	.wb_last(exe_o.last), .wb_stf(exe_o.stf),
+	.wb_last(exe_o.final_uop), .wb_stf(exe_o.stf),
 	.wb_st_v(retire && exe_o.st_v), .wb_st_addr(exe_o.st_addr), .wb_st_size(exe_o.st_size), .wb_st_data(exe_o.st_data),
 	.ex_st_v(fw_st_v), .ex_st_addr(fw_st_addr), .ex_st_size(fw_st_size), .ex_st_data(fw_st_data),
 	.eaf_stall(eaf_stall), .eaf_blk(eaf_blk),
@@ -767,13 +767,13 @@ assign smc_hit = exe_valid && exe_o.st_v && !exe_o.stf.exc &&
 // and in_drop; a store that then faults takes its exception as usual.
 reg  smc_pend;
 reg  smc_fired;
-assign wb_smc = exe_valid && exe_o.last && (smc_hit || smc_pend) && !smc_fired && ce;
+assign wb_smc = exe_valid && exe_o.final_uop && (smc_hit || smc_pend) && !smc_fired && ce;
 always @(posedge clk)
 	if (!nreset) smc_fired <= 1'b0;
 	else if (ce) smc_fired <= exe_valid && wb_hold && !wb_fault && (smc_fired || wb_smc);
 always @(posedge clk)
 	if (!nreset) smc_pend <= 1'b0;
-	else if (ce && retire) smc_pend <= !exe_o.last && (smc_pend || smc_hit);
+	else if (ce && retire) smc_pend <= !exe_o.final_uop && (smc_pend || smc_hit);
 
 ap040_execute #(.HAS_FPU(HAS_FPU)) u_ex
 (
@@ -794,7 +794,7 @@ ap040_execute #(.HAS_FPU(HAS_FPU)) u_ex
 ap040_writeback u_wb
 (
 	.clk(clk), .nreset(nreset), .ce(ce), .stall_in(1'b0),
-	.exe_valid(retire && exe_o.last), .exe_pc(exe_o.pc),
+	.exe_valid(retire && exe_o.final_uop), .exe_pc(exe_o.pc),
 	.wb_stall(), .wb_valid(wb_valid), .wb_pc(wb_pc)
 );
 

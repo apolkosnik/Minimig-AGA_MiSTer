@@ -6,7 +6,9 @@
 
 module tb_cpu_wrapper_chip_bridge #(
 	parameter CLK114_PHASE = 0,
-	parameter DBR_MODE = 0
+	parameter DBR_MODE = 0,
+	parameter CACHE_ALLOW_ALL = 0,
+	parameter POST_STORES = 1
 );
 
 reg clk_114 = 0;
@@ -56,11 +58,14 @@ wire [15:0] chip_to_cpu;
 wire chip_as, chip_uds, chip_lds, chip_rw, chip_dtack;
 wire cpu_nrst_out;
 
-cpu_wrapper dut (
+cpu_wrapper #(.CACHE_ALLOW_ALL(CACHE_ALLOW_ALL), .POST_STORES(POST_STORES)) dut (
 	.reset(reset), .reset_out(cpu_nrst_out),
-	.clk(clk_sys), .ph1(cpu_ph1), .ph2(cpu_ph2),
-	.cpucfg(2'b10), .fastramcfg(3'd0), .cachecfg(3'd0),
+	.clk(clk_sys), .clk_peripheral(clk_sys), .ph1(cpu_ph1), .ph2(cpu_ph2),
+	.cpucfg(3'b010), .fastramcfg(3'd0), .cachecfg(3'd0),
 	.bootrom(1'b0),
+	.cdtv_mode(1'b0), .cdtv_din(16'd0), .cdtv_selack(1'b0),
+	.snoop_tgl(1'b0), .snoop_adr(24'd0),
+	.ddr_snoop_tgl(1'b0), .ddr_snoop_adr(24'd0),
 	.chip_addr(chip_addr), .chip_dout(chip_to_cpu),
 	.chip_din(chip_from_cpu), .chip_as(chip_as),
 	.chip_uds(chip_uds), .chip_lds(chip_lds), .chip_rw(chip_rw),
@@ -107,6 +112,22 @@ minimig_m68k_bridge bridge (
 reg [15:0] mem [0:32767];
 assign bridge_rdata = mem[bridge_addr[15:1]];
 
+// The core may run during a posted store, but the adapter must hold the
+// entire outstanding bus transfer until the chipset acknowledges it.
+reg prev_reset = 0, prev_bus_enable = 0;
+reg [67:0] prev_bus;
+wire [67:0] bus_snapshot = {dut.cpu_addr_p, dut.cpu_dout_p,
+                            dut.cpustate_p, dut.wr_p, dut.uds_p, dut.lds_p, 15'd0};
+integer posted_progress = 0;
+always @(posedge clk_sys) begin
+	if (prev_reset && reset && !prev_bus_enable && bus_snapshot !== prev_bus)
+		$fatal(1, "adapter advanced without a bus completion");
+	prev_reset <= reset;
+	prev_bus_enable <= dut.bus_enable;
+	prev_bus <= bus_snapshot;
+	if (reset && dut.post_drain && dut.core_enable && !dut.bus_enable) posted_progress <= posted_progress + 1;
+end
+
 integer errors = 0;
 integer result = 0;
 reg [15:0] failcode = 0;
@@ -152,11 +173,19 @@ initial begin
 		errors = errors + 1;
 		$display("FAIL: timeout after %0d cycles", timeout);
 	end
-	else if (result == 2)
+	else if (result == 2) begin
 		$display("FAIL: program reports failure, test %0d", failcode);
+		$display("SP=%h exception stack=%h %h %h %h",
+		         dut.core_dbgstat[95:64],
+		         mem[dut.core_dbgstat[79:65]], mem[dut.core_dbgstat[79:65]+1],
+		         mem[dut.core_dbgstat[79:65]+2], mem[dut.core_dbgstat[79:65]+3]);
+	end
 	else
 		$display("real chip bridge run passed (%0d cycles)", timeout);
 
+	$display("posted-store overlap cycles: %0d", posted_progress);
+	if ($test$plusargs("require_overlap") && posted_progress == 0)
+		$fatal(1, "posted-store overlap was never exercised");
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else $display("TEST FAILED with %0d errors", errors);
 	$finish;

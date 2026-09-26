@@ -142,7 +142,7 @@ integer vector_words = 0;
 reg cia_ddr_seen = 0, cia_pra_seen = 0, serial_seen = 0;
 always @(posedge cpu_clk) if (reset) begin
  if (dut.core_halted) $fatal(1, "CPU halted before startup completed");
- if (dut.core_enable && dut.cpu_req && vector_words < 4) begin
+ if (dut.bus_enable && dut.cpu_req && vector_words < 4) begin
   if (dut.cpu_addr_p !== vector_words*2 || dut.cpu_din !== rom[vector_words])
    $fatal(1, "reset word %0d: address=%h data=%h expected=%h",
           vector_words, dut.cpu_addr_p, dut.cpu_din, rom[vector_words]);
@@ -184,7 +184,7 @@ initial begin
  end
  if (!serial_seen || vector_words != 4)
   $fatal(1, "startup timed out: PC=%h vectors=%0d CIA=%b%b",
-         dut.cpu_inst_p.core.pc, vector_words, cia_ddr_seen, cia_pra_seen);
+         dut.core_dbgstat[31:0], vector_words, cia_ddr_seen, cia_pra_seen);
  // the CIA must have LATCHED DiagROM's DDR/PRA writes, not merely been strobed:
  if (cia.ddrporta[1:0] !== 2'b11) $fatal(1, "CIA-A never latched DDRA (ddrporta=%b): the write strobe missed clk7_en", cia.ddrporta);
  if (cia_porta[1] !== 1'b0) $fatal(1, "CIA-A never latched PRA: power LED still off (porta_out=%b regporta=%b)", cia_porta, cia.regporta);

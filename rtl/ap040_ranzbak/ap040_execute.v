@@ -205,7 +205,7 @@ logic redir;
 logic [31:0] redir_pc;
 always @* begin
 	w = '0;
-	w.pc = x.pc; w.last = x.last;
+	w.pc = x.pc; w.final_uop = x.final_uop;
 	w.w0_r = R_NONE; w.u0_r = R_NONE; w.u1_r = R_NONE;
 	w.u0_v = x.u0_v; w.u0_r = x.u0_r; w.u0_val = x.u0_val;
 	w.u1_v = x.u1_v; w.u1_r = x.u1_r; w.u1_val = x.u1_val;

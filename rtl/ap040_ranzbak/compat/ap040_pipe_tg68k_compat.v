@@ -49,6 +49,8 @@ module ap040_pipe_tg68k_compat
 	input         clk,
 	input         nreset,
 	input         clkena_in,
+	// MiSTer: the adapter advances only on an idle/completed bus cycle.
+	input         bus_clkena_in,
 
 	// Physical cacheability windows for the internal caches when no MMU
 	// translation supplies CM attributes: only configured fast RAM may be
@@ -76,6 +78,7 @@ module ap040_pipe_tg68k_compat
 	output        nlds,
 	output [1:0]  busstate,
 	output        longword,
+	output        post_drain,
 	output        nresetout,
 	output [2:0]  fc,
 	output        nmi_ack_toggle,
@@ -140,40 +143,12 @@ module ap040_pipe_tg68k_compat
 	input  [31:0] m_rdata
 );
 
-// Clock enable for everything above the bus adapter (plan X3.3, A2b-0).
-// cpu_wrapper's clkena_in is the BUS WAIT: idle, or a qualified
-// completion, or a bus error.  The adapter must keep it -- its outputs
-// change only on the wrapper's qualified edges and its 16-bit sub-cycle
-// sequencing is written against them.  The core, MMU and cache do not
-// need it: each of their FSMs polls its acknowledge, and every signal
-// that crosses from the adapter or the walker bridge (mem_ack, berr,
-// c_flt, walker s_ack) was already written so that a gated consumer
-// could not miss it, so a free-running one cannot either.  Gating them
-// froze the whole stack for the length of every external transaction,
-// which is what made a posted store worthless: the core would take one
-// step and stand still until the store's last half had landed.  With a
-// free enable, work that needs no port -- a released FPU op, a multiply,
-// the fetch queue's bookkeeping -- proceeds during the wait.  This is
-// the seed of P2's divider; a 4:1 enable on clk_114 drives the same
-// wire later.
-//
-// MinimigAGA_TC64 DIVERGES FROM UPSTREAM HERE: re-gated to clkena_in.
-// The paragraph above holds only where clkena_in is a PURE bus wait, as
-// it is in the MiSTer cpu_wrapper.v ("~cpu_req | bus_complete |
-// bus_berr", high on every idle cycle).  This project's wrapper --
-// rtl/soc/TG68K.vhd, signal clkena -- ANDs that bus wait with the SDRAM
-// controller's enaWRreg, so the enable is high on only 5 of every 16
-// clk_114 phases.  ap040_bus16_adapter clears mem_ack inside "else if
-// (clkena_in)", so under a duty-cycled enable the acknowledge is not a
-// one-clock pulse: it stays asserted for the whole three- or four-cycle
-// phase gap.  A gated cache samples it exactly once; a FREE-RUNNING
-// cache reads the stale level as the acknowledge of the NEXT request and
-// the machine desyncs at once.  Measured both ways on the core's own
-// bench with clkena_in gated to those phases: free-running fails
-// t_integer test 67 and runs away to pc=ffff6708, re-gated passes the
-// whole suite.  Freeing the core here is a later stage, together with
-// the multicycle island in fpga/openaars/aars_v5.0/xc7a100t/cpu.xdc,
-// which assumes every kernel register holds for at least three cycles.
+// MiSTer's pipeline enable is the core tick. Pipeline/MMU/cache handshakes
+// handle external waits; only the adapter's enable includes bus completion.
+// The adapter clears its acknowledge on the following idle tick, so the
+// pipeline samples it once even though it runs while the external bus waits.
+// Both enables must use the same tick grid (no ungated consumer of a held
+// acknowledgement when the adapter's clock enable is duty-cycled).
 wire        ce_core = clkena_in;
 
 // core to MMU
@@ -235,6 +210,7 @@ wire        cinv_req, cinv_ic, cinv_dc, cinv_done;   // CINV/CPUSH (M8)
 
 // posted-store sideband from the cache (A2b-1)
 wire        post_busy, post_err;
+assign post_drain = post_busy;
 
 // control registers and PTEST/PFLUSH sideband
 wire [31:0] w_tc, w_urp, w_srp, w_itt0, w_itt1, w_dtt0, w_dtt1;
@@ -729,7 +705,7 @@ if (AP040_BUS16 != 0) begin : g_bus16
 ap040_bus16_adapter bus16 (
 	.clk(clk),
 	.nreset(nreset),
-	.clkena_in(clkena_in),
+	.clkena_in(bus_clkena_in),
 
 	.mem_req(b_req),
 	.mem_berr(berr),

@@ -265,20 +265,10 @@ reg         cache_clear_toggle;
 wire        bus_berr;
 wire        fastchip_served, fastchip_pending;
 wire [15:0] fastchip_data_l;
-// Under FAST_CLOCK the completion is REGISTERED once before it reaches
-// core_enable.  The RAM controllers' acknowledge is a level from the
-// controller cache's FSM; combinationally it ran through the guard and this
-// mux straight into core_enable -- the clock enable of every tick-gated
-// register in the core, six thousand pins -- and missed by -2.4 ns at
-// 114 MHz (report_timing, 00db688b).  No exception may cover that path: a
-// late clock enable at a tick is torn state, not a late value.  A flop here
-// splits it into "acknowledge -> flop" and "flop -> enable fan-out", each
-// its own cycle.  Every acknowledge is a level held until it is consumed,
-// and the read data is held with it, so seeing them one fast cycle later
-// changes nothing but the tick that consumes them: at worst one extra tick
-// per transaction, when the acknowledge lands exactly on one.  ramconsumed,
-// the chip stage machine and the fastchip crossing all derive from the one
-// core_enable, so they move together.  The legacy path is untouched.
+// Under FAST_CLOCK register the completion once before it reaches the
+// adapter's bus enable. Controllers retain both ready and data until the
+// request is consumed. The matching read-data register is below; ramconsumed
+// and the chip/fastchip state machines all use the same bus_enable.
 wire        bus_complete_fast = (chipready && !ramsel_i && !fastchip_selack && !fastchip_served) |
                                 (ramready && ramsel_i) |
                                 fastchip_pending;
@@ -361,21 +351,17 @@ always @(posedge clk) begin
     else core_phase <= core_phase + 1'b1;
 end
 wire core_tick = !FAST_CLOCK || (core_phase == 0);
-// Two enables.  bus_enable is the original: the bus side -- the 16-bit
-// adapter, ramconsumed, the chip stage machine, the fastchip crossing --
-// advances only when the external bus is idle or has answered.  The core,
-// MMU and cache get core_enable, which also runs while a POSTED STORE is
-// draining (post_drain, the cache's store buffer): the core was released
-// at capture and is waiting on nothing the bus is doing, so freezing it for
-// the write's two chip-bus cycles threw away everything posting bought
-// (PERFORMANCE.md: chip bench 5,435,232 cycles, drain blocking or not).
-// The two agree whenever the bus completes, so the adapter's acknowledge is
-// consumed on exactly one tick either way; only a miss, a bypass, the next
-// store or a table walk waits, and those wait inside the cache and the
-// compat wrapper, ordered behind the drain.
+// Ranzbak's pipeline, MMU and cache stall on their own request/acknowledge
+// handshakes. Keep them on the core tick, including during external reads
+// and posted writes; a bus wait must not drive the large pipeline enable
+// network directly (RAM cpu_ack -> pipeline ena missed timing in the first
+// full fit). Only the adapter and platform bus machinery wait for completion.
+// The adapter clears mem_ack on its next enabled IDLE tick, so the pipeline
+// consumes that acknowledgement once. Both enables share the same tick grid;
+// this remains necessary if the experimental FAST_CLOCK mode is used.
 wire post_drain;
 wire bus_enable  = core_tick && (~cpu_req | bus_complete | bus_berr);
-wire core_enable = core_tick && (~cpu_req | bus_complete | bus_berr | post_drain);
+wire core_enable = core_tick;
 // RTG/IDE/Akiko still run at 28 MHz. A combinational write-ready means
 // "accepted on the next peripheral edge", not on the next fast CPU edge.
 // Capture the result on that edge and cross a retained acknowledgement.
@@ -492,30 +478,25 @@ always @(posedge clk) begin
 	end
 end
 
-ap040_tg68k_compat #(
-	// Internal caches ON.  Their storage is block RAM by construction
-	// (ap040_cache.v: explicit dpram tag row, inferred cdata ways), so the
-	// pair of 4KB caches costs 283 ALMs and 13 M10K -- the ATC's own move
-	// into block RAM is what made the room.  The timing objection that
-	// kept them off is fixed at the source: the cache no longer forwards a
-	// bypassed access combinationally in C_IDLE, which had put the ATC
-	// compare in front of the core's exception-format mux (see the
-	// pass_active comment there).  Measured worth on loop-heavy code:
-	// 1.41x with a zero-latency bus, 2.27x with a latent one, and near
-	// immunity to bus latency (tests/ap040/asm/bench_loop.s under +prof).
+ap040_pipe_tg68k_compat #(
 	.AP040_ENABLE_CACHE(1),
-	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
-	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
-	// unimplemented ops trap to the FPSP route like real 040 silicon
 	.AP040_HAS_FPU(1),
-	.AP040_POST_STORES(POST_STORES)
+	.AP040_POST_STORES(POST_STORES),
+	// This platform retains its proven 16-bit bus and walker sideband.
+	.AP040_BUS16(1),
+	.AP040_IFP(1),
+	.AP040_FILL_CHANNEL(0)
 ) cpu_inst_p
 (
 	.clk(clk),
 	.nreset(reset),
 	.clkena_in(core_enable),
 	.bus_clkena_in(bus_enable),
-	.tick_in(core_tick),
+	.fill_ena_zorro(1'b0), .fill_ena_chip(1'b0),
+	.fill_req(), .fill_addr(), .fill_data(128'd0),
+	.fill_ack(1'b0), .fill_err(1'b0),
+	.m_req(), .m_write(), .m_instr(), .m_size(), .m_addr(),
+	.m_wdata(), .m_fc(), .m_ack(1'b0), .m_rdata(32'd0),
 	.cache_allow_all(CACHE_ALLOW_ALL != 0),
 	.cache_snoop_stb(snoop_stb_r),
 	.cache_snoop_addr(snoop_addr_r),
