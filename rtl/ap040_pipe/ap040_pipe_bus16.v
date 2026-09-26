@@ -55,6 +55,16 @@ module ap040_pipe_bus16
 	input         cache_z3_ena1,
 	input         snoop_stb,
 	input  [31:0] snoop_addr,
+	// For the card's wrapper (caches stage F; rtl/ap040/ap040_tg68k_compat.v's
+	// own): CACR and VBR as they stand, RESET driving the reset line, one
+	// pulse for each level 7 interrupt taken, CINV/CPUSH under way (for
+	// caches below this core), and halted by a double fault.
+	output [31:0] cacr_out,
+	output [31:0] vbr_out,
+	output        reset_out,
+	output        nmi_ack,
+	output        cache_maint,
+	output        halted,
 	// The MMU's table walker has its own physical longword port, as
 	// rtl/ap040/ap040_tg68k_compat.v's does: descriptor traffic never
 	// crosses the 16-bit CPU bus.
@@ -164,6 +174,7 @@ ap040_pipe_cpu #(
 	.pf_fc (pf_fc), .pf_done (pf_done),
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope), .cm_addr (cm_addr),
 	.cm_done (cm_done), .ic_en (ic_en), .dc_en (dc_en),
+	.cacr_out (cacr_out), .vbr_out (vbr_out), .reset_out (reset_out), .nmi_ack (nmi_ack), .halted_out (halted),
 	.pw_pend (pw_pend), .pw_ssw (pw_ssw), .pw_fa (pw_fa), .pw_wb1s (pw_wb1s), .pw_pd (pw_pd),
 	.pw_exc (pw_exc), .pw_ack (pw_ack),
 	.l1_nalloc_b (l1_nalloc_b), .l1_m16_b (l1_m16_b), .l1_lock_b (l1_lock_b),
@@ -197,6 +208,7 @@ always @(posedge clk)
 		if (cm_done_d) cm_gd <= 1'b1;
 	end
 assign cm_done = (cm_gi || cm_done_i) && (cm_gd || cm_done_d) && !(cm_gi && cm_gd);
+assign cache_maint = cm_req;
 
 ap040_pipe_dmu u_dmu
 (
@@ -299,7 +311,7 @@ ap040_pipe_membus u_bus
 
 	.mem_req  (mem_req),  .mem_write(mem_write), .mem_instr(mem_instr),
 	.mem_size (mem_size), .mem_addr (mem_addr),  .mem_wdata(mem_wdata),
-	.mem_fc   (mem_fc),   .mem_ack  (mem_ack),   .mem_rdata(mem_rdata),
+	.mem_fc   (mem_fc),   .mem_ack  (mem_ack && bce_q), .mem_rdata(mem_rdata),
 	// Everything arriving here has been translated: the only refusal left
 	// is a physical bus error, which ends the sub-cycle the adapter is
 	// running, on the enable it aborts on. A request has passed as soon as
@@ -318,6 +330,15 @@ ap040_pipe_membus u_bus
 	// the DMU's translated reads
 	.rx (bb_rx), .rx_addr (bb_rx_addr), .rx_size (bb_rx_size), .rx_fc (bb_rx_fc)
 );
+
+// The adapter's acknowledge is a register the bus's enable updates: with an
+// enable that is not every clock -- cpu_wrapper.v's divided bus, unlike the
+// benches' -- it stays up until the next enabled edge, and the bus
+// controller, which runs every clock, took it again for the transaction it
+// had started meanwhile, with the old data. It is taken in the clock after
+// the enabled edge that set it, once (caches stage F).
+reg bce_q;
+always @(posedge clk) bce_q <= !nreset || clkena_in;
 
 ap040_bus16_adapter u_bus16
 (

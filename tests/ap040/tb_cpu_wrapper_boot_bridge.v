@@ -2,6 +2,13 @@
 // bench includes the production amiga_clk and minimig_m68k_bridge modules,
 // so address registration, read-data latching, CCK arbitration and DTACK
 // timing are the same logic used on the FPGA.
+// The program starts with RESET, as Kickstart does: the CPU's reset output
+// (cpu_wrapper's reset_out, which resets the chipset in minimig.v) must go
+// low once, for 128 of the core's cycles, and be high otherwise. The cycles
+// are core_enable's: the FSM core's enable, which a prefetch running
+// meanwhile holds low (MC68040UM 7.x does not forbid one), and the
+// pipelined core's tick while no bus cycle runs -- it runs none during
+// RESET (tb_ap040_pipe_program.v checks that).
 `timescale 1ns/1ns
 
 module tb_cpu_wrapper_boot_bridge #(
@@ -140,6 +147,15 @@ assign bridge_rdata = cia_aen ? {8'h00, cia_dout} :
 
 integer vector_words = 0;
 reg cia_ddr_seen = 0, cia_pra_seen = 0, serial_seen = 0;
+integer rst_falls = 0, rst_ticks = 0;
+reg rst_q = 1;
+always @(posedge cpu_clk) if (reset) begin
+ if (!cpu_nrst_out && rst_q) rst_falls = rst_falls + 1;
+ if (!cpu_nrst_out && dut.core_enable) rst_ticks = rst_ticks + 1;
+ if (cpu_nrst_out && !rst_q && rst_ticks != 128)
+  $fatal(1, "RESET drove the reset line for %0d of the core's cycles, not 128", rst_ticks);
+ rst_q <= cpu_nrst_out;
+end
 always @(posedge cpu_clk) if (reset) begin
  if (dut.core_halted) $fatal(1, "CPU halted before startup completed");
  if (dut.core_enable && dut.cpu_req && vector_words < 4) begin
@@ -153,8 +169,11 @@ end
 // Observe actual downstream bridge writes, not CPU-side requests.
 // CIA accesses exercise VPA/ECLK acknowledgement as on the board.
 always @(posedge clk_sys) if (reset) begin
- if (bridge_lwr && ba == 24'hbfe200 && bridge_wdata[7:0] == 8'h03)
+ if (bridge_lwr && ba == 24'hbfe200 && bridge_wdata[7:0] == 8'h03) begin
+  if (rst_falls != 1 || !cpu_nrst_out)
+   $fatal(1, "CIA DDR write before RESET had driven the reset line and released it (falls=%0d)", rst_falls);
   cia_ddr_seen <= 1;
+ end
  if (bridge_lwr && ba == 24'hbfe000 && bridge_wdata[7:0] == 8'h00) begin
   if (!cia_ddr_seen) $fatal(1, "CIA PRA write preceded DDR setup");
   cia_pra_seen <= 1;
@@ -171,20 +190,28 @@ initial begin
  for (i=0; i<128; i=i+1) rom[i]=16'h4e71;
  rom[0]=16'h1114; rom[1]=16'h4447;
  rom[2]=16'h00f8; rom[3]=16'h00d6;
- // move.b #3,$bfe201 ; move.b #0,$bfe001 ; move.w #$141,$dff030
- rom[107]=16'h13fc; rom[108]=16'h0003; rom[109]=16'h00bf; rom[110]=16'he201;
- rom[111]=16'h13fc; rom[112]=16'h0000; rom[113]=16'h00bf; rom[114]=16'he001;
- rom[115]=16'h33fc; rom[116]=16'h0141; rom[117]=16'h00df; rom[118]=16'hf030;
- rom[119]=16'h60fe;
+ // reset ; move.b #3,$bfe201 ; move.b #0,$bfe001 ; move.w #$141,$dff030
+ rom[107]=16'h4e70;
+ rom[108]=16'h13fc; rom[109]=16'h0003; rom[110]=16'h00bf; rom[111]=16'he201;
+ rom[112]=16'h13fc; rom[113]=16'h0000; rom[114]=16'h00bf; rom[115]=16'he001;
+ rom[116]=16'h33fc; rom[117]=16'h0141; rom[118]=16'h00df; rom[119]=16'hf030;
+ rom[120]=16'h60fe;
  repeat (50) @(negedge clk_sys);
  reset=1;
  timeout=0;
  while (!serial_seen && timeout<50000) begin
   @(negedge clk_sys); timeout=timeout+1;
  end
+ if (serial_seen && rst_falls != 1)
+  $fatal(1, "RESET drove the reset line %0d times, not once", rst_falls);
  if (!serial_seen || vector_words != 4)
+`ifdef AP040_PIPE_CORE
+  $fatal(1, "startup timed out: bus address=%h vectors=%0d CIA=%b%b",
+         dut.cpu_inst_p.addr_out, vector_words, cia_ddr_seen, cia_pra_seen);
+`else
   $fatal(1, "startup timed out: PC=%h vectors=%0d CIA=%b%b",
          dut.cpu_inst_p.core.pc, vector_words, cia_ddr_seen, cia_pra_seen);
+`endif
  // the CIA must have LATCHED DiagROM's DDR/PRA writes, not merely been strobed:
  if (cia.ddrporta[1:0] !== 2'b11) $fatal(1, "CIA-A never latched DDRA (ddrporta=%b): the write strobe missed clk7_en", cia.ddrporta);
  if (cia_porta[1] !== 1'b0) $fatal(1, "CIA-A never latched PRA: power LED still off (porta_out=%b regporta=%b)", cia_porta, cia.regporta);

@@ -936,6 +936,69 @@ Tests:
   cacheable, the rest not). The other benches that instantiate the bus16
   top tie the windows open.
 
+The card's wrapper (F2): rtl/ap040_pipe/ap040_pipe_tg68k_compat.v, the
+pipelined core behind the port set rtl/ap040/ap040_tg68k_compat.v presents
+to cpu_wrapper.v -- the same 57 ports, parameters and meaning, so
+cpu_wrapper.v takes either core (`AP040_PIPE_CORE`; the instance keeps its
+name, which Minimig.sdc's paths start from).
+
+- The core's enable is cpu_wrapper.v's core tick (tick_in): every clock on
+  the card (FAST_CLOCK 0), the divided rate under FAST_CLOCK. clkena_in is
+  not used: cpu_wrapper.v holds it low while a bus cycle runs, which the
+  FSM core needs, and this core stalls on its own. The memory side runs
+  every clock.
+- The interrupt level: active low, synchronized, taken once stable over two
+  clocks, as ap040_core.v takes it; always autovectored.
+- RESET drives the reset line (nresetout) through EA-fetch's maintenance
+  sequencer: earlier writes and prefetches complete first, the line is up
+  for 128 of the core's cycles (ap040_core.v's S_RESET_HOLD), and the
+  instruction then retires. The done is taken on a ce edge, since the count
+  advances under ce; taken on any clock it was 127 under a divided enable.
+- One nmi_ack_toggle flip per level 7 interrupt taken; CACR and VBR as they
+  stand; cache_maint_req while CINV/CPUSH runs; debug_halted on a double
+  fault.
+- mmu_cache_inhibit is held high: this core's caches are the 68040's two,
+  and a cache below them would only add a coherency question. post_drain is
+  low: the store buffer is this core's own.
+- The bus adapter's acknowledge. cpu_wrapper.v's bus enable is not every
+  clock, and the adapter's acknowledge is a register that enable updates:
+  it stayed up until the next enabled edge, and the bus controller, which
+  runs every clock, took it again for the transaction it had started
+  meanwhile -- with the old data. The benches' enable is every clock, so
+  none saw it; the boot bench did, at its first write. The acknowledge is
+  now taken once, in the clock after the enabled edge that set it.
+- rtl/ap040_pipe/ap040_pipe.qip lists every file the wrapper is built
+  from, and files.qip takes it.
+- Fit at 25 ns, bus16 top: 40.49 MHz, +0.304 ns, 25,727 ALMs, 42 RAM
+  blocks (F1: +0.303, 25,621, 42). The worst paths are a load's answer
+  into EA-fetch's operand and the store buffer's data; none goes through
+  RESET's sequencer, the NMI acknowledge or the adapter's acknowledge.
+- The full Minimig project with AP040_PIPE_CORE synthesizes but does not
+  fit: the fitter needs 4,370 LABs of the device's 4,191 (43,149 ALMs,
+  103%), against 39,400 (94%) for the card's last full fit with the FSM
+  core. The caches took the bus16 top from 20,401 ALMs (stage A3) to
+  25,727; the core has to shed that much, or the card something else,
+  before it can run there.
+
+Tests:
+- tests/ap040/tb_cpu_wrapper_boot_bridge.v, the sequential suite's boot
+  bench (reset to the CIA and serial writes through the production clock
+  and bus bridge), built with the pipelined core. run_pipe_verilator.py
+  runs it over the phases and DMA modes that suite sweeps, twice: at its
+  default (FAST_CLOCK, CORE_DIV 4) and as the card runs today (FAST_CLOCK
+  0, the _28 build).
+- The boot bench's program starts with RESET, as Kickstart does. For both
+  cores, the CPU's reset output must go low once, for 128 of the core's
+  cycles (core_enable's), with the CIA writes after its release. The FSM
+  core runs an instruction prefetch while its line is low, which the
+  manual does not forbid; the pipelined core runs none.
+- t_reset.s (pipelined core only): a write, then RESET; the bench checks the
+  line rose with no write pending, the bus stayed idle while it was up, it
+  was up for 128 of the core's cycles ($F166 counts it), and the
+  instruction after it ran once; in user mode a privilege violation and
+  nothing driven. RESET leaves the ATC alone.
+- The program bench counts level 7 entries against nmi_ack pulses.
+
 ## Tests
 
 - Existing programs, corrected: t_cache.s test 6 expects DMA to leave stale

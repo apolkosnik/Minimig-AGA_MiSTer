@@ -492,7 +492,14 @@ always @(posedge clk) begin
 	end
 end
 
+// AP040_PIPE_CORE selects the pipelined core (rtl/ap040_pipe/
+// ap040_pipe_tg68k_compat.v, the same ports and meaning) in place of the FSM
+// core; the instance keeps its name, which Minimig.sdc's paths start from.
+`ifdef AP040_PIPE_CORE
+ap040_pipe_tg68k_compat #(
+`else
 ap040_tg68k_compat #(
+`endif
 	// Internal caches ON.  Their storage is block RAM by construction
 	// (ap040_cache.v: explicit dpram tag row, inferred cdata ways), so the
 	// pair of 4KB caches costs 283 ALMs and 13 M10K -- the ATC's own move

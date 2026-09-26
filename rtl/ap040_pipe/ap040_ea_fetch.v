@@ -383,6 +383,8 @@ module ap040_ea_fetch
 	input      [31:0] pt_mmusr,
 	output            mmusr_we,
 	output     [31:0] mmusr_val,
+	// RESET is driving the reset line (caches stage F: the card's wrapper)
+	output            reset_out,
 	output            pf_req,
 	output      [1:0] pf_mode,
 	output     [31:0] pf_addr,
@@ -1805,11 +1807,16 @@ wire creg_hazard  = live && ((ex_creg_sp && sp_read_a) || creg_rd_hazard);
 // prefetches complete first and interlocks the stages behind until the
 // caches are done (MC68040UM 10.3), and what follows is refetched -- from
 // caches that no longer hold what was invalidated.
+// RESET (caches stage F, for the card's wrapper) goes the same way: earlier
+// writes and prefetches complete first, then the reset line is driven for
+// 128 cycles, as ap040_core.v's S_RESET_HOLD, and the instruction retires.
 wire       pm_cinv  = eac_cinv[5];
-wire       pm       = eac_pmmu[4] || pm_cinv;
+wire       pm_reset = eac_is_reset;
+wire       pm       = eac_pmmu[4] || pm_cinv || pm_reset;
 wire       pm_ptest = eac_pmmu[3];
 localparam [1:0] PM_IDLE = 2'd0, PM_REQ = 2'd1, PM_DONE = 2'd2;
 reg  [1:0] pm_ph;
+reg  [6:0] pm_rcnt;              // RESET's cycles on the line
 reg [31:0] pm_addr;
 reg        pm_ack;
 reg [31:0] pm_mmusr;
@@ -1837,19 +1844,26 @@ assign     mmu_quiet = eac_valid && (pm || mc);
 always @(posedge clk)
 	if (!nreset) begin pm_ack <= 1'b0; pm_mmusr <= 32'd0; end
 	else if (pm_ph != PM_REQ) pm_ack <= 1'b0;
-	else if (pm_ptest ? pt_done : pm_cinv ? cm_done : pf_done) begin pm_ack <= 1'b1; pm_mmusr <= pt_mmusr; end
+	// RESET's done is a count, stable, and taken on a ce edge, so the line is
+	// up for 128 of the core's cycles (ap040_core.v's S_RESET_HOLD counts
+	// under ce); the MMU's and the caches' dones are one-clock pulses.
+	else if (pm_reset ? ((pm_rcnt == 7'd127) && ce) : pm_ptest ? pt_done : pm_cinv ? cm_done : pf_done) begin
+		pm_ack <= 1'b1; pm_mmusr <= pt_mmusr;
+	end
 always @(posedge clk)
-	if (!nreset) begin pm_ph <= PM_IDLE; pm_addr <= 32'd0; end
+	if (!nreset) begin pm_ph <= PM_IDLE; pm_addr <= 32'd0; pm_rcnt <= 7'd0; end
 	else if (ce) begin
 		if (flush || (eac_valid && !eaf_stall)) pm_ph <= PM_IDLE;
-		else if (pm_start) begin pm_ph <= PM_REQ; pm_addr <= operand_a; end
+		else if (pm_start) begin pm_ph <= PM_REQ; pm_addr <= operand_a; pm_rcnt <= 7'd0; end
 		else if (pm_ph == PM_REQ && pm_ack) pm_ph <= PM_DONE;
+		if (!pm_start && (pm_ph == PM_REQ) && pm_reset && (pm_rcnt != 7'd127)) pm_rcnt <= pm_rcnt + 7'd1;
 	end
 assign pt_req    = (pm_ph == PM_REQ) && pm_ptest && !pm_ack;
 assign pt_write  = eac_pmmu[2];
 assign pt_addr   = pm_addr;
 assign pt_fc     = dfc_in3;
-assign pf_req    = (pm_ph == PM_REQ) && !pm_ptest && !pm_cinv && !pm_ack;
+assign pf_req    = (pm_ph == PM_REQ) && !pm_ptest && !pm_cinv && !pm_reset && !pm_ack;
+assign reset_out = (pm_ph == PM_REQ) && pm_reset && !pm_ack;
 assign pf_mode   = eac_pmmu[1:0];
 assign pf_addr   = pm_addr;
 assign pf_fc     = dfc_in3;

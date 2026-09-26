@@ -16,6 +16,7 @@
 //            behind the CPU (the data cache's tests; caches stage C)       //
 //   $F138 w  a peek's address          $F13A r  memory's word there,       //
 //            whatever the data cache holds (copyback; caches stage D)      //
+//   $F166 r  how many times RESET has driven the reset line (stage F)      //
 //   $F15C w  a chipset write's address $F15E w  write the word there, as   //
 //            the chipset would: behind the CPU, and snooped (stage F)      //
 //   $F148 w  level 2 after N cycles    $F14C w  level, withdrawn after N   //
@@ -78,6 +79,15 @@ reg         fberr_armed = 0;
 reg  [15:0] poke_addr = 0;
 reg  [15:0] dma_addr = 0;        // $F15C/$F15E: a chipset write, snooped
 reg         dma_snoop = 0;
+// RESET's line (caches stage F, the card's wrapper: cpu_wrapper.v resets
+// the chipset's side from it). It rises only once every earlier write is
+// done -- a write the program made before RESET reaches its device before
+// the device is reset; the manual gives no order, program order does --
+// the bus stays idle while it is up, it is up for 128 of the core's cycles
+// (ap040_core.v's S_RESET_HOLD), and $F166 counts it. Each level 7
+// interrupt taken is one nmi_ack pulse.
+reg         rst_q = 0;
+integer     rst_n = 0, rst_len = 0, nmi_ent = 0, nmi_acks = 0;
 reg  [15:0] peek_addr = 0;
 reg  [15:0] fberr_addr = 0;
 // $F156: a one-shot bus error on the next data write sub-cycle to the
@@ -451,6 +461,38 @@ end
 
 always @(posedge clk) begin
 	dma_snoop <= 1'b0;
+	if (!nreset) begin
+		rst_n = 0; rst_len = 0; nmi_ent = 0; nmi_acks = 0;
+		mem[15'h78B3] = 16'h0000;
+	end else begin
+		if (dut.reset_out && !rst_q) begin
+			rst_n = rst_n + 1;
+			if (!dut.u_dmu.sb_empty || dut.u_bus.w_pend) begin
+				errors = errors + 1;
+				$display("FAIL: RESET drove the reset line with a write still pending (pc=%h)", dbg_pc);
+				result = 2;
+			end
+		end
+		if (dut.reset_out && busstate != 2'b01) begin
+			errors = errors + 1;
+			$display("FAIL: a bus cycle while RESET drove the reset line (pc=%h)", dbg_pc);
+			result = 2;
+		end
+		if (dut.reset_out && dut.ce) rst_len = rst_len + 1;
+		if (!dut.reset_out && rst_q) begin
+			if (rst_len != 128) begin
+				errors = errors + 1;
+				$display("FAIL: RESET drove the reset line for %0d cycles, not 128 (pc=%h)", rst_len, dbg_pc);
+				result = 2;
+			end
+			rst_len = 0;
+			mem[15'h78B3] = rst_n;
+		end
+		if (dut.ce && dut.u_cpu.u_eaf.exc_vec_done && !dut.u_cpu.u_eaf.stall_in && dut.u_cpu.u_eaf.eac_is_irq &&
+		    (dut.u_cpu.u_eaf.exc_vec_r == 8'd31)) nmi_ent = nmi_ent + 1;
+		if (dut.nmi_ack) nmi_acks = nmi_acks + 1;
+	end
+	rst_q <= dut.reset_out;
 	if (nreset && mem_ready) begin
 		if (addr_out[31:16] != 0) begin
 			errors = errors + 1;
@@ -607,6 +649,10 @@ task run_phase;
 		end
 		else if (result == 1)
 			$display("phase %0d passed (%0d cycles)", ph, timeout);
+		if (nmi_acks != nmi_ent) begin
+			errors = errors + 1;
+			$display("FAIL: %0d level 7 interrupts taken, %0d NMI acknowledges", nmi_ent, nmi_acks);
+		end
 	end
 endtask
 

@@ -1,4 +1,5 @@
 set_global_assignment -name QIP_FILE rtl/ap040/ap040.qip
+set_global_assignment -name QIP_FILE rtl/ap040_pipe/ap040_pipe.qip
 set_global_assignment -name QIP_FILE rtl/ram.qip
 set_global_assignment -name QIP_FILE rtl/agnus.qip
 set_global_assignment -name QIP_FILE rtl/cia.qip

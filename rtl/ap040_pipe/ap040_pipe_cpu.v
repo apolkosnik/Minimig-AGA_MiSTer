@@ -232,6 +232,14 @@ module ap040_pipe_cpu
 	output        pw_ack,
 	output        ic_en,        // CACR IE
 	output        dc_en,        // CACR DE
+	// for the card's wrapper (caches stage F; ap040_tg68k_compat's own):
+	// CACR and VBR as they stand, RESET driving the reset line, and one
+	// pulse for each level 7 interrupt taken
+	output [31:0] cacr_out,
+	output [31:0] vbr_out,
+	output        reset_out,
+	output        nmi_ack,
+	output        halted_out,   // a double fault: halted until reset
 	// what a port-B access is, for the data cache: no allocation, MOVE16,
 	// locked (see ap040_ea_fetch.v)
 	output        l1_nalloc_b,
@@ -798,6 +806,10 @@ always @(posedge clk) begin
 end
 assign ic_en = cacr[15];
 assign dc_en = cacr[31];
+assign cacr_out = cacr;
+assign vbr_out  = vbr;
+assign nmi_ack  = irq_ack_nmi && ce;
+assign halted_out = halted;
 
 assign mmu_tc = tc;     assign mmu_urp = urp;   assign mmu_srp = srp;
 assign mmu_itt0 = itt0; assign mmu_itt1 = itt1; assign mmu_dtt0 = dtt0; assign mmu_dtt1 = dtt1;
@@ -1494,6 +1506,7 @@ ap040_ea_fetch #(
 	.mmu_quiet        (eaf_mmu_quiet),
 	.pt_req (pt_req), .pt_write (pt_write), .pt_addr (pt_addr), .pt_fc (pt_fc),
 	.pt_done (pt_done), .pt_mmusr (pt_mmusr), .mmusr_we (pm_mmusr_we), .mmusr_val (pm_mmusr_val),
+	.reset_out        (reset_out),
 	.pf_req (pf_req), .pf_mode (pf_mode), .pf_addr (pf_addr), .pf_fc (pf_fc), .pf_done (pf_done),
 	.cm_req (cm_req), .cm_ic (cm_ic), .cm_dc (cm_dc), .cm_push (cm_push), .cm_scope (cm_scope),
 	.cm_addr (cm_addr), .cm_done (cm_done),

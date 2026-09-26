@@ -41,7 +41,7 @@ CORE = [RTL / n for n in (
 PROGRAMS_REQUIRED = ["t_integer", "t_fastpaths", "t_fpu", "t_fpu_frames", "t_fpu_resume", "t_cinv_moves", "dhry",
                      "t_exceptions", "t_moves_fc", "t_mmu", "t_bitfield_mmu", "t_bitfield_cache", "t_atcprobe",
                      "t_movem_restart", "t_fault_edges", "t_agu", "t_walk_order", "t_moves_alt", "t_smc_mmu",
-                     "t_icache", "t_cache", "t_dcache", "t_copyback", "t_wberr", "t_snoop"]
+                     "t_icache", "t_cache", "t_dcache", "t_copyback", "t_wberr", "t_snoop", "t_reset"]
 PROGRAMS_OPEN = {}
 # tb_ap040_pipe_program_local runs the programs that need no bus devices and
 # no MMU on ap040_pipe_core.v, whose one-cycle array feeds decode two words a
@@ -105,16 +105,25 @@ def main():
     # build already lives, so it holds the temporaries too.
     env = dict(os.environ, TMPDIR=str(work))
 
-    benches = sorted(TB.glob("tb_ap040_pipe_*.v"))
+    # ...and the sequential suite's cpu_wrapper.v boot bench, with this core
+    # in place of the FSM one (AP040_PIPE_CORE; caches stage F): reset to the
+    # CIA and serial writes through the production clock and bus bridge,
+    # over the phases and DMA modes that suite sweeps. It is built twice: at
+    # its own default, the CPU on clk_114 with a 4:1 core tick (FAST_CLOCK),
+    # and as the card runs today, the CPU on clk_sys every clock (Minimig.sv,
+    # FAST_CLOCK 0) -- the _28 build.
+    boot = HERE / "tb_cpu_wrapper_boot_bridge.v"
+    benches = [(b, b.stem, []) for b in sorted(TB.glob("tb_ap040_pipe_*.v"))] + [
+        (boot, boot.stem, []), (boot, boot.stem + "_28", ["-GFAST_CLOCK=0", "-GCORE_DIV=1"])]
     if args.only:
         want = set(args.only.split(","))
-        benches = [b for b in benches if b.stem in want or
-                   b.stem.replace("tb_ap040_pipe_", "") in want]
+        benches = [x for x in benches if x[1] in want or
+                   x[1].replace("tb_ap040_pipe_", "") in want]
 
     passed, failed = [], []
-    for b in benches:
-        name = b.stem
+    for b, name, params in benches:
         src, inc = CORE, [RTL, ROOT / "rtl/ap040"]
+        defines, runs = [], None
         if name.endswith("l1_wbuf"):
             src = [RTL / "ap040_pipe_l1.v"]
         elif name.endswith("rmwsup"):
@@ -167,6 +176,15 @@ def main():
             # adapter and MMU, so those files and their include directory come.
             src = CORE + BUS16
             inc = [RTL, ROOT / "rtl/ap040"]
+        elif b.stem == "tb_cpu_wrapper_boot_bridge":
+            sysrtl = ROOT / "rtl"
+            src = CORE + BUS16 + [RTL / "ap040_pipe_tg68k_compat.v"] + [
+                x for x in sorted((sysrtl / "ap040").glob("*.v")) if x.name not in ("ap040_fpu.v", "ap040_bus16_adapter.v")
+            ] + [sysrtl / n for n in ("memory_router.v", "cpu_wrapper.v", "amiga_clk.v",
+                                     "minimig_m68k_bridge.v", "ciaa.v")] + sorted(sysrtl.glob("cia_*.v"))
+            inc = [RTL, sysrtl / "ap040"]
+            defines = ["+define+AP040_PIPE_CORE"]
+            runs = [["+phase=%d" % ph, "+dbr=%d" % d] for ph in (0, 3, 7, 9) for d in (0, 1)]
         elif name.endswith("alu_equiv"):
             src = [RTL / "ap040_pipe_alu.v", ROOT / "rtl/ap040/ap040_alu.v"]
             inc = [RTL, ROOT / "rtl/ap040"]
@@ -175,7 +193,7 @@ def main():
         blog_path = work / (name + ".build.log")
         with log.open("w") as out, blog_path.open("w") as blog:
             rc = subprocess.run(
-                ["verilator", "--binary", "--timing", "--top-module", name,
+                ["verilator", "--binary", "--timing", "--top-module", b.stem,
                  "--Mdir", str(obj), "-j", str(args.jobs), "-Wno-fatal",
                  *("-I" + str(d) for d in inc),
                  # Every bench's end-of-program wait is `repeat (N * AP040_PIPE_WAIT_SCALE)`:
@@ -188,7 +206,8 @@ def main():
                                                else "4" if (args.slow_l1 or args.ce_random)
                                                else "1"),
                  *(["-DAP040_PIPE_L1_SLOW"] if args.slow_l1 else []),
-                 *(["-DAP040_PIPE_CE_RANDOM"] if args.ce_random else []), str(b)] + [str(s) for s in src],
+                 *(["-DAP040_PIPE_CE_RANDOM"] if args.ce_random else []), *defines, *params,
+                 str(b)] + [str(s) for s in src],
                 stdout=blog, stderr=subprocess.STDOUT, env=env).returncode
             # The build's own output goes to <bench>.build.log: a warning quotes
             # source lines, and a quoted $display("FAIL: ...") read as a failure.
@@ -200,7 +219,7 @@ def main():
             if rc == 0 and progs is not None:
                 for prog in progs:
                     out.write(f"== {prog}\n"); out.flush()
-                    r = subprocess.run([str(obj / ("V" + name)), "+prog=" + str(program_image(prog, work))],
+                    r = subprocess.run([str(obj / ("V" + b.stem)), "+prog=" + str(program_image(prog, work))],
                                        capture_output=True, text=True, timeout=1800, env=env)
                     text_p = r.stdout + r.stderr
                     passed_p = r.returncode == 0 and "ALL TESTS PASSED" in text_p
@@ -213,8 +232,17 @@ def main():
                         if not passed_p:
                             out.write(f"FAIL: {prog} did not pass\n")
                             rc = 1
+            elif rc == 0 and runs is not None:
+                for r_args in runs:
+                    out.write("== " + " ".join(r_args) + "\n"); out.flush()
+                    r = subprocess.run([str(obj / ("V" + b.stem))] + r_args, capture_output=True, text=True,
+                                       timeout=600, env=env)
+                    out.write(r.stdout + r.stderr)
+                    if r.returncode != 0 or "ALL TESTS PASSED" not in r.stdout + r.stderr:
+                        out.write("FAIL: " + " ".join(r_args) + " did not pass\n")
+                        rc = 1
             elif rc == 0:
-                rc = subprocess.run([str(obj / ("V" + name))], stdout=out,
+                rc = subprocess.run([str(obj / ("V" + b.stem))], stdout=out,
                                     stderr=subprocess.STDOUT, timeout=300, env=env).returncode
         text = log.read_text()
         ok = rc == 0 and not any(m in text for m in ("FAIL", "ERROR:", "MISMATCH", "%Error"))
