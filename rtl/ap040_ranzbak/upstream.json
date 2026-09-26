@@ -1,0 +1,30 @@
+{
+  "repository": "https://github.com/ranzbak/AP68040-pipelined",
+  "commit": "9efe490d1a56f6db36cee82186a6f0ab314dd0c5",
+  "note": "rtl/ and rtl/compat/ as upstream has them, excluding rtl/ap040_pipe.qip (out of date upstream) and rtl/compat/primitives/ (a simulation model of dpram)",
+  "upstream_sha256": {
+    "ap040_decode.v": "d8b09873899404da33b19fa684f9366facb6c8947fc045d53428fce6796b67d7",
+    "ap040_ea_calc.v": "9253f319fc5a0b999674da24f6cc2f9649a70a49a7909b9bf01459599d922b7b",
+    "ap040_ea_fetch.v": "92021890d440c85457ae373ddfebd71715be9f6b1976cd62505b5970afbf98a3",
+    "ap040_execute.v": "41bfa4eb49c26b6bad1c26801ae34d22b1720cd8f68052927b2d02a4b689d8d7",
+    "ap040_inst_fetch.v": "9b8628f928bf7361eacd1c7691843203a062a7fc17be34a51d1df4311bf5b837",
+    "ap040_pipe_alu.v": "ec0469aae55de6f793cd6b27d0f0c2bed6e6d7868d3b64681a1ac671245b7d3f",
+    "ap040_pipe_bcu.v": "c8be03d393ef396d74e0a63222acda234fec0d57723639c188eea2e44b564349",
+    "ap040_pipe_core.v": "38aa8d9a780733f8008bc8945b420f00f770fc9db385bf1092d53dc4b8598ef2",
+    "ap040_pipe_defs.svh": "6ebd1ad584e49a065da946782e461ce445ccf0ef0b0882b1b474b01e8b79a2b3",
+    "ap040_pipe_l1.v": "32d71a428d8f9c3600b161a791902d6c264f9b7fcd1de24195d75eb662573f4a",
+    "ap040_pipe_muldiv.v": "bac957734e88e1dc416e8b1b97f986e32dcdad259f83513c6c15da8ec6cf4073",
+    "ap040_pipe_pkg.sv": "5bf9a41f1c6f28f63b7017e72438ef3cfbb9ec92751c0b7c23684bab56d11531",
+    "ap040_pipe_regfile.v": "c1727855708534d72182650e48579d53c9f28866255b066b20fb8fef7d0252be",
+    "ap040_writeback.v": "90942b293b202dbc867effed47fc3b8b979a8e185f373ec2bf612c01b383ddd4",
+    "compat/ap040_bus16_adapter.v": "fc4973774e985720f50ff3e0fff6a69f9fec65323fe00859147ec13f15f052f0",
+    "compat/ap040_bus_timeout.v": "30e67ac325c639a797cc971ccb9dc78e931053158704b50a8da2d27ae2d623e5",
+    "compat/ap040_cache.v": "0e6e780b8c438dc881ff8d223fb7761080f1b74eb7058365c854a8d4534120c2",
+    "compat/ap040_defs.svh": "195c37afb9961a1baf8c6ebbdba8df53da97d93c5cb4924cf673a3e9dc065a81",
+    "compat/ap040_fpu.v": "9089efdf332cebb40a489cf42646601ebc04e214bdd902be0bdc6904580bb6d3",
+    "compat/ap040_fpu_tie.vh": "95781969cd30160bec0cce303fb283d6ba520d7adaf98d91fd416f579d263e7f",
+    "compat/ap040_mmu.v": "a54872d488b2ffb796b27f874d350e6d61cfca1f2d65d3a697cc9de8a8720fe7",
+    "compat/ap040_pipe_tg68k_compat.v": "d7f0b8a905070e4aecffdb6035459eae2e7b1ae1314c30b3b1fb3eb395b0048c",
+    "compat/ap040_walker_cdc.v": "3541305117fdf574a93ebb4d810b05e946f7695f9367cea87e909f7f67a3e1ce"
+  }
+}
