@@ -13,21 +13,44 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 RTL = ROOT / "rtl"
 CORE = RTL / "ap040_ranzbak"
+DEFAULT_PROGRAMS = {
+    "boot": "", "muldiv": "",
+    "chip": "t_integer,dhry",   # (t_fastpaths named here before never existed in this tree)
+    # the compat bench's set: this tree's programs it models fully, plus
+    # upstream's interrupt, instruction-read and MMU programs (asm/*_pipe.s).
+    # Not here: t_atcprobe, t_exceptions (test 136), t_mmu, t_posted_irq_audit,
+    # which need bench features this one does not model.
+    "compat": "t_integer,t_fpu,t_fpu_frames,t_fpu_resume,t_movem_restart,t_moves_fc,"
+              "t_cache,t_bitfield_cache,t_bitfield_mmu,bench_alu,bench_loop,"
+              "t_irq_pipe,t_mbit_pipe,t_trirq_pipe,t_ipend_pipe,t_irqwedge_pipe,"
+              "t_icache_pipe,t_earlydrop_pipe,t_specread_pipe,t_dcache_pipe,t_mmu_pipe",
+}
+# a program's extra plusargs (t_irqwedge_pipe: a wedge is its failure mode,
+# so it gets a short phase timeout instead of the bench's 20M default)
+PROGRAM_ARGS = {"t_irqwedge_pipe": ["+timeout=2000000"]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bench", choices=["boot", "chip", "muldiv"], default="boot")
+    parser.add_argument("--bench", choices=["boot", "chip", "muldiv", "compat"], default="boot")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--param", action="append", default=[])
-    parser.add_argument("--program", default="t_integer,t_fastpaths,dhry")
+    parser.add_argument("--program", default=None,
+                        help="comma-separated assembly names (default: per bench, DEFAULT_PROGRAMS)")
     parser.add_argument("--require-overlap", action="store_true")
     parser.add_argument("--cpu-wrapper", type=Path, default=RTL / "cpu_wrapper.v",
                         help="optional wrapper variant for integration experiments")
     args = parser.parse_args()
     work = args.work.resolve()
     work.mkdir(parents=True, exist_ok=True)
-    if args.bench == "muldiv":
+    if args.bench == "compat":
+        # upstream's bench for the core behind its reference-compatible
+        # wrapper: the cycle-exact IPL injector and the boundary-latency
+        # rule live here (tb_ap040_pipe_compat.v's header)
+        top = "tb_ap040_pipe_compat"
+        sources = [CORE / "ap040_pipe_pkg.sv", *sorted(CORE.glob("*.v")),
+                   *sorted((CORE / "compat").glob("*.v")), HERE / "sim_dpram.v", HERE / (top + ".v")]
+    elif args.bench == "muldiv":
         # EX with this core's multiply/divide beside upstream's
         # (tests/ap040/ranzbak_ref/): tb_ap040_rz_muldiv.v's header
         top = "tb_ap040_rz_muldiv"
@@ -43,12 +66,13 @@ def main():
     if args.bench == "boot":
         sources += [RTL / "ciaa.v", *sorted(RTL.glob("cia_*.v"))]
     params = (["FAST_CLOCK=0"] if args.bench == "boot" else []) + args.param
+    program = args.program or DEFAULT_PROGRAMS[args.bench]
     execute(["verilator", "--binary", "--timing", "--top-module", top,
              "--Mdir", work / "obj", "-j", "4", "-Wno-fatal",
              "-I" + str(CORE), "-I" + str(CORE / "compat"),
              *["-G" + p for p in params], *sources], work / "compile.log", 600)
     cases = ([f"p{p}_d{d}" for p in (0, 3, 7, 9) for d in (0, 1)] if args.bench == "boot" else
-             ["ce_on", "ce_random"] if args.bench == "muldiv" else args.program.split(","))
+             ["ce_on", "ce_random"] if args.bench == "muldiv" else program.split(","))
     results = []
     for name in cases:
         command = [work / "obj" / ("V" + top)]
@@ -77,7 +101,7 @@ def main():
                 execute([vasm, "-Fbin", "-m68040", "-no-opt", "-o", image,
                          HERE / "asm" / (name + ".s")], work / (name + "-asm.log"), 30)
             execute([sys.executable, HERE / "bin2hex.py", image, hexf], work / (name + "-hex.log"), 30)
-            command += ["+prog=" + str(hexf)]
+            command += ["+prog=" + str(hexf)] + PROGRAM_ARGS.get(name, [])
             if args.require_overlap:
                 command += ["+require_overlap"]
         log = work / (name + ".log")
@@ -85,7 +109,7 @@ def main():
         output = log.read_text()
         passed = "ALL TESTS PASSED" in output and not re.search(r"FAIL|%Error", output)
         results.append({"case": name, "passed": passed,
-                        "cycles": re.findall(r"run passed \((\d+) cycles\)", output),
+                        "cycles": re.findall(r"(?:run|phase \d) passed \((\d+) cycles\)", output),
                         "overlap": re.findall(r"overlap cycles: (\d+)", output)})
         (work / "results.json").write_text(json.dumps({"bench": args.bench,
             "parameters": params, "results": results}, indent=2) + "\n")

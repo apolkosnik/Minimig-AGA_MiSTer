@@ -69,7 +69,7 @@ cpu_wrapper #(.CACHE_ALLOW_ALL(CACHE_ALLOW_ALL), .POST_STORES(POST_STORES)) dut 
 	.chip_addr(chip_addr), .chip_dout(chip_to_cpu),
 	.chip_din(chip_from_cpu), .chip_as(chip_as),
 	.chip_uds(chip_uds), .chip_lds(chip_lds), .chip_rw(chip_rw),
-	.chip_dtack(chip_dtack), .chip_ipl(3'b111),
+	.chip_dtack(chip_dtack), .chip_ipl(~ipl_lvl),
 	.fastchip_dout(16'd0), .fastchip_sel(), .fastchip_lds(),
 	.fastchip_uds(), .fastchip_rnw(), .fastchip_lw(),
 	.fastchip_selack(1'b0), .fastchip_ready(1'b0),
@@ -110,7 +110,21 @@ minimig_m68k_bridge bridge (
 );
 
 reg [15:0] mem [0:32767];
-assign bridge_rdata = mem[bridge_addr[15:1]];
+// The interrupt injector the program benches share (tb_ap040_program.v,
+// upstream's tb_ap040_pipe_compat.v): a word written to $F110 is the level
+// on the IPL lines (0 releases them); $F148 arms a level-2 request that
+// rises the written number of clk_sys cycles later; $F160 reads as 1 so a
+// program knows the injector is here (t_fpu.s's IPLCAP: with 0 its IRQ
+// sweep across a released FDIV bypassed itself, and t_posted_irq_audit
+// waited for a level that never came).  The wrapper samples IPL on its
+// stage grid, so the sweep here does not reach the single-clock alignments
+// of the two defects it found on upstream's bench (tb_ap040_pipe_compat.v:
+// a request lost as the FDIV left P_START, a `done` dropped on an entry's
+// redirect clock) -- a 160-clock sweep against either unfixed core passed
+// here.  That bench is the regression for them; this one runs the sweep.
+reg  [2:0] ipl_lvl = 3'd0;
+reg [15:0] ipl_delay = 16'd0;
+assign bridge_rdata = (bridge_addr[15:1] == (16'hF160 >> 1)) ? 16'h0001 : mem[bridge_addr[15:1]];
 
 // The core may run during a posted store, but the adapter must hold the
 // entire outstanding bus transfer until the chipset acknowledges it.
@@ -145,6 +159,71 @@ always @(posedge clk_sys) begin
 			else begin
 				errors <= errors + 1;
 				result <= 2;
+			end
+		end
+		if ((bridge_hwr || bridge_lwr) && bridge_addr[15:1] == (16'hF110 >> 1))
+			ipl_lvl <= bridge_wdata[2:0];
+		if ((bridge_hwr || bridge_lwr) && bridge_addr[15:1] == (16'hF148 >> 1))
+			ipl_delay <= bridge_wdata;
+		else if (ipl_delay != 16'd0) begin
+			ipl_delay <= ipl_delay - 16'd1;
+			if (ipl_delay == 16'd1) ipl_lvl <= 3'd2;
+		end
+	end
+end
+
+// A qualified request is taken at the next instruction boundary.  This is
+// upstream's tb_ap040_pipe_compat.v rule on the production DUT: a level above
+// the mask claims the boundary; the claim ends when the level drops or an
+// entry accepts it; an instruction leaving EA-fetch while the claim stands
+// ages it, and sixteen starts is a LOST request (the design's measured worst
+// case is six).  The window from an entry's start until its SR write lands
+// is excluded: the level is still above the OLD mask there.  A program
+// cannot see a request deferred to a later boundary -- it is delivered
+// eventually and the count comes out right -- so this is what reports one
+// on this bench's alignments.  (The known case, a level-2 rising as a
+// released FDIV left P_START and starved by the addq/dbra loop behind it,
+// is not among them: see the injector's note above.)
+wire [15:0] core_sr      = dut.cpu_inst_p.core.sr;
+wire  [2:0] core_irq_lvl = dut.cpu_inst_p.core.g_irq.irq_lvl_live;
+wire  [2:0] core_exc_lvl = dut.cpu_inst_p.core.u_eaf.x_lvl;
+wire        core_exc_irq = dut.cpu_inst_p.core.u_eaf.x_irq;
+wire        core_in_exc  = (dut.cpu_inst_p.core.u_eaf.ph == 4'd2);   // P_EXC
+wire        insn_start   = dut.cpu_inst_p.core.u_eaf.st.fin && dut.cpu_inst_p.core.ce;
+reg         in_exc_q = 0, exc_sr_pend = 0;
+reg  [15:0] core_sr_q = 0;
+wire        exc_accept = core_in_exc && !in_exc_q;
+wire        exc_window = core_in_exc || exc_sr_pend;
+reg   [6:0] tb_must = 0;
+reg   [7:0] must_age [1:6];
+integer     irq_errors = 0;
+integer     ml;
+initial for (ml = 1; ml <= 6; ml = ml + 1) must_age[ml] = 0;
+always @(posedge clk_sys) begin
+	in_exc_q  <= core_in_exc;
+	core_sr_q <= core_sr;
+	if (!reset) exc_sr_pend <= 0;
+	else if (core_in_exc) exc_sr_pend <= 1;
+	else if (core_sr != core_sr_q) exc_sr_pend <= 0;
+	if (!reset) begin
+		tb_must <= 0;
+		for (ml = 1; ml <= 6; ml = ml + 1) must_age[ml] <= 0;
+	end else begin
+		for (ml = 1; ml <= 6; ml = ml + 1) begin
+			if ({29'd0, core_irq_lvl} < ml) begin
+				tb_must[ml] <= 0; must_age[ml] <= 0;
+			end else if (exc_accept && core_exc_irq && {29'd0, core_exc_lvl} >= ml) begin
+				tb_must[ml] <= 0; must_age[ml] <= 0;
+			end else if (!tb_must[ml] && !exc_window &&
+			             {29'd0, core_irq_lvl} == ml && ml > {29'd0, core_sr[10:8]}) begin
+				tb_must[ml] <= 1; must_age[ml] <= 0;
+			end else if (tb_must[ml] && insn_start) begin
+				must_age[ml] <= must_age[ml] + 1'd1;
+				if (must_age[ml] == 8'd16) begin
+					irq_errors = irq_errors + 1;
+					$display("FAIL: qualified level-%0d request not taken at the next boundary (pc=%h sr=%h)",
+					         ml, dut.core_dbgstat[31:0], core_sr);
+				end
 			end
 		end
 	end
@@ -186,8 +265,9 @@ initial begin
 	$display("posted-store overlap cycles: %0d", posted_progress);
 	if ($test$plusargs("require_overlap") && posted_progress == 0)
 		$fatal(1, "posted-store overlap was never exercised");
-	if (errors == 0) $display("ALL TESTS PASSED");
-	else $display("TEST FAILED with %0d errors", errors);
+	if (irq_errors != 0) $display("interrupt latency rule: %0d violations", irq_errors);
+	if (errors + irq_errors == 0) $display("ALL TESTS PASSED");
+	else $display("TEST FAILED with %0d errors", errors + irq_errors);
 	$finish;
 end
 
