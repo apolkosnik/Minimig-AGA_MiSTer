@@ -36,6 +36,11 @@ set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_EFFORT EXTRA
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+# Hold on every path, not only I/O: the same-PLL 113 MHz -> 28 MHz crossings
+# (a2065_ddr3_mailbox csr0_out -> a2065_regfile csr_shadow, 0.6 ns of data
+# against 0.78 ns of clock skew) sat at +0.05..0.09 on every fit and went to
+# -0.347 on 2026-09-26 11:32; the default fixes I/O paths only.
+set_global_assignment -name OPTIMIZE_HOLD_TIMING "ALL PATHS"
 # Not inside the CPU: Minimig.sdc relaxes the CPU's tick-gated registers by
 # NAME (four cycles between core_enable-gated registers, three from RAM
 # ports and the MMU pipe), and a register the fitter retimes across logic
@@ -63,7 +68,7 @@ set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
 set_global_assignment -name FITTER_EFFORT "STANDARD FIT"
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
-set_global_assignment -name SEED 2
+set_global_assignment -name SEED 1
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
 

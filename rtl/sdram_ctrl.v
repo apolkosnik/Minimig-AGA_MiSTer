@@ -380,16 +380,22 @@ reg        ras_go;          // high during state 0
 // two LUT levels.  The route from this module to the address pins is
 // 5.447 ns of the budget, so every level here is expensive.
 //
-// What is left is, per bit, one six-input LUT and nothing else:
+// What is left is, per bit, one five-input LUT and nothing else:
 //
-//     sd_addr[i] <= (sel_ras & init_done & (~chipDMA | ~chipRW))
-//                 ? chipAddr[i+10] : row_col[i]
+//     sd_addr[i] <= (sel_ras_init & (~chipDMA | ~chipRW))
+//                 ? chipAddr[i+10] : sd_addr_alt[i]
 //
-// enabled by sel_ras|sel_cas.  Only two of those six inputs come from outside
-// this module, and no shared node stands between them and the pin, so the
-// synthesiser can duplicate the whole cone per bit and the fitter can put
-// each copy next to the pin it drives.  177d4cd7 is the measurement behind
-// that: a shared select node for this mux cost 1.40 ns on the worst path.
+// loaded every edge.  The earlier form of this, `? chipAddr : row_col` under
+// an enable of sel_ras|sel_cas, was meant to be one LUT too, but the enable
+// is a hold, and a hold is the register's own Q as one more input: eight in
+// all, two LUT levels, and a shared select node between them (the pin
+// block's comment has the measured path).  sd_addr_alt carries the hold and
+// the row/column a clock ahead, in the fabric, so the pin's cone has no
+// feedback.  Only three of the five inputs come from outside this module,
+// and no shared node stands between them and the pin, so the synthesiser
+// can duplicate the whole cone per bit and the fitter can put each copy
+// next to the pin it drives.  177d4cd7 is the measurement behind that: a
+// shared select node for this mux cost 1.40 ns on the worst path.
 //
 // One register holds every source, because no two of them are ever live at
 // once.  Slot order is RAS at state 0, CAS at state 2, the walker's second
@@ -400,14 +406,29 @@ reg        ras_go;          // high during state 0
 // sees exactly what it saw before.
 reg        sel_ras;      // the next edge loads the RAS row
 reg        sel_cas;      // the next edge loads a CAS word
+reg        sel_ras_init; // sel_ras with init_done folded in: the row may be the chipset's
 reg        walker_cas2_go;  // high during state 4 of a walker write slot
+// The selects' next values, named: the address pin's alternate register (the
+// pin block) takes the same terms a clock ahead.
+wire       sel_ras_nx = (next_sdram_state == 4'd0);
+wire       sel_cas_nx = (next_sdram_state != 4'd0) &&
+                        ((sdram_state == 4'd1) ||
+                         ((slot_type == WALKER_WRITE) &&
+                          (next_sdram_state == 4'd4)));
+wire       sel_ld_nx  = sel_ras_nx || sel_cas_nx;
+// ... and the two CAS-column states as registered flags, for row_col's next
+// value: sdram_state[3] -> its compares -> the row_col_nx mux -> sd_addr_alt
+// was 7.7 ns of the 8.8 on the fit of 2026-09-26 11:32 (+0.318).  Exact for
+// the same reason ras_go is: the counter's next value includes the resync.
+reg        st1_go;          // high during state 1
+reg        st3_go;          // high during state 3
 always @ (posedge sysclk) begin
 	ras_go         <= (next_sdram_state == 4'd0);
-	sel_ras        <= (next_sdram_state == 4'd0);
-	sel_cas        <= (next_sdram_state != 4'd0) &&
-	                  ((sdram_state == 4'd1) ||
-	                   ((slot_type == WALKER_WRITE) &&
-	                    (next_sdram_state == 4'd4)));
+	st1_go         <= (next_sdram_state == 4'd1);
+	st3_go         <= (next_sdram_state == 4'd3);
+	sel_ras        <= sel_ras_nx;
+	sel_cas        <= sel_cas_nx;
+	sel_ras_init   <= sel_ras_nx && init_done_nx;
 	walker_cas2_go <= walker_cas2_nx;
 	walker_snoop_hi <= (slot_type == WALKER_WRITE) &&
 	                   (next_sdram_state >= 4'd2) && (next_sdram_state <= 4'd5);
@@ -486,15 +507,41 @@ reg  [9:0] pre_col;
 // The one register behind sd_addr: the RAS row from state 15 until state 0
 // has issued it, then the CAS column, then the walker write's second column.
 reg [12:0] row_col;
+// row_col's next value, its own D input named (the block below assigns it and
+// nothing else), in the block's priority: the reset value, then the walker
+// write's second column at state 3, the CAS column at state 1, the next
+// slot's row at slot_start, else hold.  The address pin's alternate register
+// takes it a clock ahead of the pin.
+wire [12:0] row_col_nx =
+	!reset_n                       ? (13'd1 << 10) :
+	st3_go                         ? {2'b00, 1'b1, casaddr[9:1], 1'b1} :
+	st1_go                         ? {(!cas_sd_we ? cas_dqm : 2'b00),
+	                                  !(slot_type == WALKER_WRITE), casaddr} :
+	!slot_start                    ? row_col :
+	!init_done                     ? ((initstate == 4'd12) ? 13'b0001000100010
+	                                                        : (13'd1 << 10)) :
+	write_req                      ? writeAddr[22:10] :
+	(!walker_busy && walker_req_q) ? walker_addr[22:10] :
+	(cache_req && cache_req_q2)    ? cache_addr_lat[22:10] :
+	                                 row_col;
+// The chipset owns the RAS slot: the one late term in the address pin's cone
+// (Agnus drives chipDMA/chipRW on the edge that starts the slot).
+wire        chip_ras = sel_ras_init && ((~chipDMA) | (~chipRW));
+// What the address pin loads when the chipset does not own the slot, held in
+// the fabric a clock ahead: the row or column when a load is due, else the
+// pin's own current value (the pin block).
+reg  [12:0] sd_addr_alt;
 
 // Everything sd_addr can load, in one register and one block: the next slot's
 // RAS row at state 15, the CAS column at state 1, the walker write's second
 // column at state 3.  The row is read at state 0 before state 1 overwrites it,
 // and each column is read before the next row load, so nothing is ever lost.
 always @(posedge sysclk) begin
+	// row_col itself: its next value is the wire above, so that the address
+	// pin's alternate register can take the same value a clock ahead
+	row_col <= row_col_nx;
 	if (!reset_n) begin
 		pre_sel   <= PRE_NONE;
-		row_col   <= (13'd1 << 10);
 		ras_local <= 1'b0;
 	end
 	else if (slot_start) begin
@@ -519,42 +566,34 @@ always @(posedge sysclk) begin
 		init_cas  <= !init_done && ((initstate == 4'd7) || (initstate == 4'd9) ||
 		                            (initstate == 4'd12));
 		init_we   <= !init_done && ((initstate == 4'd3) || (initstate == 4'd12));
-		if (!init_done) begin
+		// (the row itself is row_col_nx's slot_start arms: initstate
+		// increments on this same edge, so the row loaded here is the one
+		// the next slot's state 0 issues.  State 13 is LOAD MODE REGISTER;
+		// state 4 is PRECHARGE ALL and wants A10; every other init state
+		// issues no command and its address is a don't-care.)
+		if (!init_done)
 			pre_sel <= PRE_NONE;
-			// initstate increments on this same edge, so the row loaded here
-			// is the one the next slot's state 0 issues.  State 13 is LOAD
-			// MODE REGISTER; state 4 is PRECHARGE ALL and wants A10; every
-			// other init state issues no command and its address is a
-			// don't-care.
-			row_col <= (initstate == 4'd12) ? 13'b0001000100010
-			                                : (13'd1 << 10);
-		end
 		else if (write_req) begin
 			pre_sel <= PRE_WRITE;
-			{pre_ba, row_col, pre_col[8:0]} <= writeAddr;
+			{pre_ba, pre_col[8:0]} <= {writeAddr[24:23], writeAddr[9:1]};
 		end
 		else if (!walker_busy && walker_req_q) begin
 			pre_sel <= PRE_WALKER;
-			{pre_ba, row_col, pre_col[8:0]} <= {walker_addr, 1'b0};
+			{pre_ba, pre_col[8:0]} <= {walker_addr[24:23], walker_addr[9:2], 1'b0};
 		end
 		else if (cache_req && cache_req_q2) begin
 			pre_sel <= PRE_CACHE;
-			{pre_ba, row_col, pre_col[8:0]} <= cache_addr_lat;
+			{pre_ba, pre_col[8:0]} <= {cache_addr_lat[24:23], cache_addr_lat[9:1]};
 		end
 		else
 			pre_sel <= PRE_NONE;
 	end
 
-	// The CAS-time values, built a cycle before the state that uses them so
-	// the pin register selects between settled words.  slot_type is read
-	// directly rather than through walker_wr_slot, which is a cycle behind it
-	// and would still name the previous slot here.  States 1, 3 and 15 are
-	// disjoint, so these and the row load above never race.
-	if (reset_n && (sdram_state == 4'd1))
-		row_col <= {(!cas_sd_we ? cas_dqm : 2'b00),
-		            !(slot_type == WALKER_WRITE), casaddr};
-	if (reset_n && (sdram_state == 4'd3))
-		row_col <= {2'b00, 1'b1, casaddr[9:1], 1'b1};
+	// (The CAS-time values are row_col_nx's state 1 and state 3 arms, built
+	// a cycle before the state that uses them so the pin selects between
+	// settled words.  slot_type is read directly rather than through
+	// walker_wr_slot, which is a cycle behind it and would still name the
+	// previous slot there.)
 end
 
 wire walker_grant = (sdram_state == 4'd0) && (pre_sel == PRE_WALKER) &&
@@ -678,11 +717,24 @@ always @ (posedge sysclk) begin
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
 
-	if (sel_ras && init_done && ((~chipDMA) | (~chipRW)))
-		sd_addr <= chipAddr[22:10];
-	else if (sel_ras || sel_cas)
-		sd_addr <= row_col;
-	// otherwise hold
+	// The address pin, loaded every edge from a five-input cone: the
+	// chipset's row when it owns the RAS slot, else sd_addr_alt, which holds
+	// -- a clock ahead, in the fabric -- the row or column a load is due to
+	// take, or the pin's own current value when none is.  Before this the
+	// pin held itself through its enable (`otherwise hold`), which put its
+	// own Q into an eight-input cone: two LUT levels, with a shared select
+	// placed by its sources (ram1|sd_addr~8_RESYN3208 -> sd_addr~8 ->
+	// sd_addr[7], 1.46 + 1.30 ns of routing between them and then the 5.57
+	// ns hop to the pin, -0.731 ns on the fit of 2026-09-26 11:04, the
+	// recurring floppy-FIFO -> sd_addr violator of every fit of this
+	// floorplan).  The late term -- the chipset's slot ownership -- cannot be
+	// registered earlier, so the cone is made small instead: one six-input
+	// LUT per bit, nothing shared, which the fitter can put beside the pin.
+	// Same edges, same values: tests/ap040/check_sdram_timing_equivalence.py
+	// compares every pin cycle by cycle against the controller before this.
+	sd_addr     <= chip_ras ? chipAddr[22:10] : sd_addr_alt;
+	sd_addr_alt <= sel_ld_nx ? row_col_nx
+	                         : (chip_ras ? chipAddr[22:10] : sd_addr_alt);
 
 	// The bank holds across the whole burst rather than across the odd states,
 	// so its enable is not ~sdram_state[0] -- but it is still a short list of
