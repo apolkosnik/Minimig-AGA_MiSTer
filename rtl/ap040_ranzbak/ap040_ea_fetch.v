@@ -504,7 +504,13 @@ wire        cm_use  = cm_hit && mm_cmi && cm_mode;
 // code) always comes, and t_irq_pipe.s check 33 holds every request in a run
 // of 16 back-to-back loads to the same boundary rule.
 wire        i_rd    = (rd_pend && !rd_drop) || done_smi || done_dmi || done_sld || done_dld;
-wire        irq_now = irq_req && !(cm_hit && mm_cmi) && !i_rd;
+// ... nor while a CM continuation is pending and NO instruction is here to
+// say whether it is the resumed MOVEM: irq_take is a register one clock
+// behind this, and an arm taken in the bubble after the RTE -- cm_hit reads
+// a stale `i` there -- would hold, and then take the interrupt in front of,
+// the continuation that arrives next (t_movem_restart.s case 7).  cm_v is
+// cleared as that instruction starts, so this costs one instruction at most.
+wire        irq_now = irq_req && !(cm_hit && mm_cmi) && !(cm_v && !eac_v_use) && !i_rd;
 wire [31:0] s_addr_now = done_smi ? s_addr : eac_i.src_ea;
 wire [31:0] d_addr_now = done_dmi ? d_addr :
                          (i.cls == CL_CHK2) ? s_addr_now + ((i.size == SZ_B) ? 32'd1 : (i.size == SZ_W) ? 32'd2 : 32'd4) :
@@ -562,6 +568,29 @@ wire        dn_sld   = done_sld || (cap && rd_tag == T_SLD);
 wire        dn_dld   = done_dld || (cap && rd_tag == T_DLD);
 wire [31:0] s_val_c  = (cap && rd_tag == T_SLD) ? rd_data : s_val;
 wire [31:0] d_val_c  = (cap && rd_tag == T_DLD) ? rd_data : d_val;
+// A floating-point instruction's MEMORY-INDIRECT pointer.  P_FPU takes its
+// effective address from s_addr_c / d_addr_c at entry, so the pointer is
+// read here, in P_START, and the phase is entered once it is in.  ONE read:
+// a store's decode names the same EA as source and destination, and the
+// phase uses the destination's (fp_mem_dst) -- T_DMI then, T_SMI otherwise.
+// Not while a released operation is still running, and not at all in front
+// of the pending exception P_FPU will take instead: the reference checks
+// fpu_pend_exc in S_FPU_DEC / S_FBCC / S_FSCC0 before its ea_start, and so
+// reads no pointer.  FSAVE and FRESTORE compute their EA first there
+// (ea_start ... S_FSAVE1 / S_FREST1), so they read it here too.
+wire        fpmi_n    = (HAS_FPU != 0) && (i.cls == CL_FPU) && (need_smi || need_dmi);
+wire        fpmi_skip = fp_pend && (i.opcode[8:6] != 3'b100) && (i.opcode[8:6] != 3'b101);
+wire        fpmi_dn   = need_dmi ? dn_dmi : dn_smi;
+wire        fpmi_ok   = !fpmi_n || fpmi_dn || fpmi_skip;   // P_FPU may be entered
+function automatic rdreq_t fpmi_rd(input logic n, input logic dst, input logic done,
+                                   input logic hold, input logic [31:0] sea, input logic [31:0] dea);
+	rdreq_t r;
+	r = '0; r.sz = SZ_L;
+	if (n && !done && !hold) begin r.v = 1'b1; r.t = dst ? T_DMI : T_SMI; r.a = dst ? dea : sea; end
+	return r;
+endfunction
+rdreq_t fpx; assign fpx = fpmi_rd(fpmi_n, need_dmi, need_dmi ? done_dmi : done_smi,
+                                  fpmi_skip || fp_bg || fp_pcap, eac_i.src_ea, eac_i.dst_ea);
 // Timing (plan M3 OOC, WNS -8.6 ns before this): instructions whose
 // EA-fetch decision -- trap or not, one micro-op or two, the field address
 // -- depends on operand VALUES do not take them straight from EX's result
@@ -995,7 +1024,8 @@ function automatic stp_t stepf(
 	input logic [31:0] s_addr_c, input logic [31:0] s_val_c, input logic [31:0] d_val_c,
 	input logic [2:0] x_step, input logic [31:0] vbr, input logic [7:0] x_vec, input logic [31:0] x_target,
 	input logic [2:0] r_step, input logic [31:0] sp_now, input logic fmt_ok, input logic rte_goes,
-	input logic rx7, input logic rs_done, input logic has_fpu, input logic tr_arm);
+	input logic rx7, input logic rs_done, input logic has_fpu, input logic tr_arm,
+	input rdreq_t fpx);
 	stp_t s;
 	s = '0;
 	case (ph)
@@ -1022,7 +1052,11 @@ function automatic stp_t stepf(
 				// the sequence runs in P_CINV
 			end else if (has_fpu && i.cls == CL_FPU) begin
 				// the FPU request runs in P_FPU (M10.1(c)).  With HAS_FPU = 0
-				// this arm folds away: CL_FPU is never decoded.
+				// this arm folds away: CL_FPU is never decoded.  A memory-
+				// indirect operand's pointer is read first, here (fpx).
+				if (fpx.v && !cap && can_rd && !rd_pend) begin
+					s.issue = 1'b1; s.it = fpx.t; s.ia = fpx.a; s.isz = fpx.sz;
+				end
 			end else if (i.cls == CL_STOP) begin
 				// the SR micro-op, then the stopped state (P_STOP) -- unless
 				// the STOP is TRACED (M9.T), when it loads the SR and ENDS:
@@ -1189,7 +1223,7 @@ stp_t st0_nt; assign st0_nt = stepf(ph, eac_v_use, rst_pending, i, older_busy, !
                       s_bit, stall_in, nx, ops_done, jmp_odd, rts_odd, rtr_odd, trap_u, 1'b0, trap_vec,
                       indexed_mode, two_uop, bf_step, sync_busy, s_addr_c, s_val_c,
                       d_val_c, x_step, vbr_in, x_vec, x_target, r_step, rd_a, rte_fmt_ok, rte_goes,
-                      r_fv[15:12] == 4'd7, rs_cnt == 10'd0, HAS_FPU != 0, tr_arm_stop);
+                      r_fv[15:12] == 4'd7, rs_cnt == 10'd0, HAS_FPU != 0, tr_arm_stop, fpx);
 stp_t st0; assign st0 = trapn_ov(st0_nt, trap_n && trapn_arm, trap_vec, i.next_pc, i.pc);
 
 //--------------------------------------------------------------- access errors
@@ -1448,7 +1482,18 @@ assign fp_dst_r    = i.ext[9:7];
 // opclass 100/101 arrives it must NOT write FPIAR -- a move to or from a
 // control register leaves it alone -- so that decode has to break this
 // equality rather than extend it.
-assign fp_ia_we    = fp_req;
+// One more write sends no command and is pulsed from fp_iaw instead, one
+// clock after the event, with `i` still the instruction (an exception entry
+// holds EA-calc): a rejected FP source EA's F-line records FPIAR before the
+// fault (decode's `fpiar`), the reference's `fpu_iawe <= 1; go_fp_ea_fault`,
+// and WinUAE's `regs.fpiar = pc` ahead of get_fp_value() on the 68040.
+// The conditionals -- FBcc, FDBcc, FScc, FTRAPcc -- do NOT record it.  The
+// reference (S_FSCC0 `fpu_iawe <= 1`, "FBcc is the exception") has FScc,
+// FDBcc and FTRAPcc write it, and this core copied that for a while; the
+// 68040 cputest corpus (WinUAE: fpuop_scc/dbcc never touch FPIAR, trapcc/bcc
+// only on the 68060) fails every such round with "FPIAR expected ffffffff".
+reg        fp_iaw;
+assign fp_ia_we    = fp_req || fp_iaw;
 assign fp_ia_wdata = (HAS_FPU != 0) ? i.pc : 32'd0;
 // where the operand comes from, always LEFT aligned in the 96-bit window:
 // memory (assembled in fp_buf), the instruction stream (the decoder's
@@ -1550,6 +1595,12 @@ wire  [3:0] fp_mvn   = {3'd0, fp_mvmk[7]} + {3'd0, fp_mvmk[6]} + {3'd0, fp_mvmk[
                        {3'd0, fp_mvmk[4]} + {3'd0, fp_mvmk[3]} + {3'd0, fp_mvmk[2]} +
                        {3'd0, fp_mvmk[1]} + {3'd0, fp_mvmk[0]};
 wire  [6:0] fp_mvb12 = {fp_mvn, 3'd0} + {1'b0, fp_mvn, 2'd0};       // 12 x n
+// an EMPTY list transfers nothing and leaves An where it was (WinUAE's
+// fmovem2fpp/fmovem2mem with list 0 return the base unchanged; the 68040
+// cputest corpus, Basic/FPP, has the dynamic form load nothing).  This core
+// used to walk one register anyway: mv_bit() of a zero mask names FP0/FP7,
+// and decode gives a dynamic list one register's step to begin with.
+wire        fp_mv0   = fp_mvm && (fp_mvmk == 8'd0);
 reg   [6:0] fp_mvb12_q;   // fp_mvb12 as it was in the P_FPU entry clock (fp_anv)
 wire        fp_mvpd  = fp_mvst && (i.dst.upd == UPD_PRE);
 wire        fp_lsb   = fp_mvpd;
@@ -1656,6 +1707,10 @@ wire [31:0] fp_addr0 = fp_mem_dst ? d_addr_c : s_addr_c;
 wire [31:0] fp_anv  = fp_mvdy ? ((i.dst.upd == UPD_PRE) || (i.src.upd == UPD_PRE)
                                 ? fp_addr0 - {25'd0, fp_mvb12_q} + 32'd12
                                 : fp_addr0 + {25'd0, fp_mvb12_q}) :
+                      // a static empty list: EA-calc stepped by the size rule
+                      // (four, `nb == 0`), so -(An) is put back by that much
+                      fp_mv0  ? (((i.dst.upd == UPD_PRE) || (i.src.upd == UPD_PRE))
+                                ? fp_addr0 + 32'd4 : fp_addr0) :
                       fp_sv   ? fp_addr : (fp_addr + (fp_bsy ? 32'd100 : 32'd52));
 assign fp_fm_we    = fp_mw;
 assign fp_fm_wdata = fp_mwd;
@@ -1701,6 +1756,19 @@ wire        fp_blast = (fp_k == fp_beats - 2'd1);
 // opclass 011 stores the FPU's answer, so it waits for `done`; everything
 // else leaves the unit running and is released at `accepted`
 wire        fp_need_res = fp_gen && (i.ext[15:13] == 3'b011);
+// (M10.3, the store arms) a store's ENABLED exception comes with its `done`
+// (ap040_fpu.v F_STDONE), so fp_ae is latched when fp_ok rises.  It is
+// post-instruction -- format $3, the next PC, the destination's EA or 0
+// for Dn -- and what is written first is the reference's S_FPU_GO rule:
+// an INTEGER store's SNAN or OPERR writes nothing (WinUAE
+// fault_if_68040_integer_nonmaskable returns before the store); every other
+// store writes its default result, into Dn or memory, and then traps
+// (put_fp_value, then fpsr_check_arithmetic_exception).  The (An)+ / -(An)
+// update stands in both.
+wire        fp_sx    = fp_need_res && fp_ae;
+wire        fp_sxnw  = fp_sx && (fp_avec == 8'd52 || fp_avec == 8'd54) &&
+                       (i.ext[12:10] == 3'd0 || i.ext[12:10] == 3'd4 || i.ext[12:10] == 3'd6);
+wire        fp_sxdn  = fp_sx && !fp_sxnw && !fp_mem_dst;   // Dn is written, then the trap
 // (M10.2) a control-register move sends the unit no command, so what stands
 // in for the interlock is `every selected register has been transferred`
 wire        fp_ok  = fp_cnd ? fp_crd :
@@ -1803,8 +1871,8 @@ ex_t fp_w; assign fp_w = (fp_stt == FS_WR) ? an_ov(fp_st_uop(x_ord,
                                               (fp_mvm || fp_sv || fp_scc) ? !(fp_crd && fp_k == 2'd3)
                                                                             : (fp_k != fp_beats),
                                               fp_baddr, fp_bdata, fp_bsz),
-                                          fp_frm || fp_mvdy, fp_anv)
-                                   : an_ov(fp_x, fp_frm || fp_mvdy, fp_anv);
+                                          fp_frm || fp_mvdy || fp_mv0, fp_anv)
+                                   : an_ov(fp_x, fp_frm || fp_mvdy || fp_mv0, fp_anv);
 // The unimplemented-instruction and unsupported-data-type faults, with the
 // frames lib/AP68040's go_fp_unimp / go_fp_unsupp use -- both validated on
 // the v24 cputest corpus (PLAN.md D19):
@@ -1819,7 +1887,8 @@ function automatic stp_t fp_st(input stp_t t0, input logic inph, input logic sta
                                input logic got, input logic mem_dst,
                                input logic pend, input logic [7:0] pvec, input logic [31:0] ipc,
                                input logic aexc, input logic [7:0] avec, input logic st_dst,
-                               input logic fmte, input logic bsun, input logic trapc);
+                               input logic fmte, input logic bsun, input logic trapc,
+                               input logic sxnw);
 	stp_t t;
 	t = t0;
 	if (inph) begin
@@ -1839,13 +1908,11 @@ function automatic stp_t fp_st(input stp_t t0, input logic inph, input logic sta
 		// (ap040_core.v:4217, whose condition is `fpu_exc_req && !fp_st`).
 		// A STORE with an enabled exception is the reference's other three
 		// arms -- format $3, the operand's EA, and the destination written
-		// first or not depending on the class -- and is NOT built here: the
-		// unit pulses `done` on that path (`ap040_fpu.v:2156`), so the store
-		// completes and the trap is dropped rather than hanging.  Recorded as
-		// the remaining gap of M10.3.  No (An)+ / -(An) update rides it: the reference
-		// commits one on every other arm of that state and not on this one,
-		// which in this pipeline happens by itself, because the update rides a
-		// dispatch micro-op that never goes out.
+		// first or not depending on the class -- and is built below, where
+		// the store itself is (fp_sx*).  No (An)+ / -(An) update rides THIS
+		// one: the reference commits one on every other arm of that state and
+		// not on this one, which in this pipeline happens by itself, because
+		// the update rides a dispatch micro-op that never goes out.
 		else if (live && aexc && !mem_dst && !st_dst) begin
 			t.exc_go = 1'b1; t.ev = avec; t.ef = 4'd0; t.epc = npc; t.eaddr = 32'd0;
 		end
@@ -1880,10 +1947,30 @@ function automatic stp_t fp_st(input stp_t t0, input logic inph, input logic sta
 				t.epc   = npc;
 				t.eaddr = unimp ? ea_u : ea_s;
 			end
+		end else if (got && st_dst && aexc && (sxnw || !mem_dst)) begin
+			// (M10.3) a store's enabled exception that writes no memory: the
+			// integer SNAN/OPERR set, whose micro-op is the An update alone,
+			// or a Dn destination, whose micro-op writes Dn (dsel 6 selects
+			// which: fp_sxdn).  Either is non-final, and the trap follows it.
+			if (!stall) begin
+				t.disp = 1'b1; t.dsel = 3'd6;
+				t.exc_go = 1'b1; t.ev = avec; t.ef = 4'd3; t.epc = npc; t.eaddr = ea_s;
+			end
 		end else if (rd_go) begin
 			t.issue = 1'b1; t.it = T_SLD; t.ia = ra; t.isz = rsz;
 		end else if (wr_go) begin
-			if (!stall) begin t.disp = 1'b1; t.dsel = 3'd4; t.fin = wr_fin; end
+			if (!stall) begin
+				t.disp = 1'b1;
+				// (M10.3) a memory store's enabled exception: every beat has
+				// gone, and the trailing update micro-op is non-final and
+				// carries the trap -- S_FPU_WR's fp_st_epend
+				if (wr_fin && st_dst && aexc) begin
+					t.dsel = 3'd6;
+					t.exc_go = 1'b1; t.ev = avec; t.ef = 4'd3; t.epc = npc; t.eaddr = ea_s;
+				end else begin
+					t.dsel = 3'd4; t.fin = wr_fin;
+				end
+			end
 		end else if (got && !mem_dst && !stall) begin
 			t.disp = 1'b1; t.dsel = 3'd4; t.fin = 1'b1;
 		end
@@ -1931,11 +2018,25 @@ endfunction
 // With the arm registered, the combinational chain never sees the interrupt:
 // the dispatch mux selects on a flip-flop, and the read request is simply
 // ANDed with it.
-function automatic stp_t irq_st(input stp_t s, input logic go, input logic [2:0] lvl,
-                                input logic [31:0] pc);
+function automatic stp_t irq_st(input stp_t s, input logic go, input logic hold,
+                                input logic [2:0] lvl, input logic [31:0] pc);
 	stp_t t;
 	begin
 		t = s;
+		// While a request is armed, the instruction at the boundary does not
+		// START: no micro-op, no MOVEM, no read (the read gate is irq_blk,
+		// the same flop).  Without this an ordinary one-micro-op instruction
+		// dispatched anyway -- only the phase entries and the reads were held
+		// -- and a run of them kept `older_busy` up every clock, so `go`
+		// never came: t_fpu.s's IRQ soak lost a level-2 request that arrived
+		// in the clock its FDIV left P_START, and the addq/dbra loop behind
+		// it starved the request until the next serialising instruction.
+		// The hold drains EX and WB within a few clocks and `go` follows.
+		// It is the shape tr_st uses for a trace: a flip-flop ANDed with a
+		// phase decode, never a term in stepf's chain (the m9s rule).
+		if (hold) begin
+			t.disp = 1'b0; t.fin = 1'b0; t.mm_go = 1'b0; t.issue = 1'b0;
+		end
 		if (go) begin
 			t.disp = 1'b0; t.fin = 1'b0; t.mm_go = 1'b0;
 			t.exc_go = 1'b1; t.irq = 1'b1;
@@ -1991,11 +2092,15 @@ function automatic stp_t tr_st(input stp_t s, input logic [3:0] ph, input logic 
 endfunction
 reg         tr_take;      // a trace is due in front of the next instruction
 reg  [31:0] tr_pc;        // the traced instruction's PC (the $2 address field)
-// A T0 change-of-flow trace is resolved only once the TARGET has entered the
-// pipeline, so an illegal instruction at the target wins and cancels it
-// (reference go_pc: `flow_t0_pend`).  A T1 trace is not: it is taken at the
-// boundary before the target is looked at.
-reg         tr_yield;
+// A T0 change-of-flow trace is taken at the target's boundary whatever the
+// target is: an ILLEGAL there is executed after the trace handler returns,
+// not instead of the trace.  This core used to yield the trace to the
+// target's own exception (an old reading of the reference's `flow_t0_pend`,
+// which the reference itself has since dropped: "the suppression only lost
+// the trace").  The 68040 cputest corpus branches every T0 round straight
+// into its terminating ILLEGAL and records vector 9 with the target stacked
+// -- FBcc, FDBcc and the integer branches alike -- and WinUAE's
+// check_t0_trace() raises the trace before the next instruction is looked at.
 // `!older_busy` is the interrupt's rule for the same reason: the traced
 // instruction's writeback must have committed before the frame's SR is
 // latched.  An interrupt at the same boundary WINS (irq_st sits outside this
@@ -2012,6 +2117,10 @@ reg  [2:0] irq_take_lvl;
 wire [31:0] irq_take_pc = (ph == P_STOP) ? i.next_pc : i.pc;
 wire irq_go = irq_take && eac_v_use && !rst_pending && !older_busy &&
               ((ph == P_START) || (ph == P_STOP));
+// the armed request's hold on the boundary: the instruction at P_START
+// neither starts nor reads until the request has been taken in front of it
+// (or the arm drops: an operand already read, a CM-resumed MOVEM)
+wire irq_hold = irq_take && (ph == P_START);
 stp_t st_i; assign st_i = aerr_st(irq_st(fp_st(pm_st(st1, ph == P_PMMU || ph == P_CINV, pm_got, stall_in),
                                      (HAS_FPU != 0) && (ph == P_FPU), stall_in, fp_live, fp_unimp, fp_unsupp,
                                      i.next_pc, fp_ea_v ? fp_addr : i.pc, fp_ea_v ? fp_addr : 32'd0,
@@ -2024,8 +2133,9 @@ stp_t st_i; assign st_i = aerr_st(irq_st(fp_st(pm_st(st1, ph == P_PMMU || ph == 
                                      (HAS_FPU != 0) && fp_ae, fp_avec, fp_need_res,
                                      (HAS_FPU != 0) && fp_fmte,
                                      (HAS_FPU != 0) && fp_bsun_go && (ph == P_FPU) && !fp_crd,
-                                     (HAS_FPU != 0) && fp_trapcc && fp_ctk && !fp_bsun_go),
-                               irq_go, irq_take_lvl, irq_take_pc), aerr_go, i, rd_a_q);
+                                     (HAS_FPU != 0) && fp_trapcc && fp_ctk && !fp_bsun_go,
+                                     (HAS_FPU != 0) && fp_sxnw),
+                               irq_go, irq_hold, irq_take_lvl, irq_take_pc), aerr_go, i, rd_a_q);
 // (M9.T step 4) A TRACE AND AN INTERRUPT PENDING AT THE SAME BOUNDARY: the
 // trace goes FIRST.  M68040UM 8.3, Table 8-4 puts Trace in priority group 6
 // and Interrupt in group 8, "with 0 as the highest priority", and 8.3 then
@@ -2043,8 +2153,7 @@ stp_t st_i; assign st_i = aerr_st(irq_st(fp_st(pm_st(st1, ph == P_PMMU || ph == 
 // (its `texc` machinery), and from WinUAE, which takes the interrupt and DROPS
 // the trace.  The reference's own comment calls its behaviour OPEN.  PLAN D23
 // has the three readings side by side; the manual is authority rule 1.
-wire tr_go = tr_take && eac_v_use && !rst_pending && !older_busy &&
-             (ph == P_START) && !(tr_yield && st_i.exc_go && !irq_go);
+wire tr_go = tr_take && eac_v_use && !rst_pending && !older_busy && (ph == P_START);
 
 // the trace is applied OUTSIDE the interrupt override, so it wins a boundary
 // they both want (M68040UM 8.3: trace is priority group 6, interrupt 8).  The
@@ -2121,7 +2230,8 @@ ex_t disp_x0; assign disp_x0 = dmux(st.dsel, x_ord,
                         ((HAS_FPU != 0) && (ph == P_FPU)) ? fp_w :
                         (ph == P_PMMU || ph == P_CINV) ? pm_x : reset_final(i, x_sp, r_pc),
                         ccr_only_uop(x_ord),
-                        ((HAS_FPU != 0) && (ph == P_FPU)) ? fp_upd_uop(x_ord, 1'b0) : no_last(x_ord),
+                        ((HAS_FPU != 0) && (ph == P_FPU)) ? (fp_sxdn ? no_last(fp_w) : fp_upd_uop(x_ord, 1'b0))
+                                                          : no_last(x_ord),
                         mm_x);
 // every store's function code: the frame stores and ordinary stores are
 // data in the current mode (the frame: supervisor), MOVES: DFC
@@ -2180,7 +2290,8 @@ wire   use_early = early_v && early.v && !st.issue && (!rd_pend || rd_ack) &&
 // its first clock when Enable()'s INTENA write let a pending Paula request
 // through; t_irqwedge_pipe.s).  `irq_blk` is registers only: the chain
 // still sees a flip-flop's worth of logic, not a term (the m9s rule).
-wire   irq_blk   = irq_take && (ph == P_START);
+// The same flop holds the instruction's dispatch (irq_st's `hold`).
+wire   irq_blk   = irq_hold;
 assign rd_req    = ((st.issue && !irq_blk) || (use_early && !irq_take)) && !flush && !tr_take;   // (registered: out of stepf)
 assign rd_addr   = st.issue ? st.ia  : early.a;
 assign rd_size   = st.issue ? st.isz : early.sz;
@@ -2246,6 +2357,7 @@ always @(posedge clk) begin
 		pm_sent <= 1'b0; pm_got <= 1'b0; pm_mmusr <= 32'd0;
 		cinv_req <= 1'b0; cinv_ic <= 1'b0; cinv_dc <= 1'b0;
 		fp_req <= 1'b0; fp_sent <= 1'b0; fp_acc <= 1'b0; fp_dn <= 1'b0; fp_buf <= 96'd0; fp_bg <= 1'b0;
+		fp_iaw <= 1'b0;
 		fp_stt <= FS_RD; fp_k <= 2'd0; fp_addr <= 32'd0;
 		fp_cw <= 1'b0; fp_csel <= 2'd0; fp_cwd <= 32'd0; fp_crd <= 1'b0;
 		fp_ae <= 1'b0; fp_avec <= 8'd0; fp_pend <= 1'b0; fp_pvec <= 8'd0;
@@ -2258,7 +2370,7 @@ always @(posedge clk) begin
 		fr_flags <= 3'd0; fr_grs <= 3'd0; fr_wbte15 <= 1'b0; fr_fpt <= 96'd0; fr_et <= 96'd0;
 		x_irq <= 1'b0; x_lvl <= 3'd0; rs_cnt <= 10'd0;
 		irq_take <= 1'b0; irq_take_lvl <= 3'd0;
-		tr_take <= 1'b0; tr_pc <= 32'd0; tr_yield <= 1'b0;
+		tr_take <= 1'b0; tr_pc <= 32'd0;
 		mm_ea[0] <= 32'd0; mm_ea[1] <= 32'd0; mm_tag <= 1'b0;
 		cm_v <= 1'b0; cm_ea <= 32'd0; cm_pc <= 32'd0; r_ea <= 32'd0; r_ssw <= 16'd0;
 		mm_mask <= 16'd0; mm_k_q <= 4'd0; mm_addr <= 32'd0; mm_empty <= 1'b0; mm_rreg <= 5'd0; mm_rlast <= 1'b0; mm_tail <= 1'b0;
@@ -2268,6 +2380,30 @@ always @(posedge clk) begin
 		rst_pending <= reset_seq;
 		eaf_valid <= 1'b0; eaf_o <= '0;
 	end else if (ce) begin
+		// (M10.1(c)) Events from the unit that belong to a RELEASED operation
+		// arrive in ANY clock, a flush clock included, so they are taken
+		// here, ahead of the wf_go / flush / else chain.  They used to sit in
+		// the else branch alone, and an exception entry's final micro-op --
+		// a redirect, so a flush -- landed in the very clock a background
+		// FDIV completed: `done` was dropped, fp_bg stayed up, and the
+		// handler's FSAVE waited at P_START for ever (t_fpu.s's IRQ soak,
+		// one offset of its 48; any interrupt, trap or RTE during a released
+		// operation can land on that clock).  The release clock's own fp_bg
+		// assignment in the else branch is later in this block and wins.
+		if (HAS_FPU != 0 && fp_bg && fp_done) fp_bg <= 1'b0;
+		fp_pcap <= 1'b0;
+		fp_iaw  <= 1'b0;     // a one-clock pulse (set below)
+		if (HAS_FPU != 0 && fp_exc_req && fp_bg) begin
+			fp_bg   <= 1'b0;
+			fp_pend <= 1'b1;
+			fp_pvec <= fp_exc_vec;
+			fp_pcap <= 1'b1;     // the unit prepares the frame from its shadow
+		end
+		if (HAS_FPU != 0 && fp_rarm) begin
+			fp_rarm <= 1'b0;
+			fp_pend <= fp_fr_e1pend && !(fr_busy && fp_fr_resume);
+			fp_pvec <= fp_cur_vec;
+		end
 		// the EX-side output register
 		if ((flush && !keep_out) || wf_go) eaf_valid <= 1'b0;
 		else if (!stall_in) begin
@@ -2350,7 +2486,9 @@ always @(posedge clk) begin
 							// reading a live `fpcc`.
 							// (and not in the clock the unit prepares a deferred
 							// exception's frame, or an FSAVE would judge it frameless)
-							if (!fp_bg && !fp_pcap) begin
+							// (nor before a memory-indirect pointer is in: fpmi_ok;
+							// the clock it answers in, s_addr_c / d_addr_c carry it)
+							if (!fp_bg && !fp_pcap && fpmi_ok) begin
 								ph <= P_FPU;
 								fp_sent <= 1'b0; fp_acc <= 1'b0; fp_dn <= 1'b0; fp_k <= 2'd0;
 								fp_ae <= 1'b0;
@@ -2381,6 +2519,7 @@ always @(posedge clk) begin
 								// (M10.8) a conditional form reads `fpcc` and nothing else --
 								// except FScc to memory, which writes one byte
 								else if (fp_cnd) begin
+									// (no FPIAR write: see fp_iaw)
 									// the condition is read one clock AFTER the phase is entered,
 									// never in the entry clock itself: `fp_crd` is shared with the
 									// other classes and whatever the previous FP instruction left
@@ -2422,6 +2561,9 @@ always @(posedge clk) begin
 									// the base is short by the other n-1
 									if (fp_mvdy && (i.dst.upd == UPD_PRE))
 										fp_addr <= d_addr_c - {25'd0, fp_mvb12} + 32'd12;
+									// nothing to transfer: straight to the final micro-op,
+									// whose An update an_ov puts back to the base (fp_anv)
+									if (fp_mv0) begin fp_crd <= 1'b1; fp_k <= 2'd3; end
 								end
 								else if (fp_cr) begin
 									if (fp_mem_src)      fp_stt <= FS_RD;
@@ -2704,8 +2846,12 @@ always @(posedge clk) begin
 							end
 						end
 					// the answer is in and the destination is memory: store it
-					if (!fp_mvm && !fp_sv && !fp_rs && fp_stt == FS_REQ && fp_ok && fp_mem_dst) begin fp_stt <= FS_WR; fp_k <= 2'd0; end
-					if (!fp_mvm && !fp_sv && !fp_rs && fp_stt == FS_WR && st.disp) fp_k <= fp_k + 2'd1;
+					// (not when its enabled exception suppresses the store: fp_sxnw)
+					if (!fp_mvm && !fp_sv && !fp_rs && fp_stt == FS_REQ && fp_ok && fp_mem_dst && !fp_sxnw) begin fp_stt <= FS_WR; fp_k <= 2'd0; end
+					// (not FScc: its one beat sets fp_k to 3 above, and this counter --
+					// later in the block -- overrode that to 1, so the byte went out
+					// three more times and (An)+ stepped twice: cputest Basic/FScc)
+					if (!fp_mvm && !fp_sv && !fp_rs && !fp_scc && fp_stt == FS_WR && st.disp) fp_k <= fp_k + 2'd1;
 				end
 				P_PMMU: begin
 					if (!pm_sent && bus_idle) begin
@@ -2736,7 +2882,6 @@ always @(posedge clk) begin
 			if (st.fin && ph != P_EXC && ph != P_RESET) begin
 				tr_take  <= tr_arm;
 				tr_pc    <= i.pc;
-				tr_yield <= !sr_in[15];   // a T0-only trace yields to the target's exception
 			end
 			// no trace survives the exception its own instruction took: the
 			// TRAP takes the TRAP and nothing else (the reference clears the
@@ -2771,10 +2916,16 @@ always @(posedge clk) begin
 				x_vec  <= st.ev; x_fmt <= st.ef; x_pc <= st.epc; x_addr <= st.eaddr;
 				x_step <= 3'd5;
 				x_irq  <= st.irq; x_lvl <= irq_lvl;
+				// the instruction's OWN fault (not an interrupt or trace taken
+				// at its boundary) records FPIAR when decode says so
+				if (HAS_FPU != 0 && !st.irq && st.ev == i.exc_vec && i.cls == CL_EXC && i.fpiar)
+					fp_iaw <= 1'b1;
 			end
 			if (st.disp && st.dsel == 3'd0 && two_uop && !st.fin) bf_step <= 1'b1;
 			// MOVEM
-			if (st0.mm_go && ph != P_MOVEM) begin
+			// (st0, before the overrides -- timing -- so the armed request's
+			// hold is applied here by hand: a MOVEM does not start under it)
+			if (st0.mm_go && ph != P_MOVEM && !irq_hold) begin
 				ph       <= P_MOVEM;
 				mm_mask  <= mm_16 ? 16'h000F : i.ext;
 				mm_k_q   <= lsb16(mm_16 ? 16'h000F : i.ext);
@@ -2823,20 +2974,20 @@ always @(posedge clk) begin
 			// (M10 remainder) ... except a FRESTORE whose BUSY frame restarts the
 			// unit (CU_SAVEPC = $FE): that command is released the same way
 			// and the next FP instruction waits for its `done`
+			// (a background completion clears fp_bg at the top of this block,
+			// in every clock; this is the release clock's own value)
 			if (HAS_FPU != 0 && ph == P_FPU && st.disp && st.fin) fp_bg <= (!fp_cr && !fp_mvm && !fp_sv && !fp_rs && !fp_cnd && !(fp_dn || fp_done)) ||
 			                                                              (fp_rs && fp_frm && fp_bsy && fp_fr_resume && !fp_done);
-			else if (HAS_FPU != 0 && fp_bg && fp_done)            fp_bg <= 1'b0;
 			// (M10.3) a RELEASED operation's enabled exception: the instruction
 			// has left, so it cannot be reported against it.  It becomes
-			// pending for the next FP dispatch, and clearing fp_bg here is the
-			// part that must not be forgotten -- otherwise the next floating-
-			// point instruction waits at P_START for ever, which is the hang
-			// M10.2 found for a different reason.  The second term catches an
-			// exception that arrives in the very clock of the release, when
-			// fp_bg is not set yet.
-			fp_pcap <= 1'b0;
+			// pending for the next FP dispatch, and clearing fp_bg is the part
+			// that must not be forgotten -- otherwise the next floating-point
+			// instruction waits at P_START for ever, which is the hang M10.2
+			// found for a different reason.  The background case is at the top
+			// of this block; this catches an exception that arrives in the very
+			// clock of the release, when fp_bg is not set yet.
 			if (HAS_FPU != 0 && fp_exc_req &&
-			    (fp_bg || (ph == P_FPU && st.disp && st.fin && !fp_cr && !fp_mvm && !fp_sv && !fp_rs && !fp_cnd && !fp_ae))) begin
+			    ph == P_FPU && st.disp && st.fin && !fp_cr && !fp_mvm && !fp_sv && !fp_rs && !fp_cnd && !fp_ae) begin
 				fp_bg   <= 1'b0;
 				fp_pend <= 1'b1;
 				fp_pvec <= fp_exc_vec;
@@ -2847,12 +2998,7 @@ always @(posedge clk) begin
 			// enables the unit now holds (lib/AP68040 S_FREST_UD/BD) -- the clock
 			// after the frame's last longword, when the unit has installed it --
 			// unless the frame restarts the unit (CU_SAVEPC $FE), whose command
-			// may raise its own
-			if (HAS_FPU != 0 && fp_rarm) begin
-				fp_rarm <= 1'b0;
-				fp_pend <= fp_fr_e1pend && !(fr_busy && fp_fr_resume);
-				fp_pvec <= fp_cur_vec;
-			end
+			// may raise its own.  (fp_rarm: at the top of this block.)
 			if (aerr_dbl || wf_dbl) ph <= P_HALT;
 			if (ph != P_RTE && eac_v_use && cm_hit && (st.fin || st.exc_go || st0.mm_go)) cm_v <= 1'b0;
 			if (st.fin) begin

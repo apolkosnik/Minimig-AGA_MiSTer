@@ -163,6 +163,7 @@ typedef struct packed {
 	// this bit carries the rest -- the `t0_special` list, copied verbatim from
 	// the reference core, plus the FP forms that set its `t0_force`.
 	logic        t0sync;
+	logic        fpiar;        // CL_EXC: the fault records FPIAR first (a rejected FP source EA)
 } id_t;
 
 typedef struct packed {

@@ -5148,6 +5148,19 @@ soak_done:
 	move.l	(fp_exc_ea).l,d0
 	chkl	d0,$32A0,306
 
+	; ... and into a DATA register: a float-format store writes Dn first
+	; and then traps with EA 0 (the reference's fp_stdn arm; WinUAE
+	; put_fp_value, then fpsr_check_arithmetic_exception)
+	move.l	#$12345678,d4
+	move.l	#-1,(fp_exc_ea).l
+	fmove.l	#$1000,fpcr	; enable OVFL
+	fmove.s	fp1,d4		; +inf into D4, then v53 post
+	fmove.l	#0,fpcr
+	chkcnt	cnt_fpovfl,2,715
+	chkl	d4,$7F800000,716
+	move.l	(fp_exc_ea).l,d0
+	chkl	d0,0,717
+
 ;--------------------------------------- FSAVE pending-exception frames
 ; An e1-class deferred exception (here: enabled SNAN from a released
 ; load) is EXTRACTED by FSAVE as a $41/$30 frame instead of trapping,
@@ -5242,7 +5255,439 @@ soak_done:
 	chkcnt	cnt_fpovfl,1,322
 	fmove.l	#0,fpcr
 
+;=========== memory-indirect operands in every FP form, and the EA rules
+; next to them.  Each operand below is reached ONLY through its pointer,
+; so a core that uses the pointer's address as the operand's, or refuses
+; the form (the pipelined core's decoder used to give every memory-indirect
+; FP instruction the format-$4 frame), fails here.  The last of the block
+; is FSAVE/FRESTORE, because a NULL frame resets the FPU.
+;   $3C00 -> $3C40  FMOVE out (and the pending-exception source)
+;   $3C04 -> $3C60  pre-indexed FMOVE out
+;   $3C08 -> $3C80  post-indexed FMOVE.X out and back
+;   $3C0C -> $3CA0  FSAVE / FRESTORE
+;   $3C10 -> $3D00  FMOVEM, static and dynamic lists
+;   $3C14 -> $3D40  control registers
+;   $3C18 -> $3D60  FScc
+;   $3C1C -> $3D70  an address-register base
+fl_resume	equ	$3C20	; h_flres: where to resume
+fl_fv		equ	$3C24	; ... and the format/vector word it saw
+	move.l	#$3C40,($3C00).l
+	move.l	#$3C60,($3C04).l
+	move.l	#$3C80,($3C08).l
+	move.l	#$3CA0,($3C0C).l
+	move.l	#$3D00,($3C10).l
+	move.l	#$3D40,($3C14).l
+	move.l	#$3D60,($3C18).l
+	move.l	#$3D70,($3C1C).l
+	lea	($3C40).l,a0
+	move.w	#($3D80-$3C40)/4-1,d0
+fpmi_clr:
+	move.l	#$A5A5A5A5,(a0)+
+	dbra	d0,fpmi_clr
+
+	; FMOVE FPn,<ea> (opclass 011) through a pointer, three ways
+	fmove.l	#1234,fp2
+	fmove.l	fp2,([$3C00.w])
+	move.l	($3C40).l,d0
+	chkl	d0,1234,666
+	moveq	#1,d1
+	fmove.w	fp2,([$3C00.w,d1.w*4],2)	; pre-indexed: [$3C04] + 2
+	move.l	($3C60).l,d0
+	chkl	d0,$A5A504D2,667	; the word at $3C62, nothing else
+	fmove.x	fp2,([$3C08.w],d1.w*4)	; post-indexed: [$3C08] + 4
+	move.l	($3C80).l,d0
+	chkl	d0,$A5A5A5A5,668	; the pointer's target is not the EA
+	move.l	($3C84).l,d0
+	chkl	d0,$40090000,669	; 1234 extended
+	move.l	($3C88).l,d0
+	chkl	d0,$9A400000,670
+	move.l	($3C8C).l,d0
+	chkl	d0,0,671
+	lea	($3C00).l,a2
+	fmove.s	fp2,([$1C,a2])		; base register: [$3C1C]
+	move.l	($3D70).l,d0
+	chkl	d0,$449A4000,672	; 1234 single
+	; ... and a twelve-byte SOURCE back through the same pointer
+	fmove.x	([$3C08.w],d1.w*4),fp3
+	fmove.l	fp3,d0
+	chkl	d0,1234,673
+
+	; FScc <ea>: one byte at the pointed-to address
+	fcmp.l	#1234,fp2
+	fseq	([$3C18.w])
+	fsne	([$3C18.w],1)
+	move.l	($3D60).l,d0
+	chkl	d0,$FF00A5A5,674
+
+	; FMOVE(M) control registers, both directions
+	fmove.l	#$10,fpcr
+	fmove.l	fpcr,([$3C14.w])
+	move.l	#$20,($3D44).l
+	fmove.l	([$3C14.w],4),fpcr
+	fmove.l	fpcr,d0
+	chkl	d0,$20,675
+	move.l	($3D40).l,d0
+	chkl	d0,$10,676
+	fmove.l	#0,fpsr
+	fmovem.l	fpcr/fpsr,([$3C14.w],8)	; FPCR at $3D48, FPSR at $3D4C
+	move.l	($3D48).l,d0
+	chkl	d0,$20,677
+	move.l	($3D4C).l,d0
+	chkl	d0,0,678
+	fmove.l	#0,fpcr
+
+	; FMOVEM of the data registers: a static list out and back, then a
+	; dynamic one (its mask in D2; bit 7 = FP0 for this mode)
+	fmove.l	#-5,fp3
+	fmovem.x	fp2/fp3,([$3C10.w])
+	move.l	($3D00).l,d0
+	chkl	d0,$40090000,679	; FP2 = 1234 first
+	move.l	($3D0C).l,d0
+	chkl	d0,$C0010000,680	; FP3 = -5 next
+	fmovem.x	([$3C10.w]),fp4/fp5
+	fmove.l	fp4,d0
+	chkl	d0,1234,681
+	fmove.l	fp5,d0
+	chkl	d0,-5,682
+	fmove.l	#77,fp6
+	moveq	#$02,d2			; FP6
+	fmovem.x	d2,([$3C10.w],24)
+	move.l	($3D18).l,d0
+	chkl	d0,$40050000,683	; 77 extended
+	move.l	($3D1C).l,d0
+	chkl	d0,$9A000000,684
+	moveq	#$01,d2			; FP7
+	fmovem.x	([$3C10.w],24),d2
+	fmove.l	fp7,d0
+	chkl	d0,77,685
+
+	; A pending exception is taken IN FRONT OF a memory-indirect FP
+	; instruction (pre-instruction, format $0, its own PC), and the
+	; instruction then runs from the start after the RTE: the reference
+	; checks the pend before it evaluates the EA.  (Same pend as tests
+	; 318-322: an enabled OVFL on a released single-precision multiply.)
+	move.l	#4321,($3C40).l
+	fmove.l	#$7FFFFFFF,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1
+	fmul.x	fp1,fp1
+	fmove.l	#$1040,fpcr
+	clr.w	(cnt_fpovfl).l
+	fmul.x	fp1,fp1		; released; OVFL pends
+	fmove.l	([$3C00.w]),fp6	; the pend is delivered here, then this runs
+	chkcnt	cnt_fpovfl,1,686
+	fmove.l	#0,fpcr
+	fmove.l	fp6,d0
+	chkl	d0,4321,687
+
+	; Effective addresses the 68040 rejects: the plain F-line (format $0,
+	; the instruction's own PC) with nothing written.  h_flres records the
+	; frame word and resumes at fl_resume, because some of these are
+	; longer than the four bytes h_fpline steps over.
+	move.l	#h_flres,($2C).w
+	; FMOVE FPn,(d16,PC): PC-relative is not alterable
+	lea	fl_r1(pc),a0
+	move.l	a0,(fl_resume).l
+	move.w	#-1,(fl_fv).l
+	fmove.l	#5,fp0
+	dc.w	$F23A,$6000,fl_tgt-*	; fmove.l fp0,(fl_tgt,pc)
+	failt	688
+fl_r1:
+	moveq	#0,d0
+	move.w	(fl_fv).l,d0
+	chkl	d0,$002C,689
+	move.l	fl_tgt(pc),d0
+	chkl	d0,$A5A5A5A5,690
+	; ... nor is PC memory-indirect ([PC]): the decoder must not admit it
+	; now that memory-indirect stores are sequenced
+	lea	fl_r2(pc),a0
+	move.l	a0,(fl_resume).l
+	move.w	#-1,(fl_fv).l
+	dc.w	$F23B,$6000,$0151	; fmove.l fp0,([PC])
+	failt	691
+fl_r2:
+	moveq	#0,d0
+	move.w	(fl_fv).l,d0
+	chkl	d0,$002C,692
+	; An opclass 011 store's low seven bits are its k-factor, not an
+	; opmode: a rejected destination is the F-line whatever they hold
+	; ($10 would be FETOX, an FPSP opmode), and FPIAR is not written
+	; (WinUAE put_fp_value returns 0 -> fpu_noinst; the reference's
+	; go_fp_fline)
+	fmove.l	#-1,fpiar
+	lea	fl_r3(pc),a0
+	move.l	a0,(fl_resume).l
+	move.w	#-1,(fl_fv).l
+	dc.w	$F208,$6810		; fmove.x fp0,a0 {k=$10}
+	failt	693
+fl_r3:
+	moveq	#0,d0
+	move.w	(fl_fv).l,d0
+	chkl	d0,$002C,694
+	fmove.l	fpiar,d0
+	chkl	d0,-1,695
+	lea	fl_r4(pc),a0
+	move.l	a0,(fl_resume).l
+	move.w	#-1,(fl_fv).l
+	dc.w	$F200,$7410		; fmove.d fp0,d0 {k=$10}
+	failt	696
+fl_r4:
+	moveq	#0,d0
+	move.w	(fl_fv).l,d0
+	chkl	d0,$002C,697
+	; A PACKED Dn source is the F-line even with an FPSP opmode: WinUAE's
+	; get_fp_value returns before fault_if_unimplemented_680x0 for it
+	; (an extended or double Dn source takes the FPSP route instead)
+	lea	fl_r5(pc),a0
+	move.l	a0,(fl_resume).l
+	move.w	#-1,(fl_fv).l
+	dc.w	$F200,$4C0E		; fsin.p d0,fp0
+	failt	698
+fl_r5:
+	moveq	#0,d0
+	move.w	(fl_fv).l,d0
+	chkl	d0,$002C,699
+	move.l	#h_fpunimp,($2C).w
+
+	; A PACKED STORE into a data register is the datatype fault, like one
+	; into memory, and not the F-line: the format is classified before the
+	; effective address (WinUAE put_fp_value's -2 return; the reference's
+	; opclass 011 Dn arm).  With no addressable destination the format-$3
+	; EA field is zero; Dn is not written; the FPSP gets its BUSY frame.
+	clr.l	(unsup_resume).l
+	clr.w	(cnt_fpunsup).l
+	fmove.l	#7,fp0
+	move.l	#$5A5A5A5A,d1
+	move.l	#-1,(unsup_fa).l
+fpk_st:
+	dc.w	$F201,$6C00		; fmove.p fp0,d1{#0}
+	chkcnt	cnt_fpunsup,1,700
+	chkl	d1,$5A5A5A5A,701
+	move.l	(unsup_fa).l,d0
+	chkl	d0,0,702
+	move.l	(unsup_fhdr).l,d0
+	chkl	d0,$41600000,703
+	move.l	(unsup_fsave+64).l,d0
+	chkl	d0,$6C000000,704	; CMDREG1B: the static packed store
+	move.l	(unsup_fsave+40).l,d0
+	chkl	d0,fpk_st,705		; FPIARCU: this instruction
+	move.l	#-1,(unsup_fa).l
+	moveq	#-1,d0
+fpk_dy:
+	dc.w	$F201,$7C00		; fmove.p fp0,d1{d0}
+	chkcnt	cnt_fpunsup,2,706
+	chkl	d1,$5A5A5A5A,707
+	move.l	(unsup_fa).l,d0
+	chkl	d0,0,708
+	move.l	(unsup_fsave+64).l,d0
+	chkl	d0,$7C000000,709	; CMDREG1B: the dynamic packed store
+	move.l	(unsup_fsave+40).l,d0
+	chkl	d0,fpk_dy,710
+
+	; FSAVE and FRESTORE through a pointer.  The FPU has been used, so
+	; FSAVE writes the four-byte IDLE frame there; FRESTORE of a NULL frame
+	; read through it resets the FPU, and of an IDLE one brings it back.
+	fsave	([$3C0C.w])
+	move.l	($3CA0).l,d0
+	chkl	d0,$41000000,711
+	move.l	($3CA4).l,d0
+	chkl	d0,$A5A5A5A5,712	; four bytes, no more
+	clr.l	($3CA0).l
+	frestore	([$3C0C.w])
+	lea	($3CB0).l,a4
+	fsave	(a4)
+	move.l	($3CB0).l,d0
+	chkl	d0,0,713		; NULL: the reset happened
+	move.l	#$41000000,($3CA0).l
+	frestore	([$3C0C.w])
+	fsave	(a4)
+	move.l	($3CB0).l,d0
+	chkl	d0,$41000000,714
+
+;=========== FPIAR: which instructions record it.  The 68040 writes FPIAR
+; for every command the unit takes, and for a SOURCE effective address it
+; rejects (An, a double or packed Dn) -- the command was recognised before
+; the EA was judged.  It does not for the conditionals (FScc, FDBcc,
+; FTRAPcc, FBcc: the 68040 cputest corpus, Basic/FScc, FDBcc and FTRAPcc,
+; expects FPIAR untouched by every one of them; WinUAE's fpuop_scc/dbcc
+; never write it and fpuop_trapcc/bcc only on a 68060), FNOP, FMOVEM, the
+; control-register moves, FSAVE, or a rejected STORE destination (324-325
+; above).  Each check preloads -1.
+	fmove.l	#-1,fpiar
+	fseq	d1
+	fmove.l	fpiar,d0
+	chkl	d0,-1,718
+	fmove.l	#-1,fpiar
+	moveq	#0,d4
+fpi_dbcc:
+	fdbf	d4,fpi_dbcc1
+fpi_dbcc1:
+	fmove.l	fpiar,d0
+	chkl	d0,-1,719
+	fmove.l	#-1,fpiar
+	dc.w	$F27C,$0000	; ftrapf: never traps, leaves FPIAR
+	fmove.l	fpiar,d0
+	chkl	d0,-1,720
+	fmove.l	#-1,fpiar
+	fbne.w	fpi_bcc1	; FBcc leaves it (taken or not, the target is next)
+fpi_bcc1:
+	fmove.l	fpiar,d0
+	chkl	d0,-1,721
+	fmove.l	#-1,fpiar
+	fnop
+	fmove.l	fpiar,d0
+	chkl	d0,-1,722
+	fmove.l	#-1,fpiar
+	fmovem.x	fp0/fp1,($3CC0).l
+	fmove.l	fpiar,d0
+	chkl	d0,-1,723
+	fmove.l	#-1,fpiar
+	fmove.l	#0,fpcr
+	fmove.l	fpiar,d0
+	chkl	d0,-1,724
+	fmove.l	#-1,fpiar
+	fsave	($3CD0).l
+	fmove.l	fpiar,d0
+	chkl	d0,-1,725
+	; rejected sources: FPIAR first, then the F-line (h_fpline skips 4)
+	move.w	(cnt_fpline).l,d5
+	fmove.l	#-1,fpiar
+fpi_an:
+	dc.w	$F208,$5898	; fabs.b a0,fp1: An source
+	fmove.l	fpiar,d0
+	chkl	d0,fpi_an,726
+	fmove.l	#-1,fpiar
+fpi_dd:
+	dc.w	$F200,$5498	; fabs.d d0,fp1: Dn cannot hold a double
+	fmove.l	fpiar,d0
+	chkl	d0,fpi_dd,727
+	fmove.l	#-1,fpiar
+fpi_dp:
+	dc.w	$F200,$4C0E	; fsin.p d0,fp0: packed Dn source, FPSP opmode
+	fmove.l	fpiar,d0
+	chkl	d0,fpi_dp,728
+	move.w	(cnt_fpline).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,3,729		; the three F-lines were taken
+	; ... and a rejected STORE destination still leaves it (324-325)
+	fmove.l	#-1,fpiar
+	dc.w	$F208,$6000	; fmove.l fp0,a0
+	fmove.l	fpiar,d0
+	chkl	d0,-1,730
+	subq.w	#4,(cnt_fpline).l	; keep the absolute counts intact
+
+;=========== FScc into memory: the byte goes to the effective address and a
+; (An)+ / -(An) steps ONCE, by one (two on A7).  The pipelined core carried
+; the EA as source AND destination and EA-calc, seeing MOVE (An)+,(An)+,
+; wrote the byte at An+1 and stepped An twice (cputest Basic/FScc).
+	fmove.l	#0,fp0		; Z set: FSEQ is true, FSNE false
+	move.l	#$11111111,($3CE0).l
+	lea	($3CE0).l,a3
+	fseq	(a3)+
+	move.l	a3,d0
+	chkl	d0,$3CE1,731
+	move.l	($3CE0).l,d0
+	chkl	d0,$FF111111,732	; one byte, at the old An
+	fsne	-(a3)
+	move.l	a3,d0
+	chkl	d0,$3CE0,733
+	move.l	($3CE0).l,d0
+	chkl	d0,$00111111,734
+	move.l	sp,d2
+	subq.l	#4,sp
+	fseq	(sp)+			; A7 keeps its alignment: +2
+	move.l	sp,d0
+	sub.l	d2,d0
+	chkl	d0,-2,735
+	move.l	d2,sp
+	fseq	-(sp)
+	move.l	sp,d0
+	sub.l	d2,d0
+	chkl	d0,-2,736
+	move.l	d2,sp
+
+;=========== FMOVEM with an EMPTY register list transfers nothing and leaves
+; An alone, static or dynamic, load or store (WinUAE's fmovem2fpp/2mem with
+; list 0; cputest Basic/FPP's dynamic form).  This core used to walk one
+; register: mv_bit() of a zero mask names a register, and decode gives a
+; dynamic list one register's step.
+	moveq	#0,d1
+	fmove.l	#5,fp1
+	move.l	#$33333333,($3CEC).l
+	lea	($3CF0).l,a3
+	dc.w	$F21B,$D810	; fmovem.x (a3)+,<d1>: dynamic, empty, load
+	move.l	a3,d0
+	chkl	d0,$3CF0,737
+	fmove.l	fp1,d0
+	chkl	d0,5,738		; nothing loaded
+	dc.w	$F223,$E000	; fmovem.x <none>,-(a3): static, empty, store
+	move.l	a3,d0
+	chkl	d0,$3CF0,739
+	move.l	($3CEC).l,d0
+	chkl	d0,$33333333,740	; nothing stored
+	dc.w	$F223,$E810	; fmovem.x <d1>,-(a3): dynamic, empty, store
+	move.l	a3,d0
+	chkl	d0,$3CF0,741
+
+;=========== T0 and a taken FBcc / FDBcc whose target faults: the trace is
+; taken at the target FIRST (vector 9, format $2, the target's PC), and the
+; target's own exception follows the trace handler's return.  This core used
+; to yield the trace to the target's exception (cputest Basic/FBcc and
+; FDBcc: "expected 9 got 4", every T0 round branches into an ILLEGAL).
+	move.l	#h_trace9,($24).l
+	clr.w	(cnt_trc9).l
+	move.w	(cnt_fpline).l,d5
+	move.w	#$0000,-(sp)
+	pea	(t0fb_site).l
+	move.w	#$6000,-(sp)	; S set, T0 set: the branch is a change of flow
+	rte
+t0fb_site:
+	fbt.w	t0fb_tgt
+	failt	742			; not taken?
+t0fb_tgt:
+	dc.w	$F208,$6000	; fmove.l fp0,a0: the F-line at the target
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,743		; one trace (h_trace9 cleared T0)...
+	move.l	(trc9_pc).l,d0
+	chkl	d0,t0fb_tgt,744	; ...with the TARGET stacked
+	move.w	(cnt_fpline).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,745		; and then the target's F-line
+	clr.w	(cnt_trc9).l
+	moveq	#5,d4
+	move.w	#$0000,-(sp)
+	pea	(t0fd_site).l
+	move.w	#$6000,-(sp)
+	rte
+t0fd_site:
+	fdbf	d4,t0fd_tgt	; taken: D4 counts 5 -> 4
+	failt	746
+t0fd_tgt:
+	dc.w	$F208,$6000
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,747
+	move.l	(trc9_pc).l,d0
+	chkl	d0,t0fd_tgt,748
+	move.w	(cnt_fpline).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,2,749
+	move.l	d4,d0
+	chkl	d0,4,750
+	subq.w	#2,(cnt_fpline).l	; keep the absolute counts intact
+
 	jmp	audit_return
+
+; vector 11 for the rejected-EA checks above: record the frame word and
+; resume where the test says
+h_flres:
+	move.w	6(sp),(fl_fv).l
+	move.l	(fl_resume).l,2(sp)
+	rte
+fl_tgt:
+	dc.l	$A5A5A5A5	; test 690's would-be store target
 
 ; level-2 autovector: the task-switch idiom around a possibly-active
 ; background FPU op -- FSAVE gates on quiescence, FRESTORE rearms

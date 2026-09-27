@@ -132,10 +132,21 @@ module ap040_fpu
 // architectural state
 //---------------------------------------------------------------------------
 
-// FP registers as the 80 significant bits: {sign, exp[14:0], man[63:0]}
+// FP registers as the 80 significant bits: {sign, exp[14:0], man[63:0]},
+// in an MLAB register file with two flow-through read views (the FSM core's
+// ap040_fp_regfile, below, brought over with its pending-write hold): view A
+// serves the dispatch's src_r and, whenever no command is being dispatched,
+// the core's FMOVEM port; view B serves dst_r at dispatch and r_dst after
+// it, which is the same register once r_dst has been loaded.  Reset and
+// FRESTORE NULL clear fr_valid instead of writing 640 bits of default NaN,
+// and an invalid register reads as that NaN.  These arrays are SIMULATION
+// MIRRORS of the bank, for benches that read them hierarchically: nothing in
+// the datapath reads them, so synthesis prunes them.  (As flip-flops they
+// were 640 registers and three 80-bit 8:1 read muxes.)
 reg        fr_s [0:7];
 reg [14:0] fr_e [0:7];
 reg [63:0] fr_m [0:7];
+reg  [7:0] fr_valid;
 
 reg [31:0] fpcr;                  // [15:8] enables, [7:6] prec, [5:4] rnd
 reg [31:0] fpsr;                  // [27:24] cc, [23:16] quot, [15:8] exc, [7:3] aexc
@@ -149,8 +160,6 @@ assign cr_rdata = (cr_sel == 2'd0) ? fpiar :
                   (cr_sel == 2'd1) ? fpsr : fpcr;
 assign bsun_enable = fpcr[15];
 
-// raw FMOVEM image: X format memory layout {s, e, 16'b0, m}
-assign fm_rdata = {fr_s[fm_sel], fr_e[fm_sel], 16'd0, fr_m[fm_sel]};
 
 //---------------------------------------------------------------------------
 // unpacked working format
@@ -557,6 +566,43 @@ task capture_datatype;
 	end
 endtask
 
+// The register file's read views (valid-masked) and its single write port:
+// an FMOVEM restore, or the F_WB result under exactly the conditions of the
+// writeback branch there (no enabled exception; not FCMP, not FTST).  The
+// core cannot dispatch FMOVEM while the unit is in F_WB; the explicit
+// priority keeps the old procedural order if that is ever violated.
+wire        fr_wb_we = (fst == {1'b0, F_WB}) && !(|(fpsr[15:8] & fpcr[15:8])) &&
+                       (r_op != 7'h38) && (r_op != 7'h3A);
+wire [14:0] fr_wb_e  = (a_t == T_ZERO) ? 15'd0 :
+                       (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF : a_e[14:0];
+// Infinity keeps whatever mantissa the operation left in a_m: created
+// infinities carry all-zero bits and pass-through infinities keep the
+// operand's raw image (inf_clear_intbit is a 68060 flag, not 68040).
+wire [63:0] fr_wb_m  = (a_t == T_ZERO) ? 64'd0 : a_m;
+wire        fr_bank_we = fm_we || fr_wb_we;
+wire  [2:0] fr_bank_wa = fr_wb_we ? r_dst : fm_sel;
+wire [79:0] fr_bank_wd = fr_wb_we ? {a_s, fr_wb_e, fr_wb_m}
+                                  : {fm_wdata[95], fm_wdata[94:80], fm_wdata[63:0]};
+wire  [2:0] fr_ra = req ? src_r : fm_sel;               // dispatch, else the FMOVEM port
+wire  [2:0] fr_rb = (fst == {1'b0, F_IDLE}) ? dst_r : r_dst;    // dispatch, else the latched destination
+wire [79:0] fr_a_raw, fr_b_raw;
+ap040_fp_regfile fpregs
+(
+	.clk(clk), .ce(ce), .we(fr_bank_we),
+	.waddr(fr_bank_wa), .wdata(fr_bank_wd),
+	.raddr_a(fr_ra), .rdata_a(fr_a_raw),
+	.raddr_b(fr_rb), .rdata_b(fr_b_raw)
+);
+wire        fr_a_s = fr_valid[fr_ra] ? fr_a_raw[79]    : 1'b0;
+wire [14:0] fr_a_e = fr_valid[fr_ra] ? fr_a_raw[78:64] : 15'h7FFF;
+wire [63:0] fr_a_m = fr_valid[fr_ra] ? fr_a_raw[63:0]  : 64'hFFFF_FFFF_FFFF_FFFF;
+wire        fr_b_s = fr_valid[fr_rb] ? fr_b_raw[79]    : 1'b0;
+wire [14:0] fr_b_e = fr_valid[fr_rb] ? fr_b_raw[78:64] : 15'h7FFF;
+wire [63:0] fr_b_m = fr_valid[fr_rb] ? fr_b_raw[63:0]  : 64'hFFFF_FFFF_FFFF_FFFF;
+// raw FMOVEM image: X format memory layout {s, e, 16'b0, m} -- view A,
+// whose address is fm_sel whenever no command is being dispatched
+assign fm_rdata = {fr_a_s, fr_a_e, 16'd0, fr_a_m};
+
 integer k;
 
 always @(posedge clk) begin
@@ -587,7 +633,9 @@ always @(posedge clk) begin
 		qv <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0;
 		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
 		// FP0-FP7 reset to the default nonsignaling NaN: positive,
-		// exponent $7FFF, mantissa all ones (WinUAE fpu_reset/fpnan)
+		// exponent $7FFF, mantissa all ones (WinUAE fpu_reset/fpnan) --
+		// by invalidating them; the mirrors take the value itself
+		fr_valid <= 8'd0;
 		for (k = 0; k < 8; k = k + 1) begin
 			fr_s[k] <= 0; fr_e[k] <= 15'h7FFF;
 			fr_m[k] <= 64'hFFFF_FFFF_FFFF_FFFF;
@@ -616,11 +664,16 @@ always @(posedge clk) begin
 			fpsr[7] <= 1;
 			fpu_used <= 1;
 		end
-		if (fm_we) begin
-			fr_s[fm_sel] <= fm_wdata[95];
-			fr_e[fm_sel] <= fm_wdata[94:80];
-			fr_m[fm_sel] <= fm_wdata[63:0];
-			fpu_used <= 1;
+		if (fm_we) fpu_used <= 1;
+		// the register file's one write port (fr_bank_*, below the state
+		// declarations): an FMOVEM restore or the F_WB result.  The bank
+		// itself takes it a clock later (its pending-write hold); the
+		// validity and the mirrors take it here.
+		if (fr_bank_we) begin
+			fr_valid[fr_bank_wa] <= 1'b1;
+			fr_s[fr_bank_wa] <= fr_bank_wd[79];
+			fr_e[fr_bank_wa] <= fr_bank_wd[78:64];
+			fr_m[fr_bank_wa] <= fr_bank_wd[63:0];
 		end
 		if (pend_capture) begin : pcap
 			// A released op's enabled exception was just deferred by the
@@ -683,6 +736,7 @@ always @(posedge clk) begin
 			fstate_busy <= 0;
 			// FRESTORE of a NULL frame returns the FPU to the reset
 			// state, data registers included (WinUAE fpu_null)
+			fr_valid <= 8'd0;
 			for (k = 0; k < 8; k = k + 1) begin
 				fr_s[k] <= 0; fr_e[k] <= 15'h7FFF;
 				fr_m[k] <= 64'hFFFF_FFFF_FFFF_FFFF;
@@ -807,24 +861,24 @@ always @(posedge clk) begin
 					if (src_fmt == 3'd3 || src_fmt == 3'd7) begin
 						unsupp <= 1;
 						capture_datatype({op_class, src_fmt, dst_r, opmode},
-						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
-						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						    frame_tag_x(fr_a_e, fr_a_m),
+						    {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						    frame_tag_x(fr_a_e, fr_a_m),
 						    1'b1, 1'b1);   // T, packed -> E1
 					end
-					else if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
+					else if (unsupported_x(fr_a_e, fr_a_m)) begin
 						unsupp <= 1;
 						capture_datatype({op_class, src_fmt, dst_r, opmode},
-						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
-						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
+						    {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						    frame_tag_x(fr_a_e, fr_a_m),
+						    {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						    frame_tag_x(fr_a_e, fr_a_m),
 						    1'b1, 1'b0);   // T, not packed
 					end
 					else begin
 						{a_s, a_e, a_m, a_t} <=
-							unpack_x(fr_s[src_r], fr_e[src_r], fr_m[src_r]);
+							unpack_x(fr_a_s, fr_a_e, fr_a_m);
 						fst <= F_SRC;   // F_SRC routes stores via r_op = STORE
 						r_op <= 7'h7F;  // internal: store
 					end
@@ -832,16 +886,16 @@ always @(posedge clk) begin
 				else if (op_class == 3'b010 && src_fmt == 3'd7) begin : save_fmovecr
 					capture_unimp({op_class, src_fmt, dst_r, opmode},
 					               96'd0, 3'd1,
-					               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
-					               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+					               {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+					               frame_tag_x(fr_b_e, fr_b_m));
 				end
 				else if (!op_in_hw(opmode)) begin : save_unimp_command
 					if (op_class == 3'b000) begin
 						capture_unimp({op_class, src_fmt, dst_r, opmode},
-						               {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						               frame_tag_x(fr_e[src_r], fr_m[src_r]),
-						               {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
-						               frame_tag_x(fr_e[dst_r], fr_m[dst_r]));
+						               {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						               frame_tag_x(fr_a_e, fr_a_m),
+						               {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+						               frame_tag_x(fr_b_e, fr_b_m));
 					end
 					else if (src_fmt == 3'd3) begin
 						// (upstream a8a50ce) Packed operands use the same split
@@ -861,20 +915,20 @@ always @(posedge clk) begin
 					end
 				end
 				else if (op_class == 3'b000) begin
-					if (unsupported_x(fr_e[src_r], fr_m[src_r])) begin
+					if (unsupported_x(fr_a_e, fr_a_m)) begin
 						unsupp <= 1;
 						// OPCLASS 000: source in ETEMP; a dyadic op also
 						// carries its destination in FPTEMP
 						capture_datatype({op_class, src_fmt, dst_r, opmode},
-						    {fr_s[src_r], fr_e[src_r], 16'd0, fr_m[src_r]},
-						    frame_tag_x(fr_e[src_r], fr_m[src_r]),
-						    {fr_s[dst_r], fr_e[dst_r], 16'd0, fr_m[dst_r]},
-						    frame_tag_x(fr_e[dst_r], fr_m[dst_r]),
+						    {fr_a_s, fr_a_e, 16'd0, fr_a_m},
+						    frame_tag_x(fr_a_e, fr_a_m),
+						    {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+						    frame_tag_x(fr_b_e, fr_b_m),
 						    1'b0, 1'b0);
 					end
 					else begin
 					{a_s, a_e, a_m, a_t} <=
-						unpack_x(fr_s[src_r], fr_e[src_r], fr_m[src_r]);
+						unpack_x(fr_a_s, fr_a_e, fr_a_m);
 					fst <= F_EXEC;
 					end
 				end
@@ -1143,9 +1197,9 @@ always @(posedge clk) begin
 										    {3'b010, r_fmt, r_dst, r_op},
 										    {r_din[95], 15'h3F80, 16'd0,
 										     1'b0, r_din[86:64], 40'd0}, 3'd5,
-										    {fr_s[r_dst], fr_e[r_dst], 16'd0,
-										     fr_m[r_dst]},
-										    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+										    {fr_b_s, fr_b_e, 16'd0,
+										     fr_b_m},
+										    frame_tag_x(fr_b_e, fr_b_m),
 										    1'b0, 1'b0);
 										fst <= F_IDLE;
 									end
@@ -1195,9 +1249,9 @@ always @(posedge clk) begin
 										    {3'b010, r_fmt, r_dst, r_op},
 										    {r_din[95], 15'h3C00, 16'd0,
 										     1'b0, r_din[83:32], 11'd0}, 3'd5,
-										    {fr_s[r_dst], fr_e[r_dst], 16'd0,
-										     fr_m[r_dst]},
-										    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+										    {fr_b_s, fr_b_e, 16'd0,
+										     fr_b_m},
+										    frame_tag_x(fr_b_e, fr_b_m),
 										    1'b0, 1'b0);
 										fst <= F_IDLE;
 									end
@@ -1232,9 +1286,9 @@ always @(posedge clk) begin
 									    {r_din[95], r_din[94:80], 16'd0,
 									     r_din[63:0]},
 									    frame_tag_x(r_din[94:80], r_din[63:0]),
-									    {fr_s[r_dst], fr_e[r_dst], 16'd0,
-									     fr_m[r_dst]},
-									    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+									    {fr_b_s, fr_b_e, 16'd0,
+									     fr_b_m},
+									    frame_tag_x(fr_b_e, fr_b_m),
 									    1'b0, 1'b0);
 									fst <= F_IDLE;
 								end
@@ -1311,8 +1365,8 @@ always @(posedge clk) begin
 				if (r_unimp) begin
 					capture_unimp({3'b010, r_fmt, r_dst, r_op},
 					               {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
-					               {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
-					               frame_tag_x(fr_e[r_dst], fr_m[r_dst]));
+					               {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+					               frame_tag_x(fr_b_e, fr_b_m));
 					r_unimp <= 0;
 					fst <= F_IDLE;
 				end
@@ -1322,12 +1376,12 @@ always @(posedge clk) begin
 				// is taken before the arithmetic ever inspects a NaN, so the
 				// status byte stays clean.
 				else if (!r_resume && r_op == 7'h38 &&
-				    unsupported_x(fr_e[r_dst], fr_m[r_dst])) begin
+				    unsupported_x(fr_b_e, fr_b_m)) begin
 					unsupp <= 1;
 					capture_datatype({3'b010, r_fmt, r_dst, r_op},
 					    {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
-					    {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
-					    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+					    {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+					    frame_tag_x(fr_b_e, fr_b_m),
 					    1'b0, 1'b0);
 					fst <= F_IDLE;
 				end
@@ -1341,7 +1395,7 @@ always @(posedge clk) begin
 					fpsr[7] <= 1;
 				end
 				if (r_op == 7'h38 && (r_resume ? (b_t == T_NAN && !b_m[62])
-				                               : is_snan_x(fr_e[r_dst], fr_m[r_dst]))) begin
+				                               : is_snan_x(fr_b_e, fr_b_m))) begin
 					fpsr[14] <= 1;
 					fpsr[7] <= 1;
 				end
@@ -1368,7 +1422,7 @@ always @(posedge clk) begin
 						// already in b_* (F_RESTORE_B/N)
 						if (!r_resume)
 							{b_s, b_e, b_m, b_t} <=
-								unpack_x(fr_s[r_dst], fr_e[r_dst], fr_m[r_dst]);
+								unpack_x(fr_b_s, fr_b_e, fr_b_m);
 						op_kind <= (r_op == 7'h23 || r_op == 7'h27 ||
 						            r_op == 7'h63 || r_op == 7'h67) ? 4'd2 :
 						           (r_op == 7'h20 || r_op == 7'h24 ||
@@ -1385,8 +1439,8 @@ always @(posedge clk) begin
 					sh_cmd  <= {3'b010, r_fmt, r_dst, r_op};
 					sh_src  <= {a_s, a_e[14:0], 16'd0, a_m};
 					sh_stag <= r_stag;
-					sh_dst  <= {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]};
-					sh_dtag <= frame_tag_x(fr_e[r_dst], fr_m[r_dst]);
+					sh_dst  <= {fr_b_s, fr_b_e, 16'd0, fr_b_m};
+					sh_dtag <= frame_tag_x(fr_b_e, fr_b_m);
 				end
 				// FSUB family: fold the source sign
 				s_a = (op_kind == 4'd1 &&
@@ -1403,8 +1457,8 @@ always @(posedge clk) begin
 					unsupp <= 1;
 					capture_datatype({3'b010, r_fmt, r_dst, r_op},
 					    {a_s, a_e[14:0], 16'd0, a_m}, r_stag,
-					    {fr_s[r_dst], fr_e[r_dst], 16'd0, fr_m[r_dst]},
-					    frame_tag_x(fr_e[r_dst], fr_m[r_dst]),
+					    {fr_b_s, fr_b_e, 16'd0, fr_b_m},
+					    frame_tag_x(fr_b_e, fr_b_m),
 					    1'b0, 1'b0);
 					fst <= F_IDLE;
 				end
@@ -2018,7 +2072,7 @@ always @(posedge clk) begin
 				else if (r_op == 7'h38) begin : f_cmp
 					// FCMP: condition codes from FPn - source
 					du = r_resume ? {b_s, b_e, b_m, b_t}
-					              : unpack_x(fr_s[r_dst], fr_e[r_dst], fr_m[r_dst]);
+					              : unpack_x(fr_b_s, fr_b_e, fr_b_m);
 					ds = du[83];
 					dz = (du[1:0] == T_ZERO);
 					nan = (a_t == T_NAN) || (du[1:0] == T_NAN);
@@ -2067,16 +2121,9 @@ always @(posedge clk) begin
 				end
 				else begin
 					// writeback with condition codes, canonical encodings
-					// for the special classes
-					fr_s[r_dst] <= a_s;
-					fr_e[r_dst] <= (a_t == T_ZERO) ? 15'd0 :
-					               (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF :
-					                                                a_e[14:0];
-					// Infinity keeps whatever mantissa the operation left
-					// in a_m: created infinities carry all-zero bits and
-					// pass-through infinities keep the operand's raw image
-					// (inf_clear_intbit is a 68060 flag, not 68040).
-					fr_m[r_dst] <= (a_t == T_ZERO) ? 64'd0 : a_m;
+					// for the special classes -- the register write itself
+					// is fr_wb_we / fr_bank_*, this state's terms outside the
+					// state machine, into the bank's single port
 					fpsr[27:24] <= {a_s,
 					                (a_t == T_ZERO),
 					                (a_t == T_INF),
@@ -2286,6 +2333,65 @@ always @(posedge clk) begin
 
 			default: fst <= F_IDLE;
 		endcase
+	end
+end
+
+endmodule
+
+// Two mirrored simple-dual-port banks provide two asynchronous reads and one
+// synchronous write.  Cyclone V MLABs support flow-through reads; keeping the
+// memory alone in this module gives Quartus the canonical inference shape.
+module ap040_fp_regfile
+(
+	input             clk,
+	input             ce,
+	input             we,
+	input       [2:0] waddr,
+	input      [79:0] wdata,
+	input       [2:0] raddr_a,
+	output     [79:0] rdata_a,
+	input       [2:0] raddr_b,
+	output     [79:0] rdata_b
+);
+
+// READ DURING WRITE.  no_rw_check does not promise the accesses never
+// coincide -- it says the read data is undefined when they do, and asks the
+// fitter not to spend logic on it.  This file coincides constantly: counting
+// cycles where a read port sits on the register being written gives 1,329 in
+// t_fpu alone, 57 in t_fpu_resume, 6 in t_fpu_frames, the very first being a
+// write to FP0 with both read ports on FP0.
+//
+// The integer register file had the same shape and did not boot.  So the same
+// remedy: hold the write one enabled cycle and answer a read of the pending
+// address from pend_wdata, which discards exactly the datum the attribute
+// leaves undefined.  Reads are otherwise unchanged, and an MLAB is still
+// inferred because the attribute stays.  The hold also keeps the RAM's write
+// inputs registered, which matters on its own: see ap040_regfile for the
+// board result when the RAM was written straight from the datapath
+// (06d90f6fb, yellow screen) and the non-unate clock edge TimeQuest reports
+// for these cells.  Keep pend_* in front of the RAM.
+(* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_a [0:7];
+(* ramstyle = "MLAB, no_rw_check" *) reg [79:0] bank_b [0:7];
+
+reg        pend_we;
+reg  [2:0] pend_waddr;
+reg [79:0] pend_wdata;
+
+wire hit_a = pend_we && (pend_waddr == raddr_a);
+wire hit_b = pend_we && (pend_waddr == raddr_b);
+assign rdata_a = hit_a ? pend_wdata : bank_a[raddr_a];
+assign rdata_b = hit_b ? pend_wdata : bank_b[raddr_b];
+
+always @(posedge clk) begin
+	if (ce) begin
+		// the write held from the previous enabled cycle
+		if (pend_we) begin
+			bank_a[pend_waddr] <= pend_wdata;
+			bank_b[pend_waddr] <= pend_wdata;
+		end
+		pend_we    <= we;
+		pend_waddr <= waddr;
+		pend_wdata <= wdata;
 	end
 end
 
