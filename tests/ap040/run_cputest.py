@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Run the WinUAE 68040 cputest v20 corpus against AP040 RTL.
+--core pipe (the default here) drives rtl/ap040_ranzbak through
+tb_dat_replay_pipe.v; --core fsm drives rtl/ap040 through tb_dat_replay.v.
 
 Examples:
   # Fast representative gate (integer, FPU, IRQ, trace, AE, odd vectors)
@@ -59,6 +61,18 @@ RTL_SOURCES = [
     HERE / "sim_dpram.v",   # ap040_cache's tag RAM (Quartus uses rtl/bram.vhd)
     RTL / "ap040_fpu.v",
 ]
+# the pipelined core behind its reference-compatible wrapper (rtl/ap040_ranzbak)
+CORE_PIPE = REPO / "rtl" / "ap040_ranzbak"
+RTL_SOURCES_PIPE = [
+    CORE_PIPE / "ap040_pipe_pkg.sv",
+    *sorted(CORE_PIPE.glob("*.v")),
+    *sorted((CORE_PIPE / "compat").glob("*.v")),
+    HERE / "sim_dpram.v",
+]
+CORES = {
+    "fsm":  (HERE / "tb_dat_replay.v",      RTL_SOURCES,      [RTL]),
+    "pipe": (HERE / "tb_dat_replay_pipe.v", RTL_SOURCES_PIPE, [CORE_PIPE, CORE_PIPE / "compat"]),
+}
 
 SMOKE = [
     ("Default", "DIVS.W", "0001"),
@@ -237,13 +251,15 @@ def discover(root: Path, args) -> list[dict]:
     return slices
 
 
-def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params=()) -> Path:
-    sources = [HERE / "tb_dat_replay.v", *RTL_SOURCES]
+def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params=(),
+                core="pipe") -> Path:
+    bench, rtl_sources, includes = CORES[core]
+    sources = [bench, *rtl_sources]
     if params:
         force = True   # a different parameter set is a different simulator
     if simulator != "verilator":
         raise ValueError("unknown simulator %s" % simulator)
-    sim = work / "obj_dir" / "tb_dat_replay"
+    sim = work / ("obj_" + core) / "tb_dat_replay"
     if (not force and sim.exists() and
             sim.stat().st_mtime >= max(p.stat().st_mtime for p in sources)):
         return sim
@@ -259,7 +275,7 @@ def compile_rtl(work: Path, simulator: str, force=False, build_jobs=None, params
             "-CFLAGS", "-O3 -march=native",
             "-Wno-fatal", "-Wno-PINMISSING",
             "-Wno-WIDTHEXPAND", "-Wno-WIDTHTRUNC",
-            "-I" + str(RTL),
+            *["-I" + str(d) for d in includes],
         ]
         cmd += ["-G" + p for p in params]
         cmd += [str(p) for p in sources]
@@ -495,6 +511,8 @@ def parser():
     # the full 1911-slice corpus (7m09s vs 3h07m) for identical results --
     # same 1875/1911, same 36 failing slices.  Recorded for
     # cross-checking a suspicious result against a second simulator.
+    ap.add_argument("--core", choices=tuple(CORES), default="pipe",
+                    help="which core: pipe (rtl/ap040_ranzbak) or fsm (rtl/ap040)")
     ap.add_argument("--simulator", choices=("verilator",),
                     default="verilator", help="RTL simulation backend")
     ap.add_argument("--build-jobs", type=int,
@@ -541,7 +559,8 @@ def main(argv=None):
             run_work = args.work / "verilator"
             run_work.mkdir(parents=True, exist_ok=True)
             sim = compile_rtl(run_work, args.simulator, force=args.rebuild,
-                              build_jobs=args.build_jobs, params=args.param)
+                              build_jobs=args.build_jobs, params=args.param,
+                              core=args.core)
             if args.compile_only:
                 print("simulator:", sim)
                 return 0
