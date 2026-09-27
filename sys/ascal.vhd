@@ -543,12 +543,16 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_hpixq : arr_pixq(2 TO 8);
 	ATTRIBUTE ramstyle OF o_hpixq : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vpixq, o_vpixq_pre : arr_pix(0 TO 3);
+	SIGNAL o_vpix_past_end, o_vpix_at_end : boolean;
+	SIGNAL o_vpix_fracnn : std_logic;
 	SIGNAL o_vpix_outer : arr_pix(0 TO 2);
 	SIGNAL o_vpix_inner : arr_pix(0 TO 6);
 
 	SIGNAL o_vpe : std_logic;
 	SIGNAL o_div : arr_div(0 TO 2); --uint12;
 	SIGNAL o_dir : arr_frac(0 TO 2);
+	SIGNAL o_hdiv_last : unsigned(20 DOWNTO 0);
+	SIGNAL o_hdiv_last_size : unsigned(11 DOWNTO 0);
 	ATTRIBUTE ramstyle OF o_div, o_dir : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vdivi : unsigned(12 DOWNTO 0);
 	SIGNAL o_vdivr : unsigned(24 DOWNTO 0);
@@ -1016,6 +1020,9 @@ ARCHITECTURE rtl OF ascal IS
 	TYPE type_poly_t IS RECORD
 		r0,r1,b0,b1,g0,g1 : signed(26 DOWNTO 0);
 	END RECORD;
+	TYPE type_poly_sum IS RECORD
+		r,g,b : unsigned(18 DOWNTO 0);
+	END RECORD;
 
 	SIGNAL o_h_poly_mem : arr_uv40(0 TO 2**FRAC-1);
 	SIGNAL o_v_poly_mem : arr_uv40(0 TO 2**FRAC-1);
@@ -1030,9 +1037,11 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_poly_phase_b,o_poly_phase_b2,o_poly_phase_b3 : poly_phase_t;
 	SIGNAL o_v_poly_phase, o_v_poly_phase2, o_h_poly_phase, o_poly_phase, o_poly_phase1 : poly_phase_interp_t;
 	SIGNAL o_v_poly_pix, o_h_poly_pix, o_h_lum_pix, o_v_lum_pix : type_pix;
-	SIGNAL o_poly_lum, o_poly_lum1 : unsigned(7 DOWNTO 0);
+	SIGNAL o_poly_lum_pair : unsigned(15 DOWNTO 0);
+	SIGNAL o_poly_lum1 : unsigned(7 DOWNTO 0);
 	SIGNAL o_poly_lerp_ta, o_poly_lerp_tb : signed(9 DOWNTO 0);
 	SIGNAL o_h_poly_t,o_h_poly_t2,o_v_poly_t   : type_poly_t;
+	SIGNAL o_h_poly_sum,o_v_poly_sum : type_poly_sum;
 
 	SIGNAL o_v_poly_adaptive, o_h_poly_adaptive, o_v_poly_use_adaptive, o_h_poly_use_adaptive : std_logic;
 	SIGNAL poly_wr_mode : std_logic_vector(2 DOWNTO 0);
@@ -1070,12 +1079,21 @@ ARCHITECTURE rtl OF ascal IS
 		RETURN t;
 	END FUNCTION;
 
-	FUNCTION poly_final(t : type_poly_t) RETURN type_pix IS
+	FUNCTION poly_sum(t : type_poly_t) RETURN type_poly_sum IS
+		VARIABLE s : type_poly_sum;
+	BEGIN
+		s.r:=unsigned(t.r0(26 DOWNTO 8)+t.r1(26 DOWNTO 8));
+		s.g:=unsigned(t.g0(26 DOWNTO 8)+t.g1(26 DOWNTO 8));
+		s.b:=unsigned(t.b0(26 DOWNTO 8)+t.b1(26 DOWNTO 8));
+		RETURN s;
+	END FUNCTION;
+
+	FUNCTION poly_bound(s : type_poly_sum) RETURN type_pix IS
 		VARIABLE p : type_pix;
 	BEGIN
-		p.r:=bound(unsigned(t.r0(26 DOWNTO 8)+t.r1(26 DOWNTO 8)),15);
-		p.g:=bound(unsigned(t.g0(26 DOWNTO 8)+t.g1(26 DOWNTO 8)),15);
-		p.b:=bound(unsigned(t.b0(26 DOWNTO 8)+t.b1(26 DOWNTO 8)),15);
+		p.r:=bound(s.r,15);
+		p.g:=bound(s.g,15);
+		p.b:=bound(s.b,15);
 		RETURN p;
 	END FUNCTION;
 
@@ -1125,33 +1143,28 @@ ARCHITECTURE rtl OF ascal IS
 	END FUNCTION;
 
 
-	FUNCTION poly_lum(p : type_pix) RETURN unsigned IS
-		VARIABLE v : UNSIGNED(7 DOWNTO 0);
+	FUNCTION poly_lum_pair(p : type_pix) RETURN unsigned IS
+		VARIABLE rg : unsigned(7 DOWNTO 0);
 	BEGIN
-		-- 0.375 R + 0.5 G + 0.125 B
-		--v := ("00" & p.r(7 DOWNTO 2)) + ("000" & p.r(7 DOWNTO 3)) + ("0" & p.g(7 DOWNTO 1)) + ("000" & p.b(7 DOWNTO 3));
+		-- First maximum in C3; retain blue for the existing C4 stage.
+		IF p.r > p.g THEN rg := p.r; ELSE rg := p.g; END IF;
+		RETURN rg & p.b;
+	END FUNCTION;
 
-		-- 0.25 R + 0.5 G + 0.25 B
-		-- v := ( ("00" & p.r(7 DOWNTO 2)) + ("0" & p.g(7 DOWNTO 1)) + ("00" & p.b(7 DOWNTO 2)) );
-
-		-- Just OR them all together
-		--v := (p.r OR p.g OR p.b);
-
-		-- Maximum
-		IF p.r > p.g THEN
-			v := p.r;
+	FUNCTION poly_lum_finish(p : unsigned(15 DOWNTO 0)) RETURN unsigned IS
+	BEGIN
+		IF p(15 DOWNTO 8) > p(7 DOWNTO 0) THEN
+			RETURN p(15 DOWNTO 8);
 		ELSE
-			v := p.g;
+			RETURN p(7 DOWNTO 0);
 		END IF;
+	END FUNCTION;
 
-		IF p.b > v THEN
-			v := p.b;
-		END IF;
-
-		-- 100%
-		-- v := "1111111";
-
-		RETURN v;
+	FUNCTION last_pos(pos,total : natural) RETURN boolean IS
+	BEGIN
+		-- Same as pos+1 >= total for the 12-bit video counters, including
+		-- total=0. Keep the increment carry chain off the counter-to-control path.
+		RETURN total=0 OR pos >= (total+4095) MOD 4096;
 	END FUNCTION;
 BEGIN
 
@@ -1868,6 +1881,7 @@ BEGIN
 		VARIABLE hpix_v : type_pix;
 		VARIABLE hcarry_v,vcarry_v : boolean;
 		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESH-1;
+		VARIABLE hstep_v : natural RANGE 0 TO 4*OHRESH-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
 	BEGIN
 		IF o_reset_na='0' THEN
@@ -2238,13 +2252,16 @@ BEGIN
 					-- dshi : Force shift first two or three pixels of each line
 					IF o_dshi=0 THEN
 						dif_v:=(o_hacc_next - 2*o_hsize + (8*OHRESH)) MOD (8*OHRESH);
+						-- Form the geometry delta in parallel with the carry test.
+						-- The accumulator feedback then traverses only one addition.
+						hstep_v:=(2*o_ihsize - 2*o_hsize + (8*OHRESH)) MOD (4*OHRESH);
 						IF dif_v>=4*OHRESH THEN
 							o_hacc<=o_hacc_next;
 							o_hacc_next<=o_hacc_next + 2*o_ihsize;
 							hcarry_v:=false;
 						ELSE
 							o_hacc<=dif_v;
-							o_hacc_next<=(dif_v + 2*o_ihsize + (4*OHRESH)) MOD (4*OHRESH);
+							o_hacc_next<=(o_hacc_next + hstep_v) MOD (4*OHRESH);
 							hcarry_v:=true;
 						END IF;
 						o_dcpt_inc <= '1';
@@ -2411,10 +2428,10 @@ BEGIN
 			END IF;
 
 			IF o_v_poly_use_adaptive='1' THEN
-				o_poly_lum<=poly_lum(o_v_lum_pix);
+				o_poly_lum_pair<=poly_lum_pair(o_v_lum_pix);
 				o_a_poly_addr<=o_v_poly_addr;
 			ELSIF o_h_poly_use_adaptive='1' THEN
-				o_poly_lum<=poly_lum(o_h_lum_pix);
+				o_poly_lum_pair<=poly_lum_pair(o_h_lum_pix);
 				o_a_poly_addr<=to_integer(hfrac3_v);
 			END IF;
 
@@ -2429,7 +2446,7 @@ BEGIN
 
 			o_h_poly_phase_a2<=o_h_poly_phase_a;
 			o_v_poly_phase_a2<=o_v_poly_phase_a;
-			o_poly_lum1<=o_poly_lum;
+			o_poly_lum1<=poly_lum_finish(o_poly_lum_pair);
 
 			-- C5 / HC5 / VC6
 			o_poly_lerp_ta<=signed(to_unsigned(256,10) - resize(o_poly_lum1,10));
@@ -2613,18 +2630,26 @@ BEGIN
 					div_v:=div_v+to_unsigned(o_hsize*4,21);
 				END IF;
 				dir_v(5):=NOT div_v(20);
-
-				IF div_v(20)='0' THEN
-					div_v:=div_v-to_unsigned(o_hsize*2,21);
-				ELSE
-					div_v:=div_v+to_unsigned(o_hsize*2,21);
-				END IF;
-				dir_v(4):=NOT div_v(20);
 			END IF;
+			o_hdiv_last<=div_v;
+			o_hdiv_last_size<=to_unsigned(o_hsize,12);
 
 			-----------------------------------
 			o_hfrac(1)<=dir_v;
-			o_hfrac(2 TO 9) <= o_hfrac(1 TO 8);
+			-- Finish the last divider bit in the existing first fraction
+			-- delay stage. Retain its divisor too, including geometry changes.
+			div_v:=o_hdiv_last;
+			dir_v:=o_hfrac(1);
+			IF FRAC>6 THEN
+				IF div_v(20)='0' THEN
+					div_v:=div_v-resize(o_hdiv_last_size & '0',21);
+				ELSE
+					div_v:=div_v+resize(o_hdiv_last_size & '0',21);
+				END IF;
+				dir_v(4):=NOT div_v(20);
+			END IF;
+			o_hfrac(2)<=dir_v;
+			o_hfrac(3 TO 9) <= o_hfrac(2 TO 8);
 
 			o_copyv(1 TO 14)<=o_copyv(0 TO 13);
 			o_dcptv_clr(1 TO 12)<=o_dcpt_clr & o_dcptv_clr(1 TO 11);
@@ -2696,8 +2721,10 @@ BEGIN
 			-- C9 : Apply Polyphase
 			o_h_poly_t<=poly_calc(o_h_poly_phase,o_hpixq(8));
 
-			-- C10 : Sum and bound
-			o_h_poly_pix<=poly_final(o_h_poly_t);
+			-- C10 : Register the sum. Bounding shares C11's output mux,
+			-- so the DSP-to-sum carry chain does not also drive a clear
+			-- on the pixel register. Pixel/control latency is unchanged.
+			o_h_poly_sum<=poly_sum(o_h_poly_t);
 
 			-- C11 : Select interpoler ----------------------------
 			o_wadl<=o_dcptv(14);
@@ -2726,6 +2753,7 @@ BEGIN
 			------------------------------------------------------
 		END IF;
 	END PROCESS HSCAL;
+	o_h_poly_pix<=poly_bound(o_h_poly_sum);
 
 	-----------------------------------------------------------------------------
 	-- Line buffers 4 x OHRES x (R+G+B)
@@ -2776,7 +2804,7 @@ BEGIN
 
 			IF o_ce='1' THEN
 				-- Output pixels count
-				IF o_hcpt+1<o_htotal THEN
+				IF NOT last_pos(o_hcpt,o_htotal) THEN
 					o_hcpt<=(o_hcpt+1) MOD 4096;
 				ELSE
 					o_hcpt<=0;
@@ -2785,7 +2813,7 @@ BEGIN
 						o_vcpt_sync <= o_vcpt_sync+1;
 					END IF;
 
-					IF o_vcpt_pre3+1>=o_vtotal THEN
+					IF last_pos(o_vcpt_pre3,o_vtotal) THEN
 						o_vcpt_pre3<=0;
 					ELSIF o_vrr_sync2 THEN
 						o_vcpt_pre3<=o_vsstart;
@@ -2911,28 +2939,34 @@ BEGIN
 				o_vpix_inner(1 TO 5)<=o_vpix_inner(0 TO 4);
 
 				-- CYCLE 8
-				IF to_integer(o_vacpt)>o_ivsize THEN
-					IF fracnn_v = '0' THEN
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_inner(5), o_vpix_inner(5), o_vpix_inner(5));
-					ELSE
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_outer(1), o_vpix_outer(1), o_vpix_outer(1));
-					END IF;
-				ELSIF to_integer(o_vacpt)=o_ivsize THEN
-					IF fracnn_v = '0' THEN
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_inner(5), o_vpix_outer(1), o_vpix_outer(1));
-					ELSE
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_outer(1), o_vpix_inner(5), o_vpix_inner(5));
-					END IF;
-				ELSE
-					IF fracnn_v = '0' THEN
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_inner(5), o_vpix_outer(1), o_vpix_outer(2));
-					ELSE
-						o_vpixq_pre<=(o_vpix_outer(0), o_vpix_outer(1), o_vpix_inner(5), o_vpix_outer(2));
-					END IF;
-				END IF;
+				-- Capture candidates and edge predicates together. The existing
+				-- C9 stage selects them, separating the line comparison from
+				-- the pixel mux without changing latency or o_ce behavior.
+				o_vpixq_pre<=(o_vpix_outer(0), o_vpix_inner(5), o_vpix_outer(1), o_vpix_outer(2));
+				o_vpix_past_end<=to_integer(o_vacpt)>o_ivsize;
+				o_vpix_at_end<=to_integer(o_vacpt)=o_ivsize;
+				o_vpix_fracnn<=fracnn_v;
 
 				-- CYCLE 9
-				o_vpixq<=o_vpixq_pre;
+				IF o_vpix_past_end THEN
+					IF o_vpix_fracnn = '0' THEN
+						o_vpixq<=(o_vpixq_pre(0), o_vpixq_pre(1), o_vpixq_pre(1), o_vpixq_pre(1));
+					ELSE
+						o_vpixq<=(o_vpixq_pre(0), o_vpixq_pre(2), o_vpixq_pre(2), o_vpixq_pre(2));
+					END IF;
+				ELSIF o_vpix_at_end THEN
+					IF o_vpix_fracnn = '0' THEN
+						o_vpixq<=(o_vpixq_pre(0), o_vpixq_pre(1), o_vpixq_pre(2), o_vpixq_pre(2));
+					ELSE
+						o_vpixq<=(o_vpixq_pre(0), o_vpixq_pre(2), o_vpixq_pre(1), o_vpixq_pre(1));
+					END IF;
+				ELSE
+					IF o_vpix_fracnn = '0' THEN
+						o_vpixq<=o_vpixq_pre;
+					ELSE
+						o_vpixq<=(o_vpixq_pre(0), o_vpixq_pre(2), o_vpixq_pre(1), o_vpixq_pre(3));
+					END IF;
+				END IF;
 
 				-- BILINEAR / SHARP BILINEAR -----------------------
 				-- C8 : Pre-calc Sharp Bilinear
@@ -2980,8 +3014,8 @@ BEGIN
 				-- C10 : Apply polyphase
 				o_v_poly_t<=poly_calc(o_v_poly_phase,o_vpixq);
 
-				-- C11 : Bound
-				o_v_poly_pix<=poly_final(o_v_poly_t);
+				-- C11 : Sum; bounding shares C12's output selection.
+				o_v_poly_sum<=poly_sum(o_v_poly_t);
 
 				-- CYCLE 12 -----------------------------------------
 				o_hs<=o_hsv(11);
@@ -3032,6 +3066,7 @@ BEGIN
 			END IF;
 		END IF;
 	END PROCESS VSCAL;
+	o_v_poly_pix<=poly_bound(o_v_poly_sum);
 
 	-----------------------------------------------------------------------------
 	-- Low Lag syntoniser interface

@@ -1306,7 +1306,9 @@ always @(posedge hdmi_tx_clk) begin
 	reg        hdmi_dv_hs, hdmi_dv_vs, hdmi_dv_de;
 
 	reg hs,vs,de;
-	reg [23:0] d;
+	(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) reg [23:0] d;
+	reg hs_pipe,vs_pipe,de_pipe;
+	(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) reg [23:0] d_pipe;
 	
 	hdmi_dv_data <= dv_data;
 	hdmi_dv_hs   <= dv_hs;
@@ -1325,10 +1327,17 @@ always @(posedge hdmi_tx_clk) begin
 	d  <= hdmi_dv_data;
 `endif
 
-	hdmi_out_hs <= hs;
-	hdmi_out_vs <= vs;
-	hdmi_out_de <= de;
-	hdmi_out_d  <= d;
+	// A matched stage for RGB and sync lets the fitter bridge the long
+	// route from the scaler/OSD to the HDMI I/O registers at 148.5 MHz.
+	// All four outputs gain one clock together; pixel alignment is kept.
+	hs_pipe <= hs;
+	vs_pipe <= vs;
+	de_pipe <= de;
+	d_pipe  <= d;
+	hdmi_out_hs <= hs_pipe;
+	hdmi_out_vs <= vs_pipe;
+	hdmi_out_de <= de_pipe;
+	hdmi_out_d  <= d_pipe;
 end
 
 assign HDMI_TX_HS = hdmi_out_hs;

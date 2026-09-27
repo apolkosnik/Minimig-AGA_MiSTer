@@ -103,7 +103,7 @@ module cpu_wrapper
 	output            ramlds,
 	output            ramuds,
 	output            ramshared,
-	// One-CPU-clock strobe: the CPU sampled ramready high for an active
+	// One-CPU-clock strobe: the CPU consumed a RAM response for an active
 	// RAM request on this edge, i.e. the level acknowledgement has been
 	// consumed.  ram_cs_guard keys its deselect on this instead of
 	// guessing the consumption point from a clock-phase marker.
@@ -214,7 +214,7 @@ assign fastchip_rnw = wr;
 
 reg  [31:0] cpu_addr;
 reg  [15:0] cpu_dout;
-wire [15:0] cpu_din;   // read mux; defined with the FAST_CLOCK boundary registers below
+wire [15:0] cpu_din;   // read mux; defined with the response boundary registers below
 reg         wr;
 reg         uds_in;
 reg         lds_in;
@@ -278,7 +278,7 @@ wire [15:0] fastchip_data_l;
 // changes nothing but the tick that consumes them: at worst one extra tick
 // per transaction, when the acknowledge lands exactly on one.  ramconsumed,
 // the chip stage machine and the fastchip crossing all derive from the one
-// core_enable, so they move together.  The legacy path is untouched.
+// core_enable, so they move together.
 wire        bus_complete_fast = (chipready && !ramsel_i && !fastchip_selack && !fastchip_served) |
                                 (ramready && ramsel_i) |
                                 fastchip_pending;
@@ -287,8 +287,30 @@ always @(posedge clk) begin
     if (!reset) bus_complete_r <= 1'b0;
     else        bus_complete_r <= bus_complete_fast;
 end
+// At the legacy clock rate a RAM answer can arrive only one clk_114 edge
+// before the CPU tick. Capture its ready/data pair in a small boundary bank:
+// only that bank must meet the crossing, and the CPU enable/data muxes then
+// get a full CPU period. The controller holds both until ramconsumed.
+// This adds one CPU clock to each RAM response.
+wire        ram_response_ready;
+wire [15:0] ram_response_data;
+generate if (!FAST_CLOCK) begin : g_ram_response
+    reg ready_r;
+    reg [15:0] data_r;
+    always @(posedge clk) begin
+        if (!reset) ready_r <= 1'b0;
+        else ready_r <= cpu_req && ramsel_i && ramready;
+        if (ramready) data_r <= ramdat;
+    end
+    assign ram_response_ready = ready_r;
+    assign ram_response_data = data_r;
+end else begin : g_ram_response_fast
+    assign ram_response_ready = ramready;
+    assign ram_response_data = ramdat;
+end endgenerate
 wire        bus_complete = FAST_CLOCK ? bus_complete_r
-                                      : (chipready | ramready | fastchip_ready);
+                                      : (ram_response_ready |
+                                         (!ramsel_i && (chipready | fastchip_ready)));
 
 // The REQUEST side of the same boundary, registered once under FAST_CLOCK.
 // The adapter's address and the MMU's cache-mode bit reached the RAM
@@ -341,10 +363,11 @@ assign ramdin        = FAST_CLOCK ? ramdin_r        : ramdin_i;
 // answered, so the compare leaves the data cone altogether: the address is
 // stable from request to acknowledge, and the acknowledge follows the
 // registered request, so the two selects agree in every cycle whose data
-// is consumed.  The legacy path is untouched.
+// is consumed. At the legacy rate the RAM pair uses g_ram_response above;
+// chipset and peripheral responses remain in the CPU clock domain.
 wire        din_ramsel = FAST_CLOCK ? ramsel_r : ramsel_i;
 wire [15:0] cpu_din_c  = (FAST_CLOCK && fastchip_pending) ? fastchip_data_l :
-                         din_ramsel ? ramdat :
+                         din_ramsel ? ram_response_data :
                          fastchip_selack ? fastchip_dout :
                          cdtv_selack ? cdtv_din :
                          {sel_autoconfig ? autocfg_data : chip_data[15:12], chip_data[11:0]};
@@ -420,7 +443,10 @@ generate if (FAST_CLOCK) begin : g_sync_consumed
 end else begin : g_async_consumed
     always @(posedge clk) begin
         if (!reset) ramconsumed <= 0;
-        else ramconsumed <= cpu_req && ramsel_i && ramready;
+        // Only release a RAM answer when the adapter consumes its captured
+        // response. Releasing raw ready on the capture tick would discard
+        // an answer before the adapter has read the boundary registers.
+        else ramconsumed <= bus_enable && cpu_req && ramsel_i && ram_response_ready;
     end
 end endgenerate
 

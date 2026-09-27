@@ -33,7 +33,10 @@ module ap040_cache
 (
 	input             clk,
 	input             nreset,
-	input             ce,
+	// ce includes the RAM controller's completion crossing. Keep request
+	// capture predicates in the data mux instead of extending this late
+	// enable through the cache-state decode (as in ap040_fpu).
+	(* direct_enable = 1 *) input ce,
 
 	input             ie,          // CACR instruction cache enable
 	input             de,          // CACR data cache enable

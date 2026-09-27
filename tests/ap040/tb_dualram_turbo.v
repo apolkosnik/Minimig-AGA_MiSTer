@@ -771,6 +771,13 @@ reg [31:0] wk_got;
 generate if (CPU_CACHE) begin : g_wksnoop
 	task seed_cache_line;
 		begin
+			// The program can finish during the periodic cache-clear sweep.
+			// That sweep ignores snoops and invalidates seeded lines. Wait
+			// for it before installing test data, as tb_sdram_turbo does.
+			if (!ram.cpu_cache.cache_init_done)
+				$display("walker selftest: waiting for controller cache clear");
+			while (!ram.cpu_cache.cache_init_done) @(posedge clk113);
+			repeat (4) @(posedge clk113);
 			// Install the same descriptor in way 0 of both cache views.  The
 			// walker bypasses cpu_cache_new, so its writeback snoops must update
 			// both 16-bit halves in both I and D caches.
