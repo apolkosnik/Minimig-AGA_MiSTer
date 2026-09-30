@@ -37,6 +37,8 @@ module cpu_wrapper
 	output reg        reset_out,
 
 	input             clk,
+	input             clk_cpu,      // AP030 processor clock (50 MHz)
+	input             clk_mem,      // DDR3 clock (DDRAM_CLK) for the Fast RAM port
 	input             ph1,
 	input             ph2,
 
@@ -77,6 +79,17 @@ module cpu_wrapper
 	// consumed.  ram_cs_guard keys its deselect on this instead of
 	// guessing the consumption point from a clock-phase marker.
 	output reg        ramconsumed,
+
+	// AP030 Fast RAM: 32-bit synchronous port on its own DDR3 Avalon master
+	output     [28:0] fr_address,
+	output      [7:0] fr_burstcount,
+	output            fr_read,
+	output            fr_write,
+	output     [63:0] fr_writedata,
+	output      [7:0] fr_byteenable,
+	input             fr_waitrequest,
+	input      [63:0] fr_readdata,
+	input             fr_readdatavalid,
 
 	// Dedicated AP040 physical table-walk channel.  Addresses are already
 	// encoded for the SDRAM/DDR3 controllers; walker_mem_ddr selects the bank.
@@ -244,39 +257,36 @@ always @(posedge clk) begin
 	end
 end
 
-ap040_tg68k_compat #(
-	// Internal caches ON.  Their storage is block RAM by construction
-	// (ap040_cache.v: explicit dpram tag row, inferred cdata ways), so the
-	// pair of 4KB caches costs 283 ALMs and 13 M10K -- the ATC's own move
-	// into block RAM is what made the room.  The timing objection that
-	// kept them off is fixed at the source: the cache no longer forwards a
-	// bypassed access combinationally in C_IDLE, which had put the ATC
-	// compare in front of the core's exception-format mux (see the
-	// pass_active comment there).  Measured worth on loop-heavy code:
-	// 1.41x with a zero-latency bus, 2.27x with a latent one, and near
-	// immunity to bus latency (tests/ap040/asm/bench_loop.s under +prof).
-	.AP040_ENABLE_CACHE(1),
-	// FPU hardware subset (milestone H): FMOVE all formats, FMOVEM,
-	// FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FTST with IEEE rounding;
-	// unimplemented ops trap to the FPSP route like real 040 silicon
-	.AP040_HAS_FPU(1)
-) cpu_inst_p
+// AP030: a pin-level MC68030 on its own clock; Fast RAM is its 32-bit
+// synchronous port, everything else reaches the Minimig bus through a 16-bit
+// asynchronous port.  Its MMU table searches run on its own bus, so the
+// dedicated walker port stays idle.
+ap030_tg68k_compat cpu_inst_p
 (
 	.clk(clk),
+	.clk_cpu(clk_cpu),
+	.clk_mem(clk_mem),
 	.nreset(reset),
+	.z2ram_ena(z2ram_ena),
+	.z3ram_base0(z3ram_base0),
+	.z3ram_ena0(z3ram_ena0),
+	.z3ram_base1(z3ram_base1),
+	.z3ram_ena1(z3ram_ena1),
+	.fr_address(fr_address),
+	.fr_burstcount(fr_burstcount),
+	.fr_read(fr_read),
+	.fr_write(fr_write),
+	.fr_writedata(fr_writedata),
+	.fr_byteenable(fr_byteenable),
+	.fr_waitrequest(fr_waitrequest),
+	.fr_readdata(fr_readdata),
+	.fr_readdatavalid(fr_readdatavalid),
 	.clkena_in(~cpu_req | bus_complete | bus_berr),
-	.cache_allow_all(1'b0),
-	.cache_snoop_stb(snoop_stb_r),
-	.cache_snoop_addr(snoop_addr_r),
-	.cache_z2_ena(z2ram_ena),
-	.cache_z3_base0(z3ram_base0),
-	.cache_z3_ena0(z3ram_ena0),
-	.cache_z3_base1(z3ram_base1),
-	.cache_z3_ena1(z3ram_ena1),
 	.data_in(cpu_din),
 	.ipl(cpu_ipl),
-	.ipl_autovector(1'b1),
 	.berr(bus_berr),
+	.snoop_stb(snoop_stb_r),
+	.snoop_addr(snoop_addr_r),
 
 	.addr_out(cpu_addr_p),
 	.data_write(cpu_dout_p),
@@ -285,40 +295,20 @@ ap040_tg68k_compat #(
 	.nlds(lds_p),
 	.busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
 	.longword(longword),
-	.nresetout(reset_out_p),
 	.fc(),
+	.nresetout(reset_out_p),
 	.nmi_ack_toggle(nmi_ack_toggle),
+
 	.cache_maint_req(cache_maint_p),
-	.cache_maint_ic(),
-	.cache_maint_dc(),
-
-	// MMU and dedicated physical table-walker sideband
-	.mmu_addr_log(),
-	.mmu_addr_phys(),
 	.mmu_cache_inhibit(cache_inhibit),
-	.walker_req(walker_req_p),
-	.walker_we(walker_we_p),
-	.walker_addr(walker_addr_p),
-	.walker_wdat(walker_wdat_p),
-	.walker_ack(walker_mem_ack),
-	.walker_data(walker_mem_rdata),
-	.walker_berr(walker_mem_berr),
-	.cache_req(),
-	.cache_addr(),
-	.cache_data(16'd0),
-	.cache_ack(1'b0),
-	.cache_burst(),
-	.cache_burst_len(),
-	.cache_ramaddr(),
-
 	.cacr_out(cacr_p),
 	.vbr_out(vbr_p),
-	.debug_busy(),
-	.debug_fault(),
-	.debug_halted(core_halted),
-	.debug_status(core_dbgstat),
-	.debug_status2(core_dbgstat2)
+	.debug_halted(core_halted)
 );
+assign walker_req_p  = 1'b0;
+assign walker_we_p   = 1'b0;
+assign walker_addr_p = 32'd0;
+assign walker_wdat_p = 32'd0;
 
 wire cpu_req = (cpustate != 1);
 
@@ -376,6 +366,8 @@ localparam HALT_BEACON = 0;
 wire         core_halted;
 wire [255:0] core_dbgstat;
 wire [127:0] core_dbgstat2;
+assign core_dbgstat  = 256'd0;     // AP030: no debug status bus (HALT_BEACON is off)
+assign core_dbgstat2 = 128'd0;
 localparam [31:0] BEACON_ADDR = 32'h4000_0000;   // Z3_1 base (ARM 0x30000000)
 
 reg         halted_d;

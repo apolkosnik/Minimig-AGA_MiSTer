@@ -339,8 +339,25 @@ wire toccata_ena;
 wire a2065_ena;
 wire [7:0] a2065_base;
 
+// AP030 Fast RAM port (DDR3 Avalon master, clk_114), see fastram_arbiter
+wire [28:0] fr_address;
+wire  [7:0] fr_burstcount, fr_byteenable;
+wire        fr_read, fr_write, fr_waitrequest, fr_readdatavalid;
+wire [63:0] fr_writedata, fr_readdata;
+
 cpu_wrapper cpu_wrapper
 (
+	.clk_cpu      (CLK_50M         ),   // AP030: 50 MHz board clock
+	.clk_mem      (clk_114         ),   // DDR3 side of its Fast RAM port
+	.fr_address   (fr_address      ),
+	.fr_burstcount(fr_burstcount   ),
+	.fr_read      (fr_read         ),
+	.fr_write     (fr_write        ),
+	.fr_writedata (fr_writedata    ),
+	.fr_byteenable(fr_byteenable   ),
+	.fr_waitrequest(fr_waitrequest ),
+	.fr_readdata  (fr_readdata     ),
+	.fr_readdatavalid(fr_readdatavalid),
 	.snoop_tgl    (chip_snoop_tgl  ),
 	.snoop_adr    (chip_snoop_adr  ),
 	.reset        (cpu_rst         ),
@@ -565,6 +582,46 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
+// DDR3: the AP030's Fast RAM port (32-bit synchronous, bursts) has priority;
+// ddram_ctrl (the 16-bit CPU port, the walker and the A2065) shares the rest
+wire        ddr1_busy, ddr1_dout_ready, ddr1_rd, ddr1_we;
+wire  [7:0] ddr1_burstcnt, ddr1_be;
+wire [28:0] ddr1_addr;
+wire [63:0] ddr1_dout, ddr1_din;
+
+a2065_ddram_arbiter fastram_arbiter
+(
+	.clk             (clk_114),
+	.rst             (reset_d),
+	.m0_address      (fr_address),
+	.m0_burstcount   (fr_burstcount),
+	.m0_read         (fr_read),
+	.m0_readdata     (fr_readdata),
+	.m0_readdatavalid(fr_readdatavalid),
+	.m0_writedata    (fr_writedata),
+	.m0_byteenable   (fr_byteenable),
+	.m0_write        (fr_write),
+	.m0_waitrequest  (fr_waitrequest),
+	.m1_address      (ddr1_addr),
+	.m1_burstcount   (ddr1_burstcnt),
+	.m1_read         (ddr1_rd),
+	.m1_readdata     (ddr1_dout),
+	.m1_readdatavalid(ddr1_dout_ready),
+	.m1_writedata    (ddr1_din),
+	.m1_byteenable   (ddr1_be),
+	.m1_write        (ddr1_we),
+	.m1_waitrequest  (ddr1_busy),
+	.s_address       (DDRAM_ADDR),
+	.s_burstcount    (DDRAM_BURSTCNT),
+	.s_read          (DDRAM_RD),
+	.s_readdata      (DDRAM_DOUT),
+	.s_readdatavalid (DDRAM_DOUT_READY),
+	.s_writedata     (DDRAM_DIN),
+	.s_byteenable    (DDRAM_BE),
+	.s_write         (DDRAM_WE),
+	.s_waitrequest   (DDRAM_BUSY)
+);
+
 ddram_ctrl #(.CPU_CACHE(1)) ram2
 (
 	.sysclk       (clk_114         ),
@@ -574,15 +631,15 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 	.cpu_cache_ctrl(cpu_cacr       ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
-	.DDRAM_BUSY   (DDRAM_BUSY      ),
-	.DDRAM_BURSTCNT(DDRAM_BURSTCNT ),
-	.DDRAM_ADDR   (DDRAM_ADDR      ),
-	.DDRAM_DOUT   (DDRAM_DOUT      ),
-	.DDRAM_DOUT_READY(DDRAM_DOUT_READY),
-	.DDRAM_RD     (DDRAM_RD        ),
-	.DDRAM_DIN    (DDRAM_DIN       ),
-	.DDRAM_BE     (DDRAM_BE        ),
-	.DDRAM_WE     (DDRAM_WE        ),
+	.DDRAM_BUSY   (ddr1_busy       ),
+	.DDRAM_BURSTCNT(ddr1_burstcnt  ),
+	.DDRAM_ADDR   (ddr1_addr       ),
+	.DDRAM_DOUT   (ddr1_dout       ),
+	.DDRAM_DOUT_READY(ddr1_dout_ready),
+	.DDRAM_RD     (ddr1_rd         ),
+	.DDRAM_DIN    (ddr1_din        ),
+	.DDRAM_BE     (ddr1_be         ),
+	.DDRAM_WE     (ddr1_we         ),
 
 	.mem2_address      (a2065_mem_address),
 	.mem2_burstcount   (a2065_mem_burstcount),

@@ -41,3 +41,9 @@ c5_pin_model_dump.txt
 # cputest corpora: multi-hundred-MB extracted data, fetched not versioned
 tests/ap040/build/cputest/
 __pycache__/
+
+# AP030 test and build byproducts
+tests/ap030/build/
+tests/ap030/asm/t_integer.s
+build_ap030*.log
+quartus_ap030.pid
