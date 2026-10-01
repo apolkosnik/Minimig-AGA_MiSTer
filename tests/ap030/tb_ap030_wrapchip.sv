@@ -534,10 +534,11 @@ end
 
 // +xtrace: the processor/Minimig handshake, every processor clock
 always @(posedge clk_cpu) if ($test$plusargs("xtrace") && cpu_clocks < 400)
-	$display("%0t as=%b slow_as=%b ds=%b a=%h fc=%0d | k: as=%b ds=%b ast=%0d clkena=%b dsack=%b | c: dsack=%b stale=%b cpust=%0d",
-	         $time, dut.cpu_inst_p.as_n, dut.cpu_inst_p.slow_as_n, dut.cpu_inst_p.ds_n, dut.cpu_inst_p.a, dut.cpu_inst_p.cfc,
-	         dut.cpu_inst_p.as_k, dut.cpu_inst_p.ds_k, dut.cpu_inst_p.ast, dut.cpu_inst_p.clkena_in, dut.cpu_inst_p.dsack1_k,
-	         dut.cpu_inst_p.dsack1_c, dut.cpu_inst_p.term_stale, dut.cpustate);
+	$display("%0t as=%b ds=%b a=%h siz=%0d fc=%0d | p: tgl=%b own=%b term=%b berr=%b | k: tgl=%b st=%0d clkena=%b uds=%b lds=%b addr=%h | cpust=%0d",
+	         $time, dut.cpu_inst_p.as_n, dut.cpu_inst_p.ds_n, dut.cpu_inst_p.a, dut.cpu_inst_p.siz, dut.cpu_inst_p.cfc,
+	         dut.cpu_inst_p.p_tgl, dut.cpu_inst_p.p_own, dut.cpu_inst_p.p_term, dut.cpu_inst_p.p_berr,
+	         dut.cpu_inst_p.k_tgl_r, dut.cpu_inst_p.kst, dut.cpu_inst_p.clkena_in, dut.cpu_inst_p.nuds, dut.cpu_inst_p.nlds,
+	         dut.cpu_inst_p.addr_out, dut.cpustate);
 reg [1:0] dma_cmd = 0;
 reg [4:0] dma_t = 0;
 reg       dma_seen = 0;

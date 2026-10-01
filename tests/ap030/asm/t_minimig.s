@@ -8,6 +8,10 @@
 ;   - CPU space cycles other than IACK end in BERR: a coprocessor
 ;     instruction takes the F-line exception, BKPT the illegal one
 ;   - the RESET instruction completes and execution continues
+;   - cachable ROM ($F80000, the bench mirrors its memory there) through
+;     the data cache: the port answers as a 32-bit port, and a byte or word
+;     read of cachable space fills the whole longword, so all four bytes
+;     must be delivered, not only the operand's
 ;
 ; protocol with the bench (tb_ap030_wrapchip.sv):
 ;   word write to $F100 = failing test number
@@ -131,6 +135,35 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 	chkl	d0,bk1,35
 	clr.l	skip
 
+;---------------------------------------------------------------- cachable ROM, data cache
+	move.l	#$0808,d0		; clear both caches
+	movec	d0,cacr
+	move.l	#$0101,d0		; EI, ED
+	movec	d0,cacr
+	lea	$F80000+romtab,a0
+	moveq	#0,d0
+	move.b	1(a0),d0		; byte 1: fills the entry of the longword
+	chkl	d0,$22,50
+	move.l	(a0),d0			; from that entry
+	chkl	d0,$11223344,51
+	moveq	#0,d0
+	move.w	6(a0),d0		; word at offset 2
+	chkl	d0,$7788,52
+	move.l	4(a0),d0
+	chkl	d0,$55667788,53
+	moveq	#0,d0
+	move.b	11(a0),d0		; byte 3
+	chkl	d0,$CC,54
+	move.l	8(a0),d0
+	chkl	d0,$99AABBCC,55
+	moveq	#0,d0
+	move.w	12(a0),d0		; word at offset 0
+	chkl	d0,$DDEE,56
+	move.l	12(a0),d0
+	chkl	d0,$DDEEFF01,57
+	move.l	#$0808,d0
+	movec	d0,cacr
+
 ;---------------------------------------------------------------- RESET instruction
 	reset
 	moveq	#42,d0
@@ -165,3 +198,6 @@ h_noirq:
 	add.l	d6,2(a6)
 	movem.l	(sp)+,d6/a6
 	rte
+
+	cnop	0,4
+romtab:	dc.l	$11223344,$55667788,$99AABBCC,$DDEEFF01

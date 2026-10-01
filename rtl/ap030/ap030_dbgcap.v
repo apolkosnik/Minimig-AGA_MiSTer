@@ -3,8 +3,8 @@
 //                                                                          //
 // Records, in the processor clock domain:                                  //
 //   - the last 256 instruction addresses (dbg_inst), frozen at the first   //
-//     bus error, address error, illegal, line A, format error, the second  //
-//     line F, execution below $400, a RESET instruction or a halt         //
+//     address error, illegal, line A, format error, the second line F,    //
+//     execution below $400, a RESET instruction or a halt                 //
 //   - the last 32 exceptions other than interrupts: vector, stacked SR,    //
 //     stacked PC, the instruction address and opcode; frozen at a RESET    //
 //     instruction or a halt (Kickstart's reboot after a failure)           //
@@ -95,7 +95,8 @@ always @(posedge clk)
 
 wire exc_entry = (dbg_state == S_EXC0) && !exc_prev;
 wire is_irq    = (dbg_vec >= 8'd24) && (dbg_vec <= 8'd31);
-wire fatal     = (dbg_vec == 8'd2) || (dbg_vec == 8'd3) || (dbg_vec == 8'd4) ||
+// bus errors are left out: Kickstart's boot probes with them
+wire fatal     = (dbg_vec == 8'd3) || (dbg_vec == 8'd4) ||
                  (dbg_vec == 8'd10) || (dbg_vec == 8'd14) ||
                  (dbg_vec == 8'd11 && fline_seen != 2'd0);
 wire rst_insn  = !reset_n_oe && !rst_prev && !cpu_rst;
@@ -140,7 +141,7 @@ always @(posedge clk) begin
 		end
 		// execution in the first 1K (the vector table): the ring then ends
 		// with the instruction that transferred control there
-		if (!cpu_rst && dbg_inst && !pc_frozen && dbg_pc < 32'h400 && !dbg_sr[13] && low_arm == 5'd31) begin   // user mode
+		if (!cpu_rst && dbg_inst && !pc_frozen && dbg_pc < 32'h400 && low_arm == 5'd31) begin
 			pc_frozen <= 1'b1;
 			cause <= 6'h3D;
 		end

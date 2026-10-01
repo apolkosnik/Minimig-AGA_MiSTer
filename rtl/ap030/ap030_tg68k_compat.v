@@ -11,15 +11,18 @@
 //   clk_mem  the DDR3 side of Fast RAM, ap030_fastram_be, an Avalon-MM     //
 //            master for the DDRAM interface (clk_114)                      //
 //   clk      the Minimig CPU bus (clk_sys): every other cycle goes to a     //
-//            16-bit asynchronous port speaking cpu_wrapper's TG68K-style   //
-//            contract; the processor's dynamic bus sizing splits the       //
-//            operands                                                      //
+//            16-bit Minimig port speaking cpu_wrapper's TG68K-style        //
+//            contract, presented to the processor as a 32-bit              //
+//            asynchronous port                                             //
 //                                                                          //
-// The asynchronous port crosses clocks with the 68030 handshake itself:    //
-// AS and DS are synchronised into clk, and DSACK/BERR/AVEC/CIIN back into  //
-// clk_cpu; address, data and attributes are stable while they are sampled. //
-// After a cycle, terminations still asserted are ignored until they have   //
-// been seen negated (a full four-phase handshake).                         //
+// The asynchronous port crosses clocks once in each direction per cycle:   //
+// the processor side captures the cycle and flips a request toggle; the    //
+// clk side runs the one or two Minimig word cycles the transfer needs      //
+// (both words of a longword back to back) and flips an answer toggle with  //
+// the data and termination.  DSACK0/DSACK1 (32-bit), BERR, AVEC and CIIN   //
+// are generated in clk_cpu from the answer and held until AS negates.      //
+// Each side holds its fields stable from its toggle until the other side's //
+// toggle comes back.                                                       //
 //                                                                          //
 // Contract with cpu_wrapper.v on the clk side:                             //
 //  - the request outputs are registered and change only on clkena_in edges //
@@ -140,30 +143,50 @@ assign ramaddr[26:23] = (sel_z3_0 | sel_z3_1) ? a[26:23] : 4'd0;
 assign ramaddr[22:1]  = a[22:1];
 wire [28:0] ddr_addr  = {3'b001, ramaddr[28:3]};
 
-// terminations of the asynchronous port, synchronised, masked until seen
-// negated after the cycle they ended
-reg  [1:0] dsack1_c, berr_c, avec_c, ciin_c;
-reg        term_stale;
-wire       term_any = !dsack1_c[1] || !berr_c[1] || !avec_c[1];
-wire       dsack1_s, berr_s, avec_s, ciin_s;        // from the clk side
+// the Minimig port, processor side: a cycle is handed over with p_tgl and
+// answered with k_tgl (clk side, below)
+reg        p_tgl = 1'b0;          // request toggle
+reg [31:0] p_a = 32'd0, p_d = 32'd0;
+reg  [1:0] p_siz = 2'd0;
+reg  [2:0] p_fc = 3'd0;
+reg        p_rw = 1'b1;
+reg  [2:0] k_tgl_c = 3'b000;      // the answer toggle, synchronised
+reg        p_own = 1'b0;          // this AS cycle has been handed over
+reg        p_term = 1'b0;         // its answer arrived: terminate until AS negates
+reg        p_berr = 1'b0, p_avec = 1'b0, p_ciin = 1'b0;
+reg [31:0] d_slow = 32'd0;
+wire        k_tgl;                // clk side
+wire [31:0] k_d;
+wire        k_berr, k_avec, k_ciin;
+wire       p_busy   = p_tgl != k_tgl_c[1];
+wire       p_answer = k_tgl_c[2] != k_tgl_c[1];
+// a cycle is presented once AS is asserted, and DS for a write (it follows
+// the data, UM 7.3.2)
+wire       slow_cyc = !as_n && !fast_sel && (rw || !ds_n);
 always @(posedge clk_cpu) begin
-	dsack1_c <= {dsack1_c[0], dsack1_s};
-	berr_c   <= {berr_c[0],   berr_s};
-	avec_c   <= {avec_c[0],   avec_s};
-	ciin_c   <= {ciin_c[0],   ciin_s};
-	if (!term_any) term_stale <= 1'b0;
-	else if (as_n) term_stale <= 1'b1;
+	k_tgl_c <= {k_tgl_c[1:0], k_tgl};
+	if (as_n) begin
+		p_own <= 1'b0; p_term <= 1'b0;
+	end else begin
+		// one request per AS cycle; an answer still owed to a cycle that a
+		// processor reset abandoned is waited for and dropped (p_own is clear)
+		if (slow_cyc && !p_own && !p_busy) begin
+			p_a <= a; p_d <= d_o; p_siz <= siz; p_fc <= cfc; p_rw <= rw;
+			p_tgl <= ~p_tgl;
+			p_own <= 1'b1;
+		end
+		if (p_own && p_answer) begin
+			p_term <= 1'b1;
+			p_berr <= k_berr; p_avec <= k_avec; p_ciin <= k_ciin;
+			d_slow <= k_d;
+		end
+	end
 end
-wire mask = term_stale;
+wire p_dsack_n = !(p_term && !p_berr && !p_avec);
+wire p_berr_n  = !(p_term && p_berr);
+wire p_avec_n  = !(p_term && p_avec);
+wire p_ciin_n  = !(p_term && p_ciin);
 
-// the cycle presented to the clk side: AS only for the asynchronous port,
-// and held negated until the previous cycle's termination is released --
-// the processor may start its next cycle a single clock after AS negates,
-// too short for the clk side to see, and the port must see every negation
-reg slow_as_n;
-always @(posedge clk_cpu) slow_as_n <= as_n | fast_sel | term_stale;
-
-reg [31:0] d_slow;             // from the clk side, stable before its DSACK
 wire [31:0] d_i = fast_sel ? fr_d : d_slow;
 
 // chipset writes into the processor domain: a toggle with the address held
@@ -197,9 +220,9 @@ ap030_top #(.PCREL_PROGRAM_SPACE(0)) cpu (
 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
 	.ecs_n(), .ocs_n(), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(),
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
-	.dsack0_n(1'b1), .dsack1_n(dsack1_c[1] | mask), .sterm_n(fr_sterm_n),
-	.berr_n(berr_c[1] | mask), .halt_n(1'b1),
-	.avec_n(avec_c[1] | mask), .ciin_n(ciin_c[1] | mask), .cback_n(fr_cback_n),
+	.dsack0_n(p_dsack_n), .dsack1_n(p_dsack_n), .sterm_n(fr_sterm_n),
+	.berr_n(p_berr_n), .halt_n(1'b1),
+	.avec_n(p_avec_n), .ciin_n(p_ciin_n), .cback_n(fr_cback_n),
 	.br_n(1'b1), .bg_n(), .bgack_n(1'b1),
 	.ipl_n(ipl), .ipend_n(), .reset_n_i(nreset_c[2]), .reset_n_oe(reset_n_oe),
 	.cdis_n(1'b1), .mmudis_n(1'b1), .refill_n(), .status_n(),
@@ -250,96 +273,129 @@ ap030_fastram_be be (
 //===========================================================================
 // Minimig bus domain (clk): the 16-bit asynchronous port
 //===========================================================================
-reg [2:0] as_s, ds_s;              // synchronised AS (asynchronous port only) and DS
-always @(posedge clk) begin
-	as_s <= {as_s[1:0], slow_as_n};
-	ds_s <= {ds_s[1:0], ds_n};
-end
-wire as_k = !as_s[2];
-wire ds_k = !ds_s[2];
+// the request toggle and the processor's fields (stable while it differs
+// from k_tgl)
+reg  [2:0] p_tgl_k = 3'b000;
+always @(posedge clk) p_tgl_k <= {p_tgl_k[1:0], p_tgl};
 
-wire cpu_space = (cfc == 3'd7);
-wire iack      = cpu_space && (a[19:16] == 4'hF);
-wire prog_space = (cfc[1:0] == 2'b10);
-// word lanes: UDS carries the even byte (D31-D24), LDS the odd one (D23-D16)
-wire lane_u    = !a[0];
-wire lane_l    = a[0] || (siz != 2'b01);
+wire cpu_space  = (p_fc == 3'd7);
+wire iack       = cpu_space && (p_a[19:16] == 4'hF);
+wire prog_space = (p_fc[1:0] == 2'b10);
 // ROM ($E00000-$E7FFFF, $F80000-$FFFFFF) is cachable; chip RAM, slow RAM
 // windows and I/O are not
-wire rom       = (a[31:24] == 8'h00) && ((a[23:19] == 5'b11111) || (a[23:19] == 5'b11100));
+wire rom        = (p_a[31:24] == 8'h00) && ((p_a[23:19] == 5'b11111) || (p_a[23:19] == 5'b11100));
+// the bytes of the longword this transfer moves on a 32-bit port: from
+// A1-A0 up to the operand size or the longword boundary (UM 7.2.1)
+wire [2:0] k_n    = (p_siz == 2'b00) ? 3'd4 : {1'b0, p_siz};
+wire [2:0] k_room = 3'd4 - {1'b0, p_a[1:0]};
+wire [2:0] k_m    = (k_n < k_room) ? k_n : k_room;
+wire [2:0] k_last = {1'b0, p_a[1:0]} + k_m - 3'd1;
+wire [3:0] k_op;                  // bit 3 = byte 0 (D31-D24)
+assign k_op[3] = (p_a[1:0] == 2'd0);
+assign k_op[2] = (p_a[1:0] <= 2'd1) && (k_last >= 3'd1);
+assign k_op[1] = (p_a[1:0] <= 2'd2) && (k_last >= 3'd2);
+assign k_op[0] = (k_last >= 3'd3);
+// a read of cachable space (ROM: CIIN negated) fills the whole longword
+// into a cache entry whatever its size (UM 6.1.3.1), so a 32-bit port must
+// drive all four bytes; elsewhere only the operand's bytes are touched, so
+// I/O registers see exactly the accesses the program makes
+wire [3:0] k_be = (p_rw && rom) ? 4'b1111 : k_op;
+wire       k_w0 = k_be[3] | k_be[2];
+wire       k_w1 = k_be[1] | k_be[0];
 
-localparam A_IDLE = 2'd0, A_REQ = 2'd1, A_ACK = 2'd2, A_GAP = 2'd3;
-reg [1:0] ast;
-reg       dsack1_k, berr_k, avec_k, ciin_k;
-assign dsack1_s = dsack1_k;
-assign berr_s   = berr_k;
-assign avec_s   = avec_k;
-assign ciin_s   = ciin_k;
+localparam K_IDLE = 2'd0, K_REQ = 2'd1, K_GAP = 2'd2;
+reg [1:0] kst;
+reg       k_tgl_r = 1'b0;
+reg       k_wsel;                 // the word in progress: 0 = D31-D16, 1 = D15-D0
+reg       k_more;                 // the second word follows
+reg [31:0] k_d_r = 32'd0;
+reg       k_berr_r = 1'b0, k_avec_r = 1'b0, k_ciin_r = 1'b0;
+assign k_tgl  = k_tgl_r;
+assign k_d    = k_d_r;
+assign k_berr = k_berr_r;
+assign k_avec = k_avec_r;
+assign k_ciin = k_ciin_r;
+
+wire       k_work = p_tgl_k[1] != k_tgl_r;
+
+// one Minimig word cycle of the transfer: the first word the transfer
+// moves from idle, the second (D15-D0) after the gap.  Its byte strobes,
+// its address (odd when only its odd byte moves), the lanes' write data.
+wire        k_go    = clkena_in && (((kst == K_IDLE) && k_work && !cpu_space) || (kst == K_GAP));
+wire        k_iw    = (kst == K_GAP) || !k_w0;
+wire        k_iuds  = k_iw ? k_be[1] : k_be[3];
+wire        k_ilds  = k_iw ? k_be[0] : k_be[2];
 
 always @(posedge clk) begin
 	if (!nreset) begin
-		ast <= A_IDLE;
+		kst <= K_IDLE;
 		busstate <= BUS_IDLE;
 		nwr <= 1'b1; nuds <= 1'b1; nlds <= 1'b1; longword <= 1'b0;
 		addr_out <= 32'd0; data_write <= 16'd0; fc <= 3'd0;
-		dsack1_k <= 1'b1; berr_k <= 1'b1; avec_k <= 1'b1; ciin_k <= 1'b1;
+		k_more <= 1'b0; k_wsel <= 1'b0;
+		// a request outstanding at reset is answered (the processor drops it)
+		k_tgl_r <= p_tgl_k[1];
 		nmi_ack_toggle <= 1'b0;
 	end else begin
-		case (ast)
-			A_IDLE: begin
-				// a cycle is presented once AS and DS are asserted (for a
-				// write DS follows the data, UM 7.3.2)
-				if (as_k && ds_k) begin
+		case (kst)
+			K_IDLE: begin
+				if (k_work) begin
+					k_berr_r <= 1'b0; k_avec_r <= 1'b0; k_ciin_r <= !rom;
 					if (cpu_space) begin
 						// answered here, no Minimig request
 						if (iack) begin
-							avec_k <= 1'b0;
-							if (a[3:1] == 3'd7) nmi_ack_toggle <= ~nmi_ack_toggle;
-						end else berr_k <= 1'b0;
-						ast <= A_ACK;
-					end else if (clkena_in) begin
-						addr_out   <= a;
-						fc         <= cfc;
-						nwr        <= rw;
-						nuds       <= !lane_u;
-						nlds       <= !lane_l;
-						// longword stays low: its only consumer is Gayle's
-						// 32-bit IDE data-port shortcut, which pops two words
-						// on the first half of a long and is not kept across
-						// the 68030's second (A+2, SIZ=word) cycle, so a
-						// MOVE.L from the data port lost words.  Two plain
-						// word reads of the data register are exact.
-						longword   <= 1'b0;
-						data_write <= d_o[31:16];
-						busstate   <= prog_space ? BUS_FETCH : (rw ? BUS_READ : BUS_WRITE);
-						ciin_k     <= rom;
-						ast <= A_REQ;
+							k_avec_r <= 1'b1;
+							if (p_a[3:1] == 3'd7) nmi_ack_toggle <= ~nmi_ack_toggle;
+						end else k_berr_r <= 1'b1;
+						k_tgl_r <= p_tgl_k[1];
+					end else if (k_go) begin
+						k_more <= k_w0 && k_w1;
 					end
 				end
 			end
-			A_REQ: begin
+			K_REQ: begin
 				// one qualified completion (or a bus error from the timeout);
-				// the data is set up before the termination is visible
+				// the data is set up before the answer toggles
 				if (clkena_in) begin
 					busstate <= BUS_IDLE;
 					nwr <= 1'b1; nuds <= 1'b1; nlds <= 1'b1; longword <= 1'b0;
-					if (berr) berr_k <= 1'b0;
-					else begin
-						d_slow <= {data_in, data_in};
-						dsack1_k <= 1'b0;
+					if (k_wsel) k_d_r[15:0] <= data_in;
+					else        k_d_r <= {data_in, data_in};
+					if (berr) begin
+						k_berr_r <= 1'b1;
+						k_tgl_r  <= p_tgl_k[1];
+						kst      <= K_IDLE;
+					end else if (k_more) begin
+						kst <= K_GAP;
+					end else begin
+						k_tgl_r <= p_tgl_k[1];
+						kst     <= K_IDLE;
 					end
-					ast <= A_ACK;
 				end
 			end
-			A_ACK: begin
-				// hold the termination until the processor ends the cycle
-				if (!as_k) begin
-					dsack1_k <= 1'b1; berr_k <= 1'b1; avec_k <= 1'b1; ciin_k <= 1'b1;
-					ast <= A_GAP;
-				end
+			K_GAP: begin
+				// cpu_wrapper sampled the idle clock: the second word
+				if (k_go) k_more <= 1'b0;
 			end
-			default: ast <= A_IDLE;   // the negation stays visible for a clock
+			default: kst <= K_IDLE;
 		endcase
+		if (k_go) begin
+			addr_out   <= {p_a[31:2], k_iw, !k_iuds};
+			fc         <= p_fc;
+			nwr        <= p_rw;
+			nuds       <= !k_iuds;
+			nlds       <= !k_ilds;
+			// longword stays low: its only consumer is Gayle's 32-bit IDE
+			// data-port shortcut, which pops two words on the first half of
+			// a long and is not kept across the second word cycle, so a
+			// MOVE.L from the data port lost words.  Two plain word reads
+			// are exact.
+			longword   <= 1'b0;
+			data_write <= k_iw ? p_d[15:0] : p_d[31:16];
+			busstate   <= prog_space ? BUS_FETCH : (p_rw ? BUS_READ : BUS_WRITE);
+			k_wsel     <= k_iw;
+			kst        <= K_REQ;
+		end
 	end
 end
 
@@ -369,8 +425,6 @@ assign mmu_cache_inhibit = 1'b0;    // Fast RAM is not behind the Minimig caches
 initial begin
 	nreset_c = 3'b000; z2e_c = 2'b00; z3e0_c = 2'b00; z3e1_c = 2'b00;
 	z3b0_c1 = 5'd0; z3b0_c = 5'd0; z3b1_c1 = 4'd0; z3b1_c = 4'd0;
-	dsack1_c = 2'b11; berr_c = 2'b11; avec_c = 2'b11; ciin_c = 2'b11; term_stale = 1'b0;
-	slow_as_n = 1'b1; d_slow = 32'd0; as_s = 3'b111; ds_s = 3'b111;
 	rsto_k = 2'b00; halt_k = 2'b00; ei_k = 2'b00; ed_k = 2'b00; vbr_k1 = 32'd0; vbr_k = 32'd0;
 	clr_tgl = 1'b0; clr_k = 3'b000;
 	snp_tgl_k = 1'b0; snp_addr_k = 32'd0; snp_tgl_c = 3'b000; snp_we_c = 1'b0; snp_addr_c = 32'd0;
@@ -378,9 +432,9 @@ end
 
 // a transfer as the processor terminates it: every STERM beat on the Fast
 // RAM port, the first DSACK/BERR/AVEC edge on the Minimig port
-reg dbg_term_q = 1'b1;
-always @(posedge clk_cpu) dbg_term_q <= !term_any;
-wire dbg_bus_stb = !as_n && (fast_sel ? !fr_sterm_n : (term_any && dbg_term_q));
+reg dbg_term_q = 1'b0;
+always @(posedge clk_cpu) dbg_term_q <= p_term;
+wire dbg_bus_stb = !as_n && (fast_sel ? !fr_sterm_n : (p_term && !dbg_term_q));
 ap030_dbgcap dbgcap (
 	.clk(clk_cpu), .cpu_rst(rst_c),
 	.dbg_inst(dbg_inst), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_vec(dbg_vec),
