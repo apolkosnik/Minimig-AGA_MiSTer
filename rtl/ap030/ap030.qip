@@ -12,4 +12,5 @@ set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap0
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap030_memsys.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap030_core.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap030_top.v ]
+set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap030_dbgcap.v ]
 set_global_assignment -name VERILOG_FILE     [file join $::quartus(qip_path) ap030_tg68k_compat.v ]

@@ -181,7 +181,18 @@ always @(posedge clk_cpu) begin
 	if (snp_tgl_c[2] ^ snp_tgl_c[1]) snp_addr_c <= snp_addr_k;
 end
 
-ap030_top cpu (
+// on-board debug capture, read over JTAG (ap030_dbgcap.v)
+wire [31:0] dbg_pc, dbg_epc, dbg_ea, dbg_isp;
+wire  [7:0] dbg_state, dbg_vec;
+wire [15:0] dbg_esr, dbg_ir, dbg_sr;
+wire        dbg_inst;
+wire [127:0] dbg_trace;
+
+
+// cpu_wrapper's busstate treats program space as an instruction fetch (the
+// turbo chip/kick paths and the controllers' instruction caches), so the
+// PC-relative operand reads keep the data function code here
+ap030_top #(.PCREL_PROGRAM_SPACE(0)) cpu (
 	.clk(clk_cpu),
 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
 	.ecs_n(), .ocs_n(), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(),
@@ -192,7 +203,8 @@ ap030_top cpu (
 	.br_n(1'b1), .bg_n(), .bgack_n(1'b1),
 	.ipl_n(ipl), .ipend_n(), .reset_n_i(nreset_c[2]), .reset_n_oe(reset_n_oe),
 	.cdis_n(1'b1), .mmudis_n(1'b1), .refill_n(), .status_n(),
-	.dbg_pc(), .dbg_sr(), .dbg_state(), .dbg_inst(), .dbg_halted(cpu_halted),
+	.dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst), .dbg_halted(cpu_halted),
+	.dbg_vec(dbg_vec), .dbg_epc(dbg_epc), .dbg_esr(dbg_esr), .dbg_ir(dbg_ir), .dbg_ea(dbg_ea), .dbg_isp(dbg_isp), .dbg_trace(dbg_trace),
 	.dbg_vbr(vbr), .dbg_cacr(cacr), .dbg_cache_clear(cache_clear),
 	.snoop_we(snp_we_c), .snoop_addr(snp_addr_c), .nmi_vec_nocache(1'b1)
 );
@@ -291,7 +303,13 @@ always @(posedge clk) begin
 						nwr        <= rw;
 						nuds       <= !lane_u;
 						nlds       <= !lane_l;
-						longword   <= (siz == 2'b00);
+						// longword stays low: its only consumer is Gayle's
+						// 32-bit IDE data-port shortcut, which pops two words
+						// on the first half of a long and is not kept across
+						// the 68030's second (A+2, SIZ=word) cycle, so a
+						// MOVE.L from the data port lost words.  Two plain
+						// word reads of the data register are exact.
+						longword   <= 1'b0;
 						data_write <= d_o[31:16];
 						busstate   <= prog_space ? BUS_FETCH : (rw ? BUS_READ : BUS_WRITE);
 						ciin_k     <= rom;
@@ -357,5 +375,20 @@ initial begin
 	clr_tgl = 1'b0; clr_k = 3'b000;
 	snp_tgl_k = 1'b0; snp_addr_k = 32'd0; snp_tgl_c = 3'b000; snp_we_c = 1'b0; snp_addr_c = 32'd0;
 end
+
+// a transfer as the processor terminates it: every STERM beat on the Fast
+// RAM port, the first DSACK/BERR/AVEC edge on the Minimig port
+reg dbg_term_q = 1'b1;
+always @(posedge clk_cpu) dbg_term_q <= !term_any;
+wire dbg_bus_stb = !as_n && (fast_sel ? !fr_sterm_n : (term_any && dbg_term_q));
+ap030_dbgcap dbgcap (
+	.clk(clk_cpu), .cpu_rst(rst_c),
+	.dbg_inst(dbg_inst), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_vec(dbg_vec),
+	.dbg_epc(dbg_epc), .dbg_esr(dbg_esr), .dbg_ir(dbg_ir), .dbg_ea(dbg_ea), .dbg_isp(dbg_isp), .dbg_trace(dbg_trace),
+	.reset_n_oe(reset_n_oe), .halted(cpu_halted),
+	.bus_stb(dbg_bus_stb), .bus_a(a), .bus_d(rw ? d_i : d_o), .bus_rw(rw), .bus_siz(siz), .bus_fc(cfc),
+	.bus_fast(fast_sel),
+	.fe_stb(cmd_we && cmd_wdata[101]), .fe_cmd(cmd_wdata[100:0])
+);
 
 endmodule

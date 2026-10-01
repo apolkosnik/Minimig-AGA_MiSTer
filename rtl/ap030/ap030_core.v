@@ -19,6 +19,9 @@
 `include "ap030_defs.svh"
 
 module ap030_core
+#(
+	parameter PCREL_PROGRAM_SPACE = 1   // see ap030_top
+)
 (
 	input             clk,
 	input             rst,
@@ -102,7 +105,15 @@ module ap030_core
 	output     [15:0] dbg_sr,
 	output      [7:0] dbg_state,
 	output reg        dbg_inst,     // pulse: an instruction was dispatched (statistics)
-	output     [31:0] dbg_vbr       // VBR (system glue: NMI vector address)
+	output     [31:0] dbg_vbr,      // VBR (system glue: NMI vector address)
+	// exception observation (debug capture): valid while dbg_state is S_EXC0
+	output      [7:0] dbg_vec,
+	output     [31:0] dbg_epc,
+	output     [15:0] dbg_esr,
+	output     [15:0] dbg_ir,
+	output     [31:0] dbg_ea,
+	output     [31:0] dbg_isp,
+	output    [127:0] dbg_trace     // per-clock sequencer and register file view
 );
 
 `include "core/ap030_states.vh"
@@ -326,6 +337,13 @@ reg        iack_pc_i;      // interrupt frame carries the instruction address (B
 wire exc_is_irq_active = (state == S_EXC0 || state == S_EXC1 || state == S_EXC2 || state == S_EXC3 || state == S_IACK) && exc_is_irq;
 assign halted = halted_r;
 assign dbg_pc = pc_i;
+assign dbg_vec = exc_vec;
+assign dbg_epc = exc_pc;
+assign dbg_esr = exc_sr;
+assign dbg_ir  = ir;
+assign dbg_ea  = ea;
+assign dbg_isp = isp_q;
+assign dbg_trace = {7'd0, dbg_inst, irq_pend, pq_v[1:0], ra_a, sr_s, sr_m, rf_wact, rf_waddr, rf_we, state, isp_q, rf_a, ea};
 assign dbg_sr = sr;
 assign dbg_state = state;
 

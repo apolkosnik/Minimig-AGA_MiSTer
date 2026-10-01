@@ -264,6 +264,7 @@ localparam DS_FLTWAIT= 4'd8;   // a later portion faulted: the first one is stil
 
 reg  [3:0] ds;
 reg [31:0] r_addr;       // current portion address (logical)
+reg [31:4] d_fill_line;  // logical line of the bus read, retained until its fill ends
 reg  [2:0] r_rem;        // operand bytes remaining
 reg  [2:0] r_pn;         // bytes in the current portion
 reg [31:0] r_data;       // assembled read data / remaining write data (right justified)
@@ -426,6 +427,7 @@ always @(posedge clk) begin
 		b_req <= 1'b0; b_kind <= 2'd0; b_addr <= 32'd0; b_nbytes <= 3'd0; b_total <= 3'd0; b_rw <= 1'b1;
 		b_fc <= 3'd0; b_rmc <= 1'b0; b_rmc_last <= 1'b0; b_ciout <= 1'b0; b_cbreq <= 1'b0; b_ocs <= 1'b0;
 		b_cache <= 1'b0; b_wdata <= 32'd0;
+		d_fill_line <= 28'd0;
 		r_addr <= 32'd0; r_rem <= 3'd0; r_pn <= 3'd0; r_data <= 32'd0; r_got <= 3'd0;
 		r_ocs <= 1'b0; r_first <= 1'b1; r_cross_line <= 1'b0; d_pend <= 1'b0; i_pend <= 1'b0;
 		ip_addr <= 32'd0; ip_fc <= 3'd0;
@@ -440,7 +442,10 @@ always @(posedge clk) begin
 		wb_rmc <= 1'b0; wb_rmc_last <= 1'b0;
 	end else begin
 		//------------------------------------------------------------ request handshake
-		if (b_req && b_ack) b_req <= 1'b0;
+		if (b_req && b_ack) begin
+			b_req <= 1'b0;
+			if (owner == OWN_DU && !own_ifetch && b_rw) d_fill_line <= r_addr[31:4];
+		end
 		d_pend <= (ds == DS_IDLE) && d_go && (dburst_busy || wr_stall);
 		// a fetch that cannot be looked up now waits in the pending slot; a
 		// lookup from the idle state consumes the pending one first
@@ -589,7 +594,9 @@ always @(posedge clk) begin
 								b_addr <= tr_pa; b_nbytes <= c_pn; b_total <= c_rem;
 								b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc; b_rmc_last <= 1'b0;
 								b_ciout <= tr_ci; b_ocs <= c_ocs;
-								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_rmc && !d_nocache;
+								// a read-modify-write read fills its entry (no burst): it is always a
+								// bus cycle, and a stale entry must not outlive it
+								b_cache <= dc_fill_ok && !tr_ci && cachable_space && !d_nocache;
 								b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !tr_ci && cachable_space && !d_rmc && !d_nocache &&
 								           (!dc_tag_hit || dc_line_empty) && !((lk_first || r_first) && c_cross);
 								b_wdata <= 32'd0;
@@ -632,7 +639,7 @@ always @(posedge clk) begin
 					b_addr <= d_iack ? r_addr : r_pa_hold; b_nbytes <= r_pn; b_total <= r_rem;
 					b_rw <= 1'b1; b_fc <= d_fc; b_rmc <= d_rmc && !d_iack; b_rmc_last <= 1'b0;
 					b_ciout <= r_ci_hold && !d_iack; b_ocs <= r_ocs;
-					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache;
+					b_cache <= dc_fill_ok && !r_ci_hold && cachable_space && !d_iack && !d_nocache;   // RMW reads fill, as above
 					b_cbreq <= dc_fill_ok && cacr[`CACR_DBE] && !r_ci_hold && cachable_space && !d_rmc && !d_iack && !d_nocache &&
 					           (!r_tag_hit || r_line_empty) && !(r_first && r_cross_line);
 					b_wdata <= 32'd0;
@@ -704,9 +711,11 @@ always @(posedge clk) begin
 			default: ds <= DS_IDLE;
 		endcase
 
-		// data cache fills (the transfer is the data unit's)
+		// The operand may finish before a narrow-port or burst fill does:
+		// r_addr can advance to the next portion and d_fc to the next access.
+		// Use the saved logical line and b_fc, held by the bus slot owner.
 		if (b_fill_stb && owner == OWN_DU && !own_ifetch && dc_fill_ok) begin
-			dc_fi_we <= 1'b1; dc_fi_addr <= {r_addr[31:4], b_fill_addr[3:2]}; dc_fi_fc <= d_fc; dc_fi_data <= b_fill_data;
+			dc_fi_we <= 1'b1; dc_fi_addr <= {d_fill_line, b_fill_addr[3:2]}; dc_fi_fc <= b_fc; dc_fi_data <= b_fill_data;
 		end
 
 		//------------------------------------------------------------ instruction port

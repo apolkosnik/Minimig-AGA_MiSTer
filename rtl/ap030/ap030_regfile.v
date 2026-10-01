@@ -50,21 +50,24 @@ wire [1:0] act = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
 wire [31:0] a7 = (act == 2'd0) ? usp : (act == 2'd1) ? isp : msp;
 
 // a write is visible to reads in the same clock it is applied, so a value
-// written by one state can be read by the next without a hazard
-function [31:0] rd;
-	input [3:0] i;
-	begin
-		// a pending A7 write is forwarded only to reads of the same stack pointer
-		if (we && waddr == i && (i != 4'd15 || wact == act)) rd = wdata;
-		else rd = (i == 4'd15) ? a7 : r[i];
-	end
-endfunction
+// written by one state can be read by the next without a hazard.  A pending
+// A7 write is forwarded only to reads of the same stack pointer.
+// Plain continuous logic: written as a function (input "i", the name of the
+// reset loop's integer, reading the module signals) Quartus 17 did not build
+// the A7 forwarding, and the board read the old stack pointer.
+wire        fwd_a7 = we && (waddr == 4'd15) && (wact == act);
+wire [31:0] rd_a7  = fwd_a7 ? wdata : a7;
+wire        fwd_a  = we && (waddr == raddr_a) && (raddr_a != 4'd15);
+wire        fwd_b  = we && (waddr == raddr_b) && (raddr_b != 4'd15);
+wire        fwd_c  = we && (waddr == raddr_c) && (raddr_c != 4'd15);
+wire        fwd_d  = we && (waddr == raddr_d) && (raddr_d != 4'd15);
+wire        fwd_e  = we && (waddr == raddr_e) && (raddr_e != 4'd15);
 
-assign rdata_a = rd(raddr_a);
-assign rdata_b = rd(raddr_b);
-assign rdata_c = rd(raddr_c);
-assign rdata_d = rd(raddr_d);
-assign rdata_e = rd(raddr_e);
+assign rdata_a = (raddr_a == 4'd15) ? rd_a7 : fwd_a ? wdata : r[raddr_a];
+assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : r[raddr_b];
+assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : r[raddr_c];
+assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : r[raddr_d];
+assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : r[raddr_e];
 assign usp_q = usp;
 assign isp_q = isp;
 assign msp_q = msp;

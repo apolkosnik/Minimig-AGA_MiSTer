@@ -254,10 +254,59 @@ fastchip fastchip
 	.rtg_base(), .rtg_stride(),
 	.rtg_pal_clk(pal_clk), .rtg_pal_dw(pal_dw), .rtg_pal_dr(pal_dr),
 	.rtg_pal_a(pal_a), .rtg_pal_wr(pal_wr),
-	.ide_ena(1'b0), .ide_irq(), .ide_req(),
-	.ide_address(5'd0), .ide_write(1'b0), .ide_writedata(16'd0),
+	.ide_ena(1'b1), .ide_irq(), .ide_req(),
+	.ide_address(ide_a), .ide_write(ide_w), .ide_writedata(ide_wd),
 	.ide_read(1'b0), .ide_readdata(), .ide_led()
 );
+
+//---------------------------------------------------------------------------
+// IDE management side (MiSTer's ARM): a write to $F1D0 marks drive 0
+// present, loads one 256-word sector (word i = {i ^ $5A, i}) into its
+// buffer and raises DRQ with the last-read flag; $F1D2 becomes nonzero
+//---------------------------------------------------------------------------
+reg  [4:0] ide_a = 0;
+reg        ide_w = 0;
+reg [15:0] ide_wd = 0;
+reg  [9:0] ide_step = 0;       // 0 idle, 1..258 writes, 259 status
+reg        ide_tgl = 0, ide_tgl_seen = 0;
+reg        ide_done = 0;
+wire [7:0] ide_i = ide_step[7:0] - 8'd3;
+reg  [3:0] ide_ph = 0;          // each management write: 8 clk_114 high, 8 low (clk_sys domain)
+always @(posedge clk_114) begin
+	ide_done <= 1'b0;
+	ide_ph <= ide_ph + 1'd1;
+	if (ide_ph == 4'd7) ide_w <= 1'b0;
+	if (ide_step == 0) begin
+		ide_ph <= 0;
+		if (ide_ph == 4'd7) ide_w <= 1'b0; else if (ide_ph < 4'd7) ide_ph <= ide_ph + 1'd1;   // finish the last strobe
+		if (ide_tgl != ide_tgl_seen) begin ide_tgl_seen <= ide_tgl; ide_step <= 1; end
+	end else if (ide_ph == 4'd15) begin
+		if (ide_step == 1) begin ide_a <= 5'd6; ide_wd <= 16'h000B; end          // drive 0 present
+		else if (ide_step == 2) begin ide_a <= 5'd0; ide_wd <= 16'h0001; end     // 256 words, no error
+		else if (ide_step <= 258) begin ide_a <= 5'h0F; ide_wd <= {ide_i ^ 8'h5A, ide_i}; end
+		else begin ide_a <= 5'd5; ide_wd <= 16'h5A00; end                        // DRDY DSC DRQ, last read
+		ide_w <= 1'b1;
+		if (ide_step == 259) begin ide_step <= 0; ide_done <= 1'b1; ide_tgl_seen <= ide_tgl; end   // requests during the load are dropped
+		else ide_step <= ide_step + 1'd1;
+	end
+end
+always @(posedge clk_114) if (ide_done) mem[16'hF1D2 >> 1] <= 16'h0001;
+reg [13:0] idet_io = 0, idet_mg = 0;
+reg        idet_rd = 0;
+always @(posedge clk_114) if ($test$plusargs("idetrace")) begin
+	idet_io <= fastchip.gayle.ide0.io_cnt; idet_mg <= fastchip.gayle.ide0.mgmt_cnt;
+	idet_rd <= fastchip.gayle.ide0.io_read;
+	if (fastchip.gayle.ide0.io_cnt != idet_io || fastchip.gayle.ide0.io_read != idet_rd)
+		$display("%0t IDE io_cnt=%0d io_read=%b io_32=%b drq=%b status=%h addr=%h lw=%b", $time,
+		         fastchip.gayle.ide0.io_cnt, fastchip.gayle.ide0.io_read, fastchip.gayle.ide0.io_32,
+		         fastchip.gayle.ide0.drq, fastchip.gayle.ide0.status, {chip_addr,1'b0}, fc_lw);
+	if (fastchip.gayle.ide0.io_stb || fastchip.gayle.ide0.reset)
+		$display("%0t IDE stb=%b reset=%b mgw=%b mga=%h rd=%b sel_tfr=%b", $time, fastchip.gayle.ide0.io_stb,
+		         fastchip.gayle.ide0.reset, fastchip.gayle.ide0.mgmt_write, fastchip.gayle.ide0.mgmt_address,
+		         fastchip.gayle.rd, fastchip.gayle.sel_tfr);
+	if (fastchip.gayle.ide0.mgmt_cnt != idet_mg && fastchip.gayle.ide0.mgmt_cnt < 6)
+		$display("%0t IDE mgmt_cnt=%0d", $time, fastchip.gayle.ide0.mgmt_cnt);
+end
 
 //---------------------------------------------------------------------------
 // Accelerated RAM port model.
@@ -624,6 +673,12 @@ always @(posedge clk_114) begin
 	if (cw_stb) begin
 		if (cw_addr == (16'hF100 >> 1))
 			failcode <= cw_data;
+		if (cw_addr == (16'hF102 >> 1) && !cw_uds && !cw_lds && $test$plusargs("idedump"))
+			$display("IDEDUMP w: %h %h %h %h %h %h %h %h | l: %h %h %h %h %h %h %h %h",
+			         mem[16'h4000>>1], mem[16'h4002>>1], mem[16'h4004>>1], mem[16'h4006>>1],
+			         mem[16'h4008>>1], mem[16'h400A>>1], mem[16'h400C>>1], mem[16'h400E>>1],
+			         mem[16'h4400>>1], mem[16'h4402>>1], mem[16'h4404>>1], mem[16'h4406>>1],
+			         mem[16'h4408>>1], mem[16'h440A>>1], mem[16'h440C>>1], mem[16'h440E>>1]);
 		if (cw_addr == (16'hF102 >> 1) && !cw_uds && !cw_lds) begin
 			if (cw_data == 16'h600D) result <= 1;
 			else begin
@@ -647,6 +702,7 @@ always @(posedge clk_114) begin
 		if (cw_addr == (16'hF1A4 >> 1)) bench_clks[31:16] <= cw_data;
 		if (cw_addr == (16'hF1A6 >> 1)) bench_clks[15:0]  <= cw_data;
 		if (cw_addr == (16'hF1A8 >> 1)) bench_report <= 1;
+		if (cw_addr == (16'hF1D0 >> 1)) ide_tgl <= ~ide_tgl;
 		if (cw_addr == (16'hF1C0 >> 1)) watch_addr[31:16] <= cw_data;
 		if (cw_addr == (16'hF1C2 >> 1)) watch_addr[15:0]  <= cw_data;
 		if (cw_addr == (16'hF146 >> 1))

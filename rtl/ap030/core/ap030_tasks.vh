@@ -26,7 +26,7 @@ endtask
 
 // convenience wrappers
 task rd;   input [31:0] addr; input [1:0] size; input [3:0] dst_sel; input [7:0] ret;
-	begin dreq(addr, size, 1'b1, 32'd0, ea_pc ? fc_prog : fc_data, 1'b0, 1'b0, dst_sel, ret); end endtask
+	begin dreq(addr, size, 1'b1, 32'd0, (ea_pc && PCREL_PROGRAM_SPACE) ? fc_prog : fc_data, 1'b0, 1'b0, dst_sel, ret); end endtask
 task wr;   input [31:0] addr; input [1:0] size; input [31:0] data; input [7:0] ret;
 	begin dreq(addr, size, 1'b0, data, fc_data, 1'b0, 1'b0, DW_NONE, ret); end endtask
 task rd_sd; input [31:0] addr; input [1:0] size; input [3:0] dst_sel; input [7:0] ret;   // supervisor data

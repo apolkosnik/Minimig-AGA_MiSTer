@@ -15,6 +15,13 @@
 `include "ap030_defs.svh"
 
 module ap030_top
+#(
+	// PC-relative operand reads use program space (UM 2.4, 4.2).  An
+	// integration whose glue reads "program space" as "instruction fetch"
+	// (a TG68-style busstate, as Minimig's cpu_wrapper) sets this to 0 so
+	// those reads keep the data function code there.
+	parameter PCREL_PROGRAM_SPACE = 1
+)
 (
 	input             clk,
 
@@ -66,6 +73,13 @@ module ap030_top
 	output            dbg_halted,
 	// system glue (emulator integration): VBR, CACR, cache-clear pulses
 	output     [31:0] dbg_vbr,
+	output      [7:0] dbg_vec,      // exception observation, valid while dbg_state is the exception entry
+	output     [31:0] dbg_epc,
+	output     [15:0] dbg_esr,
+	output     [15:0] dbg_ir,
+	output     [31:0] dbg_ea,
+	output     [31:0] dbg_isp,
+	output    [127:0] dbg_trace,
 	output     [31:0] dbg_cacr,
 	output            dbg_cache_clear,  // pulse: CACR written with CD, CED, CI or CEI set
 	// system options (tie to 0 for a plain MC68030):
@@ -128,7 +142,7 @@ assign dbg_cache_clear = cacr_ci | cacr_cd | cacr_cei | cacr_ced;
 wire  [7:2] caar_idx;
 wire        halted;
 
-ap030_core core (
+ap030_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE)) core (
 	.clk(clk), .rst(rst),
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .d_fc(d_fc), .d_wdata(d_wdata),
@@ -145,7 +159,7 @@ ap030_core core (
 	.cacr(cacr), .cacr_ci(cacr_ci), .cacr_cei(cacr_cei), .cacr_cd(cacr_cd), .cacr_ced(cacr_ced), .caar_idx(caar_idx),
 	.ipl_n(ipl_n), .ipend_n(ipend_n), .reset_drive(reset_drive), .status_n(status_n), .refill_n(refill_n),
 	.halted(halted), .dbg_pc(dbg_pc), .dbg_sr(dbg_sr), .dbg_state(dbg_state), .dbg_inst(dbg_inst),
-	.dbg_vbr(dbg_vbr)
+	.dbg_vbr(dbg_vbr), .dbg_vec(dbg_vec), .dbg_epc(dbg_epc), .dbg_esr(dbg_esr), .dbg_ir(dbg_ir), .dbg_ea(dbg_ea), .dbg_isp(dbg_isp), .dbg_trace(dbg_trace)
 ,
 	.nmi_vec_nocache(nmi_vec_nocache)
 );
