@@ -7,23 +7,32 @@
 // through two dual-clock FIFOs.                                            //
 //                                                                          //
 // Reads are served from two line buffers (16 bytes each, one for program  //
-// fetches, one for data): a line miss requests the whole line, and every   //
-// read of a buffered line terminates at once.  A cache burst (CBREQ) is    //
-// accepted with CBACK and its four longwords follow at one per clock,      //
-// wrapping modulo 4 from the requested one.                               //
+// fetches, one for data): every read of a buffered line terminates at      //
+// once.  A cache burst (CBREQ) is accepted with CBACK and its four         //
+// longwords follow at one per clock, wrapping modulo 4 from the requested  //
+// one.  Behind the buffers is an 8 KiB cache of Fast RAM (512 lines of 16  //
+// bytes, direct mapped on the physical DDR3 line, block RAM): a buffer    //
+// miss looks it up (two clocks) and a hit loads the whole line into the   //
+// buffer; a miss reads the line from DDR3 and allocates it.  The           //
+// processor's on-chip caches and CACR are unchanged; this cache is below   //
+// the MMU, on physical addresses.                                          //
 //                                                                          //
 // Writes are posted: STERM as soon as the command FIFO has room.  They     //
-// update any buffered copy of their line, and they reach DDR3 in order     //
-// with the reads, so a read never overtakes a write to the same address.   //
+// update any buffered copy of their line and the cache's copy (write      //
+// through, no allocation), and they reach DDR3 in order with the reads,   //
+// so a read never overtakes a write to the same address.                   //
 //                                                                          //
-// Coherence: the buffers follow the processor's cache maintenance -- a    //
-// CACR clear of either cache (CI, CEI, CD, CED) empties them -- and a      //
-// cache-inhibited access (CIOUT) is never answered from a buffered line:   //
-// it fetches the line and the line is dropped when that cycle ends.  A     //
+// Coherence: the buffers and the cache follow the processor's cache       //
+// maintenance -- a CACR clear of either cache (CI, CEI, CD, CED) empties   //
+// the buffers and sweeps the cache invalid (512 clocks, reads go to DDR3   //
+// meanwhile), as does a processor reset -- and a cache-inhibited access    //
+// (CIOUT) is never answered from a buffered line or the cache: it fetches  //
+// the line, which is not allocated and is dropped when that cycle ends.  A //
 // fill in flight when the buffers are cleared serves only the cycle that   //
-// waits for it.  No other master writes Fast RAM in this system (the DDR3  //
-// users beside the processor have their own regions), so there is no      //
-// snoop input.                                                             //
+// waits for it and is not allocated.  The processor is the only master     //
+// that writes Fast RAM through its caches; a DMA writer (CDTV) relies on   //
+// the operating system's cache clear after the transfer, as the on-chip   //
+// caches do.                                                               //
 //                                                                          //
 // DDR3 layout (as the Minimig controllers use it): a 64-bit word holds     //
 // four 16-bit words in ascending address order from bit 0, each word big   //
@@ -164,6 +173,59 @@ wire [63:0] w_data64 = w_long[0] ? {w_data[15:0], w_data[31:16], 32'd0} : {32'd0
 wire [7:0]  w_be8    = w_long[0] ? {be_long[3:0], 4'd0} : {4'd0, be_long[3:0]};
 
 //---------------------------------------------------------------------------
+// the Fast RAM cache: 512 lines of 16 bytes, direct mapped.  Index = DDR3
+// line address bits 9..1, tag = bits 28..10; one tag RAM {valid, tag} and
+// one 32-bit data RAM per longword of the line (byte enables).
+//---------------------------------------------------------------------------
+localparam L_IDLE = 2'd0, L_LOOK = 2'd1, L_UPD = 2'd2;
+reg  [1:0] l2s;
+reg        sweeping;               // tags are being cleared, sw_idx next
+reg  [8:0] sw_idx;
+reg        lk_ent;                 // the lookup in progress fills this buffer
+reg [28:1] lk_line;
+reg  [8:0] u_idx;                  // the posted write whose tag is being read
+reg [18:0] u_tag;
+reg  [1:0] u_long;
+reg  [3:0] u_lanes;
+reg [31:0] u_data;
+reg        f_alloc;                // the line read in flight allocates when it completes
+reg        f_pend;                 // a completed fill waits to be written into the cache
+reg  [8:0] f_idx;
+reg [18:0] f_tag;
+reg        f_ent;
+
+wire [19:0] l2_tag_q;
+wire [31:0] l2_d_q [0:3];
+// the fill write takes the RAMs for a clock: it waits for a write update's
+// data write, and posting and new lookups wait for it (a read of what is
+// being written would return the old contents)
+wire        f_wr     = f_pend && (l2s != L_UPD);
+wire        post_now = wcap && !wcap_ack && !f_wr;
+wire        rd_miss  = sel && as_asserted && rw && !rd_hit && !rd_pend && !wcap && cmd_wlevel <= 4'd7;
+wire        look_go  = rd_miss && !ci && !sweeping && (l2s == L_IDLE) && !f_pend;
+wire        ddr_go   = rd_miss && (ci || sweeping) && (l2s != L_LOOK);
+wire        look_hit = (l2s == L_LOOK) && !sweeping && !clear && l2_tag_q[19] && (l2_tag_q[18:0] == lk_line[28:10]);
+wire        upd_hit  = (l2s == L_UPD) && !sweeping && l2_tag_q[19] && (l2_tag_q[18:0] == u_tag);
+wire  [8:0] l2_ra    = post_now ? w_addr[9:1] : cur_line[9:1];
+
+wire        tag_we   = sweeping || f_wr;
+wire  [8:0] tag_wa   = sweeping ? sw_idx : f_idx;
+wire [19:0] tag_wd   = sweeping ? 20'd0  : {1'b1, f_tag};
+
+ap030_l2ram #(.AW(9), .DW(20)) l2_tag (
+	.clk(clk), .we(tag_we), .wa(tag_wa), .wd(tag_wd), .ra(l2_ra), .q(l2_tag_q)
+);
+genvar gl;
+generate for (gl = 0; gl < 4; gl = gl + 1) begin : g_l2d
+	wire dwe = (f_wr && !sweeping) || (upd_hit && u_long == gl);
+	ap030_l2ram_be #(.AW(9)) l2_data (
+		.clk(clk), .we(dwe), .wa(f_wr ? f_idx : u_idx),
+		.be(f_wr ? 4'b1111 : u_lanes), .wd(f_wr ? lb_d[f_ent][gl] : u_data),
+		.ra(l2_ra), .q(l2_d_q[gl])
+	);
+end endgenerate
+
+//---------------------------------------------------------------------------
 // sequencing (processor clock)
 //---------------------------------------------------------------------------
 integer e, k;
@@ -176,35 +238,86 @@ always @(posedge clk) begin
 	if (as_d && !as_asserted)
 		for (e = 0; e < 2; e = e + 1)
 			if (lb_once[e] && !(rd_pend && rd_ent == e)) begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
+	// the cache sweep: one tag per clock
+	if (sweeping) begin
+		sw_idx <= sw_idx + 9'd1;
+		if (sw_idx == 9'd511) sweeping <= 1'b0;
+	end
 	if (rst) begin
 		for (e = 0; e < 2; e = e + 1) begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
 		// a line read still in flight completes into nothing
 		if (rd_pend) rd_drop <= 1'b1;
+		sweeping <= 1'b1; sw_idx <= 9'd0;
+		l2s <= L_IDLE; f_pend <= 1'b0; f_alloc <= 1'b0;
 	end else begin
 		// cache maintenance: the buffers are emptied; a fill in flight
-		// serves only the cycle waiting for it
-		if (clear)
+		// serves only the cycle waiting for it; the cache is swept
+		if (clear) begin
 			for (e = 0; e < 2; e = e + 1) begin
 				if (rd_pend && rd_ent == e) lb_once[e] <= 1'b1;
 				else begin lb_valid[e] <= 1'b0; lb_once[e] <= 1'b0; end
 			end
+			sweeping <= 1'b1; sw_idx <= 9'd0;
+			f_alloc <= 1'b0; f_pend <= 1'b0;
+		end
+		// a completed fill is written into the cache (data and tag)
+		if (f_wr) f_pend <= 1'b0;
+		// a posted write's tag compare: update the cached copy
+		if (l2s == L_UPD) l2s <= L_IDLE;
+		// a lookup's tag compare: a hit loads the whole line into the
+		// buffer; a miss reads it from DDR3 and allocates it
+		if (l2s == L_LOOK) begin
+			l2s <= L_IDLE;
+			if (look_hit) begin
+				for (k = 0; k < 4; k = k + 1) lb_d[lk_ent][k] <= l2_d_q[k];
+				lb_valid[lk_ent] <= 1'b1;
+				lb_once[lk_ent]  <= 1'b0;
+				lb_line[lk_ent]  <= lk_line;
+			end else begin
+				cmd_we    <= 1'b1;
+				cmd_wdata <= {1'b0, lk_line, 1'b0, 8'hFF, 64'd0};
+				rd_pend   <= 1'b1;
+				rd_ent    <= lk_ent;
+				rd_half   <= 1'b0;
+				rd_drop   <= 1'b0;
+				f_alloc   <= !sweeping && !clear;
+				lb_valid[lk_ent] <= 1'b0;
+				lb_once[lk_ent]  <= 1'b0;
+				lb_line[lk_ent]  <= lk_line;
+			end
+		end
 		// post a captured write (it always fits: STERM waited for room)
-		if (wcap && !wcap_ack) begin
+		else if (post_now) begin
 			cmd_we    <= 1'b1;
 			cmd_wdata <= {1'b1, w_addr, w_be8, w_data64};
 			wcap_ack  <= 1'b1;
 			for (e = 0; e < 2; e = e + 1)
 				if (lb_valid[e] && lb_line[e] == w_addr[28:1])
 					lb_d[e][w_long] <= merge(lb_d[e][w_long], w_data, w_lanes);
+			// its tag is read this clock and compared in the next
+			l2s     <= L_UPD;
+			u_idx   <= w_addr[9:1];
+			u_tag   <= w_addr[28:10];
+			u_long  <= w_long;
+			u_lanes <= w_lanes;
+			u_data  <= w_data;
 		end
-		// a read that misses requests its line (after any posted write)
-		else if (sel && as_asserted && rw && !rd_hit && !rd_pend && !wcap && cmd_wlevel <= 4'd7) begin
+		// a read that misses the buffers looks the line up in the cache
+		else if (look_go && !f_wr) begin
+			l2s     <= L_LOOK;
+			lk_ent  <= prog;
+			lk_line <= cur_line;
+		end
+		// cache inhibited, or the cache being swept: straight to DDR3,
+		// not allocated
+		else if (ddr_go && !f_wr) begin
 			cmd_we    <= 1'b1;
 			cmd_wdata <= {1'b0, cur_line, 1'b0, 8'hFF, 64'd0};
 			rd_pend   <= 1'b1;
 			rd_ent    <= prog;
 			rd_half   <= 1'b0;
 			rd_drop   <= 1'b0;
+			f_alloc   <= 1'b0;
 			lb_valid[prog] <= 1'b0;
 			lb_once[prog]  <= ci;
 			lb_line[prog]  <= cur_line;
@@ -221,6 +334,14 @@ always @(posedge clk) begin
 			rd_pend <= 1'b0;
 			rd_drop <= 1'b0;
 			if (!rd_drop && !rst) lb_valid[rd_ent] <= 1'b1;
+			// allocate: written into the cache from the buffer next clock
+			if (!rd_drop && !rst && f_alloc && !clear && !sweeping) begin
+				f_pend <= 1'b1;
+				f_idx  <= lb_line[rd_ent][9:1];
+				f_tag  <= lb_line[rd_ent][28:10];
+				f_ent  <= rd_ent;
+			end
+			f_alloc <= 1'b0;
 		end
 	end
 end
@@ -233,6 +354,9 @@ initial begin
 	wcap = 1'b0; wcap_done = 1'b0; wcap_ack = 1'b0; cmd_we = 1'b0; cmd_wdata = 0;
 	beat_idx = 2'd0; burst_active = 1'b0; sterm_rec = 1'b0;
 	w_lanes = 4'd0; w_data = 32'd0; w_addr = 29'd0; w_long = 2'd0;
+	l2s = L_IDLE; sweeping = 1'b1; sw_idx = 9'd0; f_alloc = 1'b0; f_pend = 1'b0;
+	lk_ent = 1'b0; lk_line = 28'd0; f_idx = 9'd0; f_tag = 19'd0; f_ent = 1'b0;
+	u_idx = 9'd0; u_tag = 19'd0; u_long = 2'd0; u_lanes = 4'd0; u_data = 32'd0;
 end
 
 endmodule

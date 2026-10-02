@@ -31,7 +31,7 @@ sed -e 's/^FAILREG	equ	\$F00100/FAILREG	equ	$F100/' -e 's/^DONEREG	equ	\$F00102/
     -e 's/\$F001C\([04]\)/$F1C\1/g' \
     -e 's/^\(\tchkl\td2,\)6,\(24[36]\)$/\15,\2/' \
     asm/t_integer.src > asm/t_integer.s
-PROGS="t_integer t_minimig t_fastram t_coherence t_ide t_supframe t_dcache_fill_addr t_dcache_fill_fc"
+PROGS="t_integer t_minimig t_fastram t_coherence t_ide t_supframe t_l2cache t_dcache_fill_addr t_dcache_fill_fc"
 for t in $PROGS; do
 	$VASM -quiet -Fbin -m68030 -m68881 -m68851 -no-opt -o "$WORK/$t.bin" "asm/$t.s"
 	tohex "$WORK/$t.bin" "$WORK/$t.hex"
@@ -63,7 +63,7 @@ VFLAGS="--binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-TIMESC
         -Wno-MULTIDRIVEN -Wno-PINMISSING -O1 -I$A -I$A/core -I$R"
 SRC="$R/cpu_wrapper.v $R/fastchip.v $R/rtg.v $R/akiko.v $R/gayle.v $R/ide.v $R/ram_cs_guard.v \
      ../ap040/sim_dpram.v $R/ap040/ap040_bus_timeout.v $R/A2065/a2065_ddram_arbiter.v \
-     $A/ap030_tg68k_compat.v $A/ap030_dbgcap.v $A/ap030_async_fifo.v $A/ap030_fastram_fe.v $A/ap030_fastram_be.v $A/ap030_top.v $A/ap030_core.v $A/ap030_memsys.v $A/ap030_mmu.v \
+     $A/ap030_tg68k_compat.v $A/ap030_dbgcap.v $A/ap030_async_fifo.v $A/ap030_l2ram.sv $A/ap030_fastram_fe.v $A/ap030_fastram_be.v $A/ap030_top.v $A/ap030_core.v $A/ap030_memsys.v $A/ap030_mmu.v \
      $A/ap030_cache.v $A/ap030_bus.v $A/ap030_alu.v $A/ap030_muldiv.v $A/ap030_regfile.v"
 # name:bench parameters (comma separated)
 CONFIGS="chip:
@@ -103,7 +103,7 @@ for c in $CONFIGS; do
 	name=${c%%:*}
 	for t in $PROGS; do
 		# Fast RAM programs need the memory card (FASTRAM=1 configurations)
-		case "$t" in t_fastram|t_coherence|t_supframe|dhry_fast) case "$c" in *FASTRAM=1*) ;; *) continue ;; esac ;; esac
+		case "$t" in t_fastram|t_coherence|t_supframe|t_l2cache|dhry_fast) case "$c" in *FASTRAM=1*) ;; *) continue ;; esac ;; esac
 		log="$WORK/${name}_$t.log"
 		if [ -x "$WORK/obj_$name/tb" ] && "$WORK/obj_$name/tb" "+prog=$WORK/$t.hex" > "$log" 2>&1 && grep -q "ALL TESTS PASSED" "$log"; then
 			printf "  pass  %-12s %-10s %s %s\n" "$name" "$t" "$(grep -o '([0-9]* cycles[^)]*)' "$log")" \

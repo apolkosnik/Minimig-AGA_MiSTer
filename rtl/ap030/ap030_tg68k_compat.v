@@ -48,6 +48,12 @@
 //--------------------------------------------------------------------------//
 
 module ap030_tg68k_compat
+#(
+	// on-board debug capture read over JTAG (ap030_dbgcap.v,
+	// tests/ap030/ap030_dbgread.tcl): about 600 ALMs and 15 M10Ks, so it
+	// is built only when a board problem needs it
+	parameter DEBUG_CAPTURE = 0
+)
 (
 	input         clk,           // Minimig CPU bus (clk_sys)
 	input         clk_cpu,       // processor
@@ -430,6 +436,7 @@ initial begin
 	snp_tgl_k = 1'b0; snp_addr_k = 32'd0; snp_tgl_c = 3'b000; snp_we_c = 1'b0; snp_addr_c = 32'd0;
 end
 
+generate if (DEBUG_CAPTURE) begin : g_dbgcap
 // a transfer as the processor terminates it: every STERM beat on the Fast
 // RAM port, the first DSACK/BERR/AVEC edge on the Minimig port
 reg dbg_term_q = 1'b0;
@@ -444,5 +451,6 @@ ap030_dbgcap dbgcap (
 	.bus_fast(fast_sel),
 	.fe_stb(cmd_we && cmd_wdata[101]), .fe_cmd(cmd_wdata[100:0])
 );
+end endgenerate
 
 endmodule
