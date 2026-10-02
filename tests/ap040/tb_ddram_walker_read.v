@@ -132,7 +132,9 @@ module tb_ddram_walker_read;
 
 	ddram_ctrl #(.CPU_CACHE(1)) dut (
 		.sysclk(clk), .reset_n(reset_n), .cache_rst(1'b1),
-		.cache_inhibit(cache_inhibit), .cpu_cache_ctrl(4'b0011),
+		.cache_inhibit(cache_inhibit), .cpu_cache_ctrl(4'b0011), .dcache_sw_en(1'b1),
+		// upstream's DMA port (CDTV) idle
+		.dmaAddr(28'd0), .dmaCS(1'b0), .dmaWE(1'b0), .dmaL(1'b1), .dmaU(1'b1), .dmaWR(16'd0), .dmaRD(), .dmaACK(),
 		.DDRAM_CLK(ddram_clk), .DDRAM_BUSY(ddram_busy),
 		.DDRAM_BURSTCNT(ddram_burstcnt), .DDRAM_ADDR(ddram_addr),
 		.DDRAM_DOUT(ddram_dout), .DDRAM_DOUT_READY(ddram_dout_ready),

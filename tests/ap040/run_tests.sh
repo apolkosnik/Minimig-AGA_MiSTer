@@ -122,6 +122,9 @@ compile dualram_turbo iverilog -g2012 -I "$RTL" -s tb_dualram_turbo \
 	../../rtl/A2065/a2065_ddram_arbiter.v \
 	sim_dpram.v ../../rtl/ram_cs_guard.v \
 	$RTL/ap040_walker_cdc.v $SRC &
+compile cache_fill_snoop iverilog -g2012 -s tb_cache_snoop \
+	-o "$WORK/tb_cache_fill_snoop.vvp" tb_cache_fill_snoop.sv \
+	../../rtl/cpu_cache_new.v ../../rtl/sim/cache/dpram_sim.v &
 compile cache_snoop iverilog -g2012 -I "$RTL" -s tb_ap040_cache_snoop \
 	-o "$WORK/tb_cache_snoop.vvp" tb_ap040_cache_snoop.v \
 	sim_dpram.v $RTL/ap040_cache.v &
@@ -172,6 +175,7 @@ leg bus_timeout        "$WORK/tb_bus_timeout.vvp" &
 leg cart_hrtmon        "$WORK/tb_cart_hrtmon.vvp" &
 leg sdram32            "$WORK/tb_sdram32.vvp" &
 leg cache_snoop        "$WORK/tb_cache_snoop.vvp" &
+leg cache_fill_snoop   "$WORK/tb_cache_fill_snoop.vvp" &
 negleg sdram32_brk_lock "$WORK/tb_sdram32.vvp" +break_lockstep &
 negleg sdram32_brk_lane "$WORK/tb_sdram32.vvp" +break_laneswap &
 negleg sdram32_brk_wr   "$WORK/tb_sdram32.vvp" +break_chipwr &

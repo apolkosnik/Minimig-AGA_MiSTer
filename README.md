@@ -8,10 +8,11 @@ This is a port of the minimig core to the [MiSTer board](https://github.com/MiST
 
 The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipset](http://en.wikipedia.org/wiki/Amiga_Advanced_Graphics_Architecture) capabilites, which allows it to emulate the latest Amiga models ([Amiga 1200](http://en.wikipedia.org/wiki/Amiga_1200)) and (partially) [Amiga CD32](http://en.wikipedia.org/wiki/Amiga_CD32)). Of course it also supports previous OCS/ECS Amigas like [Amiga 500](http://en.wikipedia.org/wiki/Amiga_500), [Amiga 600](http://en.wikipedia.org/wiki/Amiga_600) etc.
 
+This version has been modified to add support for MiSTer Floppy, SCP and IPF support - see https://mister.robsmithdev.co.uk
 
 ## Core features supported
 
-* Chipset variants : OCS, ECS, AGA
+* Chipset variants : OCS, ECS, AGA, CD32, CDTV
 * ChipRAM : 0.5MB - 2.0MB
 * SlowRAM : 0.0MB - 1.5MB
 * FastRAM : 0.0MB - 384MB
@@ -26,12 +27,27 @@ The Minimig-MiSTer variant in this repository has been upgraded with [AGA chipse
 * RTG with up to 1920x1080 and 1600x1200 resolutions
 * Peripherals : USB keyboards, USB mice, USB gamepads
 * Serial connection to Linux with ability to connect to Internet.
+* Ethernet A2065.
 * Shared folder for rapid file exchange between Linux and Amiga.
 * MIDI: both MiSTer internal emulation and external through USER_IO port (MT32-pi and generic MIDI device)
 * Akiko chunk to planar implementation
 * Mouse with wheel.
+* SCP and IPF files
+* MiSTer Floppy Hardware
 
 ## Usage
+
+### Presets
+
+Supported presets for most common Amiga models. You need to place Kickstart ROMs into Games/Amiga folder:
+* A500.rom (KS v1.3)
+* A600.rom (KS v2.05)
+* A1200.rom (KS v3.1)
+* CD32.rom + CD32_ext.rom (KS v3.1) (see CD32 and CDTV section)
+* CDTV.rom + CDTV.rom (KS v1.3) (see CD32 and CDTV section)
+
+While Kickstart versions above are recommended as most used in corresponding configs, it's not limited to that.
+For other more advanced configs and non-listed hardware, additional OSD options and configuration Load/Save are available.
 
 ### Screen adjustment
 Adjustment is initiated from OSD menu. 
@@ -89,6 +105,23 @@ Only plain/raw HDF images are supported. WinUAE Dynamic HDF and Sparse File HDF 
 8) After booting you will see DH0:Uninitialized. Format it from Workbench menu. You can use Quick format option.
 9) Install required OS.
 
+### CD32 and CDTV
+
+For quick CD32 and CDTV game start from OSD menu you need to place following files into Games/Amiga folder:
+* CD32: CD32.rom (Kickstart main ROM) and CD32_ext.rom (Extended CD32 ROM). Only one version set exists: KS 3.1 r40.060 + ExtROM r40.60
+* CDTV: CDTV.rom (Kickstart main ROM) and CDTV_ext.rom (Extended CDTV ROM). Any version should work.
+
+Instead of ROM+ExtROM, combined 1MB ROM is supported (*_ext.rom not required).
+* CD32.rom: CD32_ext.rom+CD32.rom (1MB total)
+* CDTV.rom: CDTV_ext.rom+CDTV_ext.rom+CDTV.rom[+CDTV.rom] (1MB total)
+
+Besides original CD32 and CDTV use for games, these HW add-ons can be used in AmigaOS/Workbench as a CD drive, leaving all 4 IDE drives for HDD use.
+Note1: enable either CD32 or CDTV, not both.
+Note2: remove CD0(CD1-CD9) supporting files from devs:DOSDrivers as CD is fully handled by ExtROM.
+You have to use appropriate ROM/ExtROM from CD32/CDTV to let AmigaOS recognize CD drive. Tested in AmigaOS v3.2.
+CDTV mode is preferred because appropriate updated ROM and ExtROM v3.2 for CDTV are included in AmigaOS 3.2 installation CD.
+Besides original CDTV HW config, you can use up to Amiga 1200 config (68020 + AGA + 2MB ChipRAM + 384MB FastRAM and A1200 KS ROM).
+CD32 official KS 3.1 set of ROMs also work with AmigaOS 3.2 (remember to use IDEFix to access HDD >4GB).
 
 ### MIDI
 Supported internal MiSTer emulation and external devices such as MT32-pi or generic MIDI though USER_IO.

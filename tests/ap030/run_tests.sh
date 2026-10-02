@@ -84,6 +84,8 @@ fast_turbo:-GFASTRAM=1,-GTURBO_CHIP=1"
 pids=""
 for c in $CONFIGS; do
 	name=${c%%:*}; params=$(echo "${c#*:}" | tr ',' ' ')
+	# a failed build must not leave the previous binary to be run below
+	rm -f "$WORK/obj_$name/tb"
 	# shellcheck disable=SC2086
 	( verilator $VFLAGS $params --top-module tb_ap030_wrapchip --Mdir "$WORK/obj_$name" -o tb \
 	    tb_ap030_wrapchip.sv $SRC > "$WORK/build_$name.log" 2>&1 || echo "BUILD FAIL $name (see $WORK/build_$name.log)" ) &
@@ -93,6 +95,10 @@ for p in $pids; do wait "$p"; done
 
 echo "== running =="
 fail=0
+for c in $CONFIGS; do
+	name=${c%%:*}
+	[ -x "$WORK/obj_$name/tb" ] || { echo "  FAIL  $name: no simulator (build failed, see $WORK/build_$name.log)"; fail=1; }
+done
 for c in $CONFIGS; do
 	name=${c%%:*}
 	for t in $PROGS; do

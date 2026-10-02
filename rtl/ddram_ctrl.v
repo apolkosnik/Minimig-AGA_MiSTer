@@ -36,6 +36,7 @@ module ddram_ctrl
 	input             cache_rst,
 	input             cache_inhibit,
 	input       [3:0] cpu_cache_ctrl,
+	input             dcache_sw_en,
 
 	// DDR3    
 	output            DDRAM_CLK,
@@ -62,7 +63,7 @@ module ddram_ctrl
 	input             mem2_write,
 	output            mem2_waitrequest,
 
-	// cpu    
+	// cpu
 	input      [28:1] cpuAddr,
 	input             cpuCS,
 	input       [1:0] cpustate,
@@ -79,7 +80,16 @@ module ddram_ctrl
 	input      [28:2] walker_addr,
 	input      [31:0] walker_wdata,
 	output reg        walker_ack,
-	output reg [31:0] walker_rdata
+	output reg [31:0] walker_rdata,
+
+	input      [28:1] dmaAddr,
+	input             dmaCS,
+	input             dmaWE,
+	input             dmaL,
+	input             dmaU,
+	input      [15:0] dmaWR,
+	output reg [15:0] dmaRD,
+	output            dmaACK
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -96,16 +106,38 @@ reg         walker_snoop_low;
 reg         ddr_swap;
 reg [15:0]  ddr_data;
 
+reg        dma_snoop_act;
+reg [28:1] dma_snoop_adr;
+reg [15:0] dma_snoop_dat;
+reg  [1:0] dma_snoop_bs;
+
 wire [28:1] walker_snoop_addr = {walker_addr_latch, walker_snoop_low};
 wire [15:0] walker_snoop_data = walker_snoop_low
 							? walker_wdata_latch[15:0]
 							: walker_wdata_latch[31:16];
+
+// one snoop port: the walker's held sequence (AP040 MMU U/M updates) or a
+// DMA write (CDTV).  The cache's snoop machine reads the address and data
+// for some clocks after snoop_act (the walker keeps them selected through
+// its gap states), so the source stays selected until the OTHER one starts
+// a snoop.  The AP030 has no walker traffic on this port.
+reg         snoop_sel_dma = 1'b0;
+always @(posedge sysclk) begin
+	if (walker_snoop)       snoop_sel_dma <= 1'b0;
+	else if (dma_snoop_act) snoop_sel_dma <= 1'b1;
+end
+wire        snoop_dma   = !walker_snoop && (dma_snoop_act || snoop_sel_dma);
+wire        snoop_act_m = walker_snoop | dma_snoop_act;
+wire [28:1] snoop_adr_m = snoop_dma ? dma_snoop_adr : walker_snoop_addr;
+wire [15:0] snoop_dat_m = snoop_dma ? dma_snoop_dat : walker_snoop_data;
+wire  [1:0] snoop_bs_m  = snoop_dma ? dma_snoop_bs  : 2'b11;
 
 cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 (
 	.clk              (sysclk),                 // clock
 	.rst              (~reset_n | ~cache_rst),  // cache reset
 	.cpu_cache_ctrl   (cpu_cache_ctrl),         // CPU cache control
+	.dcache_sw_en     (dcache_sw_en),
 	.cache_inhibit    (cache_inhibit | ramshared), // cache inhibit
 	.cpu_cs           (ramsel),                 // cpu activity
 	.cpu_adr          (cpuAddr),                // cpu address
@@ -120,10 +152,10 @@ cpu_cache_new #(.CACHE_ENABLE(CPU_CACHE)) cpu_cache
 	.sdr_dat_r        (ddr_swap ? {ddr_data[7:0], ddr_data[15:8]} : ddr_data), // sdram read data
 	.sdr_read_req     (cache_req),              // sdram read request from cache
 	.sdr_read_ack     (cache_fill),             // sdram read acknowledge to cache
-	.snoop_act        (walker_snoop),
-	.snoop_adr        (walker_snoop_addr),
-	.snoop_dat_w      (walker_snoop_data),
-	.snoop_bs         (2'b11)
+	.snoop_act        (snoop_act_m),
+	.snoop_adr        (snoop_adr_m),
+	.snoop_dat_w      (snoop_dat_m),
+	.snoop_bs         (snoop_bs_m)
 );
 
 // write buffer, enables CPU to continue while a write is in progress
@@ -168,6 +200,75 @@ always @ (posedge sysclk) begin
 end
 
 assign ramready = cache_hit || write_ena;
+
+reg dmaCS_sync1;
+reg dmaCS_sync2;
+reg dmaCS_sync3;
+always @ (posedge sysclk) begin
+	if (~reset_n) begin
+		dmaCS_sync1 <= 0;
+		dmaCS_sync2 <= 0;
+		dmaCS_sync3 <= 0;
+	end else begin
+		dmaCS_sync1 <= dmaCS;
+		dmaCS_sync2 <= dmaCS_sync1;
+		dmaCS_sync3 <= dmaCS_sync2;
+	end
+end
+wire dmaCS_rise = dmaCS_sync2 & ~dmaCS_sync3;
+
+reg        dma_write_req;
+reg        dma_write_ack;
+reg [28:1] dmaWriteAddr;
+reg [15:0] dmaWriteDat;
+reg  [1:0] dmaWriteBE;
+reg        dmaACK_r;
+
+reg        dma_read_req;
+reg        dma_read_ack;
+reg [28:1] dmaReadAddr;
+reg  [1:0] dmaReadBA;
+reg        dma_read_in_flight;
+
+assign dmaACK = dmaACK_r;
+
+always @ (posedge sysclk) begin
+	dma_snoop_act <= 0;
+
+	if (~reset_n) begin
+		dma_write_req <= 0;
+		dma_read_req  <= 0;
+		dmaACK_r      <= 0;
+	end else begin
+		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r) begin
+			if (dmaWE) begin
+			dmaWriteAddr  <= dmaAddr;
+			dmaWriteDat   <= dmaWR;
+			dmaWriteBE    <= ~{dmaU, dmaL};
+			dma_write_req <= 1'b1;
+			dma_snoop_act <= 1'b1;
+			dma_snoop_adr <= dmaAddr;
+			dma_snoop_dat <= dmaWR;
+			dma_snoop_bs  <= ~{dmaU, dmaL};
+			end else begin
+				dmaReadAddr  <= dmaAddr;
+				dma_read_req <= 1'b1;
+			end
+		end
+
+		if (dma_write_ack) begin
+			dma_write_req <= 1'b0;
+			dmaACK_r      <= 1'b1;
+		end
+
+		if (dma_read_ack) begin
+			dma_read_req <= 1'b0;
+			dmaACK_r     <= 1'b1;
+		end
+
+		if (~dmaCS_sync2) dmaACK_r <= 1'b0;
+	end
+end
 
 assign DDRAM_CLK = sysclk;
 
@@ -260,6 +361,9 @@ always @ (posedge sysclk) begin
 		walker_wdata_latch   <= 0;
 		walker_snoop_low     <= 0;
 		walker_rdata         <= 0;
+		dma_write_ack        <= 0;
+		dma_read_ack         <= 0;
+		dma_read_in_flight   <= 0;
 	end
 	else begin
 		if (!walker_req) walker_busy <= 0;
@@ -287,7 +391,22 @@ always @ (posedge sysclk) begin
 
 		case(state)
 			0: if(~ram_busy) begin
-					if(~write_ack & write_req) begin
+					if(~dma_write_ack & dma_write_req) begin
+						ram_addr      <= {3'b001, dmaWriteAddr[28:3]};
+						ram_be        <= {6'b000000,dmaWriteBE}<<{dmaWriteAddr[2:1],1'b0};
+						ram_din       <= {dmaWriteDat,dmaWriteDat,dmaWriteDat,dmaWriteDat};
+						ram_we        <= 1;
+						dma_write_ack <= 1;
+					end
+					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight) begin
+						ram_addr           <= {3'b001, dmaReadAddr[28:3]};
+						ram_be             <= 8'hFF;
+						ram_rd             <= 1;
+						dmaReadBA          <= dmaReadAddr[2:1];
+						dma_read_in_flight <= 1;
+						state              <= 1;
+					end
+					else if(~write_ack & write_req) begin
 						ram_addr <= {3'b001, writeAddr[28:3]};
 						ram_be   <= {6'b000000,writeBE}<<{writeAddr[2:1],1'b0};
 						ram_din  <= {writeDat,writeDat,writeDat,writeDat};
@@ -334,17 +453,28 @@ always @ (posedge sysclk) begin
 			1: if(ram_dout_ready) begin
 					rdwait        <= 0;
 					rd_owed       <= 0;
+					if (dma_read_in_flight) begin
+						dmaRD              <= ram_dout[{dmaReadBA, 4'b0000} +:16];
+						dma_read_ack       <= 1;
+						dma_read_in_flight <= 0;
+						state              <= 0;
+					end else begin
 					ddr_data      <= ram_dout[{ba, 4'b0000} +:16];
 					dout          <= ram_dout;
 					cache_fill    <= 1;
 					ba            <= ba + 1'd1;
 					state         <= state + 1'd1;
+					end
 				end
 				else if (&rdwait) begin
 					rdwait <= 0;
 					ram_rd <= 0;   // withdraw the command: a level-held
 					state  <= 0;   // read the slave accepted late would
 					               // otherwise become an untracked orphan
+					if (dma_read_in_flight) begin
+						dma_read_ack       <= 1;   // the DMA is answered, not wedged
+						dma_read_in_flight <= 0;
+					end
 					if (rd_owed) begin
 						stale_rd   <= 1;   // accepted: a beat is still owed
 						stale_wait <= 0;
@@ -440,6 +570,8 @@ always @ (posedge sysclk) begin
 		endcase
 
 		if(~write_req) write_ack <= 0;
+		if(~dma_write_req) dma_write_ack <= 0;
+		if(~dma_read_req)  dma_read_ack  <= 0;
 	end
 end
 

@@ -53,13 +53,15 @@ module userio
 	output reg        IO_WAIT,
 	input      [15:0] IO_DIN,
 	output reg  [7:0] memory_config,
-	output reg  [4:0] chipset_config,
-	output reg  [3:0] floppy_config,
+	output reg  [5:0] chipset_config,
+	output reg  [4:0] floppy_config,
+	output reg  [11:0] floppy_ext_drive,
+	output reg        user_port_mode,			// 1=MiSTer Floppy, 0=MT32Pi
 	output reg  [2:0] scanline,
 	output reg  [1:0] ar,
 	output reg  [1:0] blver,
 	output reg  [5:0] ide_config,
-	output reg  [1:0] cpu_config,
+	output reg  [2:0] cpu_config,
 	output reg  [2:0] cache_config,
 	output reg        bootrom =0, // do the A1000 bootrom magic in gary.v
 	output reg        usrrst,     // user reset from osd module
@@ -390,18 +392,18 @@ assign host_bs = 2'b11;
 
 reg [7:0] t_memory_config = 8'b0_0_00_01_01;
 reg [5:0] t_ide_config = 0;
-reg [4:0] t_cpu_config = 0;
-reg [4:0] t_chipset_config = 0;
+reg [5:0] t_cpu_config = 0;
+reg [5:0] t_chipset_config = 0;
 
 // configuration changes only while reset is active
 always @(posedge clk) begin
 	reg [5:0] ide_cfg = 0;
-	reg [1:0] cpu_cfg = 0;
+	reg [2:0] cpu_cfg = 0;
 
 	if (reset) begin
 		chipset_config <= t_chipset_config;
 		ide_cfg <= t_ide_config;
-		cpu_cfg <= t_cpu_config[1:0];
+		cpu_cfg <= {t_cpu_config[5], t_cpu_config[1:0]};
 		memory_config[5:0] <= t_memory_config[5:0];
 		memory_config[7] <= t_memory_config[7];
 	end
@@ -411,7 +413,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-	cache_config[2:0] <= t_cpu_config[4:2];
+	cache_config <= t_cpu_config[4:2];
 	memory_config[6] <= t_memory_config[6];
 end
 
@@ -428,6 +430,10 @@ wire video_cfg_sel    = (cmd[3:0] == 6); // DDHHLLSS || video config    | DD - d
 wire floppy_cfg_sel   = (cmd[3:0] == 7); // XXXXXFFS || floppy config   | FF - drive number, S - floppy speed
 wire harddisk_cfg_sel = (cmd[3:0] == 8); // XXXXXSMC || harddisk config | S - enable slave HDD, M - enable master HDD, C - enable HDD controler
 wire joystick_cfg_sel = (cmd[3:0] == 9); // XXXXSMMX || joystick config | S - swap joysticks, MM - dig/analog/cd32
+wire floppyex01_cfg_sel = (cmd[3:0] == 10);// XXAAABBB || External floppy config, AAA/BBB is drive number (1-4) or 0 for disabled
+wire floppyex23_cfg_sel = (cmd[3:0] == 11);// XXCCCDDD || External floppy config, CCC/DDD is drive number (1-4) or 0 for disabled
+wire userport_cfg_sel   = (cmd[3:0] == 12);// xxxxxxxm || User port mode - 0: MT32pi, 1: MiSTer Floppy
+
 always @(posedge clk) begin
 	reg       has_cmd;
 	reg       mrx;
@@ -457,11 +463,14 @@ always @(posedge clk) begin
 
 			if(!bcnt) begin
 				if (reset_ctrl_sel)   {cpuhlt, cpurst, usrrst} <= IO_DIN[2:0];
-				if (chip_cfg_sel)     t_chipset_config <= IO_DIN[4:0];
-				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[4:0];
+				if (chip_cfg_sel)     t_chipset_config <= IO_DIN[5:0];
+				if (cpu_cfg_sel)      t_cpu_config <= IO_DIN[5:0];
 				if (memory_cfg_sel)   t_memory_config <= IO_DIN[7:0];
 				if (video_cfg_sel)    {blver, ar, scanline} <= {IO_DIN[11:8],IO_DIN[2:0]};
-				if (floppy_cfg_sel)   floppy_config <= IO_DIN[3:0];
+				if (floppy_cfg_sel)   floppy_config <= IO_DIN[4:0];
+				if (floppyex01_cfg_sel) { floppy_ext_drive[5:3], floppy_ext_drive[2:0]}  = IO_DIN[5:0];
+				if (floppyex23_cfg_sel) { floppy_ext_drive[11:9], floppy_ext_drive[8:6]}  = IO_DIN[5:0];
+				if (userport_cfg_sel) user_port_mode = IO_DIN[0];
 				if (harddisk_cfg_sel) t_ide_config <= IO_DIN[5:0];
 				if (joystick_cfg_sel) {joy_swap, cd32pad, joy_ana_en} <= {IO_DIN[3], ~IO_DIN[1] & IO_DIN[2], IO_DIN[1]};
 				if (aud_sel)          aud_mix <= IO_DIN[1:0];

@@ -68,13 +68,15 @@ wire [21:0] gamma_bus;
 
 wire  [7:0] uart_mode;
 
+reg [2:0] mister_floppy_status;
+
 hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS({HPS_BUS[45:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mt32_cfg,mt32_available}),
+	.status_menumask({mister_floppy_status, mt32_cfg, mt32_available}),
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
@@ -84,7 +86,7 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.joystick_3(JOY3),
 	.joystick_l_analog_0(JOYA0),
 	.joystick_l_analog_1(JOYA1),
-	
+
 	.ioctl_wait(io_wait),
 
 	.buttons(buttons),
@@ -104,6 +106,47 @@ wire  [4:0] ide_addr;
 wire        ide_rd;
 wire        ide_wr;
 wire  [5:0] ide_req;
+
+wire [15:0] akiko_din;
+wire [15:0] akiko_dout;
+wire        akiko_wr;
+wire        akiko_rd;
+wire        akiko_cs;
+wire        akiko_cs_sec;
+wire        akiko_cs_nvr;
+wire        akiko_cs_subcode;
+wire        akiko_req;
+wire        akiko_sec_req;
+wire        akiko_rx_busy;
+wire        akiko_nvr_dirty;
+
+wire [15:0] cdtv_din;
+wire [15:0] cdtv_dout;
+wire        cdtv_wr;
+wire        cdtv_rd;
+wire        cdtv_cs;
+wire        cdtv_cs_sec;
+wire        cdtv_cs_stch;
+wire        cdtv_cs_nvr;
+wire        cdtv_cs_card;
+wire        cdtv_nvr_dirty;
+wire        cdtv_card_dirty;
+wire        cdtv_req;
+
+wire        akiko_dma_req;
+wire        akiko_dma_we;
+wire [23:0] akiko_dma_baddr;
+wire  [7:0] akiko_dma_wbyte;
+wire  [7:0] akiko_dma_rbyte;
+wire        akiko_dma_ack;
+wire        akiko_dma_arm;
+
+wire [24:1] arb_chip_addr;
+wire        arb_chip_l;
+wire        arb_chip_u;
+wire        arb_chip_rw;
+wire        arb_chip_dma;
+wire [15:0] arb_chip_wr;
 
 wire [35:0] EXT_BUS;
 hps_ext hps_ext(.*, .ide_req(ide_fast ? ide_f_req : ide_c_req),  .ide_din(ide_fast ? ide_f_readdata : ide_c_readdata));
@@ -345,6 +388,18 @@ wire  [7:0] fr_burstcount, fr_byteenable;
 wire        fr_read, fr_write, fr_waitrequest, fr_readdatavalid;
 wire [63:0] fr_writedata, fr_readdata;
 
+wire        cdtv_mode;
+wire  [7:0] cdtv_base;
+wire [15:0] cdtv_din_w;
+wire        cdtv_selack_w;
+wire  [9:0] cdtv_cdda_volume;
+wire        cdtv_cdda_volume_valid;
+wire        cdtv_dma_req;
+wire        cdtv_dma_we;
+wire [31:0] cdtv_dma_baddr;
+wire  [7:0] cdtv_dma_wbyte;
+wire        cdtv_dma_ack;
+
 cpu_wrapper cpu_wrapper
 (
 	.clk_cpu      (CLK_50M         ),   // AP030: 50 MHz board clock
@@ -395,7 +450,12 @@ cpu_wrapper cpu_wrapper
 	.a2065_ena    (a2065_ena       ),
 	.a2065_base   (a2065_base      ),
 	.toccata_base (toccata_base    ),
-	
+	.cdtv_base    (cdtv_base       ),
+	.cdtv_mode    (cdtv_mode       ),
+
+	.cdtv_din     (cdtv_din_w      ),
+	.cdtv_selack  (cdtv_selack_w   ),
+
 	.ramsel       (ram_sel         ),
 	.ramaddr      (ram_addr        ),
 	.ramlds       (ram_lds         ),
@@ -421,7 +481,14 @@ cpu_wrapper cpu_wrapper
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
 	.nmi_ack_toggle(cpu_nmi_ack_toggle),
-	.nmi_addr     (cpu_nmi_addr    )
+	.nmi_addr     (cpu_nmi_addr    ),
+
+	.z2ram_ena    (z2ram_ena       ),
+	.z3ram_base0  (z3ram_base0     ),
+	.z3ram_ena0   (z3ram_ena0      ),
+	.z3ram_base1  (z3ram_base1     ),
+	.z3ram_ena1   (z3ram_ena1      ),
+	.dcache_sw_en (dcache_sw_en    )
 );
 
 ap040_walker_cdc walker_cdc
@@ -449,6 +516,23 @@ ap040_walker_cdc walker_cdc
 	.m_rdata   (walker_rdata_mem),
 	.m_berr    (walker_berr_mem)
 );
+
+wire        dcache_sw_en;
+
+wire        z2ram_ena;
+wire  [4:0] z3ram_base0;
+wire        z3ram_ena0;
+wire  [3:0] z3ram_base1;
+wire        z3ram_ena1;
+
+wire [28:1] dma_ddr_addr;
+wire        dma_ddr_l;
+wire        dma_ddr_u;
+wire        dma_ddr_we;
+wire        dma_ddr_cs;
+wire [15:0] dma_ddr_wr;
+wire        dma_ddr_ack;
+wire [15:0] dma_ddr_rd;
 
 wire [15:0] ram_dout1;
 wire        ram_ready1;
@@ -497,6 +581,7 @@ sdram32_ctrl #(.CPU_CACHE(1), .DUAL_SDRAM(1)) ram1
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en    ),
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
@@ -567,16 +652,68 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 	.walker_ack   (walker_ack1),
 	.walker_rdata (walker_rdata1),
 
-	.chipWR       (ram_data        ),
-	.chipAddr     (ram_address     ),
-	.chipU        (_ram_bhe        ),
-	.chipL        (_ram_ble        ),
-	.chipRW       (_ram_we         ),
-	.chipDMA      (_ram_oe         ),
+	.chipWR       (arb_chip_wr     ),
+	.chipAddr     (arb_chip_addr   ),
+	.chipU        (arb_chip_u      ),
+	.chipL        (arb_chip_l      ),
+	.chipRW       (arb_chip_rw     ),
+	.chipDMA      (arb_chip_dma    ),
 	.chipRD       (ramdata_in      ),
 	.snoop_tgl    (chip_snoop_tgl  ),
 	.snoop_addr   (chip_snoop_adr  ),
 	.chip48       (chip48          )
+);
+
+chipdma_arb chipdma_arb
+(
+	.clk             (clk_sys              ),
+	.reset           (reset_d              ),
+	.c_7m            (c1                   ),
+
+	.chip_in_addr    ({1'b0, ram_address}  ),
+	.chip_in_l       (_ram_ble             ),
+	.chip_in_u       (_ram_bhe             ),
+	.chip_in_rw      (_ram_we              ),
+	.chip_in_dma     (_ram_oe              ),
+	.chip_in_wr      (ram_data             ),
+
+	.akiko_dma_req   (akiko_dma_req        ),
+	.akiko_dma_we    (akiko_dma_we         ),
+	.akiko_dma_baddr (akiko_dma_baddr      ),
+	.akiko_dma_wbyte (akiko_dma_wbyte      ),
+	.akiko_dma_rbyte (akiko_dma_rbyte      ),
+	.akiko_dma_ack   (akiko_dma_ack        ),
+	.akiko_arm       (akiko_dma_arm        ),
+
+	.cdtv_dma_req    (cdtv_dma_req         ),
+	.cdtv_dma_we     (cdtv_dma_we          ),
+	.cdtv_dma_baddr  (cdtv_dma_baddr       ),
+	.cdtv_dma_wbyte  (cdtv_dma_wbyte       ),
+	.cdtv_dma_rbyte  (                     ),
+	.cdtv_dma_ack    (cdtv_dma_ack         ),
+
+	.chip_out_addr   (arb_chip_addr        ),
+	.chip_out_l      (arb_chip_l           ),
+	.chip_out_u      (arb_chip_u           ),
+	.chip_out_rw     (arb_chip_rw          ),
+	.chip_out_dma    (arb_chip_dma         ),
+	.chip_out_wr     (arb_chip_wr          ),
+	.chip_in_rd      (ramdata_in           ),
+
+	.z2ram_ena       (z2ram_ena            ),
+	.z3ram_base0     (z3ram_base0          ),
+	.z3ram_ena0      (z3ram_ena0           ),
+	.z3ram_base1     (z3ram_base1          ),
+	.z3ram_ena1      (z3ram_ena1           ),
+
+	.ddr_out_addr    (dma_ddr_addr         ),
+	.ddr_out_l       (dma_ddr_l            ),
+	.ddr_out_u       (dma_ddr_u            ),
+	.ddr_out_we      (dma_ddr_we           ),
+	.ddr_out_cs      (dma_ddr_cs           ),
+	.ddr_out_wr      (dma_ddr_wr           ),
+	.ddr_in_ack      (dma_ddr_ack          ),
+	.ddr_in_rd       (dma_ddr_rd           )
 );
 
 wire [15:0] ram_dout2;
@@ -629,6 +766,7 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 
 	.cache_rst    (cpu_rst         ),
 	.cpu_cache_ctrl(cpu_cacr       ),
+	.dcache_sw_en (dcache_sw_en    ),
 
 	.DDRAM_CLK    (DDRAM_CLK       ),
 	.DDRAM_BUSY   (ddr1_busy       ),
@@ -667,7 +805,16 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 	.walker_addr  (walker_addr_mem),
 	.walker_wdata (walker_wdat_mem),
 	.walker_ack   (walker_ack2),
-	.walker_rdata (walker_rdata2)
+	.walker_rdata (walker_rdata2),
+
+	.dmaAddr      (dma_ddr_addr    ),
+	.dmaCS        (dma_ddr_cs      ),
+	.dmaWE        (dma_ddr_we      ),
+	.dmaL         (dma_ddr_l       ),
+	.dmaU         (dma_ddr_u       ),
+	.dmaWR        (dma_ddr_wr      ),
+	.dmaRD        (dma_ddr_rd      ),
+	.dmaACK       (dma_ddr_ack     )
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////
@@ -695,6 +842,7 @@ wire        fastchip_lw;
 wire        ide_fast;
 wire        ide_f_led;
 wire        ide_f_irq;
+wire        akiko_f_irq;
 wire  [5:0] ide_f_req;
 wire [15:0] ide_f_readdata;
 
@@ -740,7 +888,30 @@ fastchip fastchip
 	.ide_writedata(ide_dout          ),
 	.ide_read     (ide_rd            ),
 	.ide_readdata (ide_f_readdata    ),
-	.ide_led      (ide_f_led         )
+	.ide_led      (ide_f_led         ),
+
+	.akiko_irq    (akiko_f_irq       ),
+
+	.akiko_dma_req   (akiko_dma_req   ),
+	.akiko_dma_we    (akiko_dma_we    ),
+	.akiko_dma_baddr (akiko_dma_baddr ),
+	.akiko_dma_wbyte (akiko_dma_wbyte ),
+	.akiko_dma_rbyte (akiko_dma_rbyte ),
+	.akiko_dma_ack   (akiko_dma_ack   ),
+	.akiko_dma_arm   (akiko_dma_arm   ),
+
+	.akiko_uio_cs        (akiko_cs        ),
+	.akiko_uio_cs_sec    (akiko_cs_sec    ),
+	.akiko_uio_cs_nvr    (akiko_cs_nvr    ),
+	.akiko_uio_cs_subcode(akiko_cs_subcode),
+	.akiko_uio_wr        (akiko_wr        ),
+	.akiko_uio_rd        (akiko_rd        ),
+	.akiko_uio_din       (akiko_dout      ),
+	.akiko_uio_dout      (akiko_din       ),
+	.akiko_uio_req       (akiko_req       ),
+	.akiko_uio_sec_req   (akiko_sec_req   ),
+	.akiko_uio_rx_busy   (akiko_rx_busy   ),
+	.akiko_uio_nvr_dirty (akiko_nvr_dirty )
 );
 
 
@@ -761,7 +932,7 @@ assign UART_TXD = (hps_mpu & mt32_use) | uart_tx;
 ///////////////////////////////////////////////////////////////////////
 
 //// minimig top ////
-wire  [1:0] cpucfg;
+wire  [2:0] cpucfg;
 wire  [2:0] cachecfg;
 wire  [6:0] memcfg;
 wire        bootrom;   
@@ -791,6 +962,12 @@ wire        ide_ena;
 
 wire [15:0] toccata_aud_left;
 wire [15:0] toccata_aud_right;
+
+wire [6:0]  IndirectUserOutmt32;
+wire [6:0]  IndirectUserOutFlop;
+wire        user_port_mode;
+assign USER_OUT = user_port_mode ? IndirectUserOutFlop : IndirectUserOutmt32;
+
 
 minimig minimig
 (
@@ -893,19 +1070,54 @@ minimig minimig
 	//toccata soundcard
 	.toccata_ena  (toccata_ena),
 	.toccata_base (toccata_base),
+	.cdtv_base    (cdtv_base),
 	.a2065_ena  (a2065_ena),
 	.a2065_base (a2065_base),
 	.toccata_aud_left (toccata_aud_left),
 	.toccata_aud_right(toccata_aud_right),
-	
+
+	.cdtv_mode           (cdtv_mode            ),
+
+	.cdtv_din            (cdtv_din_w           ),
+	.cdtv_selack         (cdtv_selack_w        ),
+
+	.cdtv_cs             (cdtv_cs              ),
+	.cdtv_cs_sec         (cdtv_cs_sec          ),
+	.cdtv_cs_stch        (cdtv_cs_stch         ),
+	.cdtv_cs_nvr         (cdtv_cs_nvr          ),
+	.cdtv_cs_card        (cdtv_cs_card         ),
+	.cdtv_wr             (cdtv_wr              ),
+	.cdtv_rd             (cdtv_rd              ),
+	.cdtv_uio_din        (cdtv_dout            ),
+	.cdtv_uio_dout       (cdtv_din             ),
+	.cdtv_req            (cdtv_req             ),
+	.cdtv_subq_push      (1'b0                 ),
+	.cdtv_subq_byte      (8'h00                ),
+	.cdtv_sten_pulse     (1'b0                 ),
+	.cdtv_scor_pulse     (1'b0                 ),
+	.cdtv_sbcp_pulse     (1'b0                 ),
+
+	.cdtv_dma_req        (cdtv_dma_req         ),
+	.cdtv_dma_we         (cdtv_dma_we          ),
+	.cdtv_dma_baddr      (cdtv_dma_baddr       ),
+	.cdtv_dma_wbyte      (cdtv_dma_wbyte       ),
+	.cdtv_dma_ack        (cdtv_dma_ack         ),
+
+	.cdtv_nvr_dirty      (cdtv_nvr_dirty       ),
+	.cdtv_card_dirty     (cdtv_card_dirty      ),
+
+	.cdtv_cdda_volume    (cdtv_cdda_volume     ),
+	.cdtv_cdda_volume_valid(cdtv_cdda_volume_valid),
+
 	//user i/o
+	.cachecfg     (cachecfg         ), // Cache c
 	.cpucfg       (cpucfg           ), // CPU config
-	.cachecfg     (cachecfg         ), // Cache config
 	.memcfg       (memcfg           ), // memory config
 	.bootrom      (bootrom          ), // bootrom mode. Needed here to tell the CPU wrapper to also mirror the 256k Kickstart 
 
 	.ide_fast     (ide_fast         ),
 	.ide_ext_irq  (ide_f_irq        ),
+	.akiko_irq    (akiko_f_irq      ),
 	.ide_ena      (ide_ena          ),
 	.ide_req      (ide_c_req        ),
 	.ide_address  (ide_addr         ),
@@ -923,7 +1135,12 @@ minimig minimig
 	.a2065_mem_writedata(a2065_mem_writedata),
 	.a2065_mem_byteenable(a2065_mem_byteenable),
 	.a2065_mem_write(a2065_mem_write),
-	.a2065_mem_waitrequest(a2065_mem_waitrequest)
+	.a2065_mem_waitrequest(a2065_mem_waitrequest),
+	
+	.USER_IN      			(USER_IN),
+	.USER_OUT     			(IndirectUserOutFlop),
+	.user_port_mode 		(user_port_mode),
+	.mister_floppy_status	(mister_floppy_status)
 );
 
 // power led control
@@ -1195,7 +1412,8 @@ end
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 
-wire        mt32_reset    = status[32] | reset;
+reg   userport_change_reset;
+wire        mt32_reset    = status[32] | reset | userport_change_reset;
 wire        mt32_disable  = status[33];
 wire        mt32_mode_req = status[34];
 wire  [1:0] mt32_rom_req  = status[36:35];
@@ -1216,6 +1434,9 @@ wire mt32_mute = mt32_available &  mt32_disable;
 mt32pi mt32pi
 (
 	.*,
+	.USER_IN(USER_IN),
+	.USER_OUT(IndirectUserOutmt32),
+
 	.CE_PIXEL(ce_pix_mt32),
 	.reset(mt32_reset),
 	.midi_tx(midi_tx | mt32_mute)
@@ -1226,8 +1447,13 @@ wire  [4:0] mt32_cfg = (mt32_mode == 'hA2) ? {mt32_sf[2:0],  2'b10} :
 
 reg mt32_info_req;
 reg [3:0] mt32_info_disp;
+reg last_userport_mode;
 always @(posedge clk_sys) begin
 	reg old_mode;
+	
+	userport_change_reset <= 0;
+	last_userport_mode <= user_port_mode;
+	if (last_userport_mode != user_port_mode) userport_change_reset <= 1;
 
 	old_mode <= mt32_newmode;
 	mt32_info_req <= (old_mode ^ mt32_newmode) && (mt32_info == 1);
@@ -1351,12 +1577,24 @@ cdda #(28375160) cdda
 	.AUDIO_R(cdda_r)
 );
 
+wire [10:0] cdda_gain = (cdtv_mode && cdtv_cdda_volume_valid) ? {1'b0, cdtv_cdda_volume} : 11'd1023;
+
+reg signed [15:0] cdda_sl, cdda_sr;
+always @(posedge CLK_AUDIO) begin
+	reg signed [26:0] pl, pr;
+
+	pl = $signed(cdda_l) * $signed(cdda_gain);
+	pr = $signed(cdda_r) * $signed(cdda_gain);
+	cdda_sl <= pl[25:10];
+	cdda_sr <= pr[25:10];
+end
+
 reg [15:0] out_l, out_r;
 always @(posedge CLK_AUDIO) begin
 	reg [16:0] tmp_l, tmp_r;
 
-	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_l[15], cdda_l};
-	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_r[15], cdda_r};
+	tmp_l <= {aud_l[15],aud_l} + {toccata_aud_left[15],toccata_aud_left} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_sl[15], cdda_sl};
+	tmp_r <= {aud_r[15],aud_r} + {toccata_aud_right[15],toccata_aud_right} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_sr[15], cdda_sr};
 
 	// clamp the output
 	out_l <= (^tmp_l[16:15]) ? {tmp_l[16], {15{tmp_l[15]}}} : tmp_l[15:0];

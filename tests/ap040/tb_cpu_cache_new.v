@@ -43,7 +43,7 @@ module tb_cpu_cache_new;
 	reg        saw_req;
 
 	cpu_cache_new dut (
-		.clk(clk), .rst(rst), .cpu_cache_ctrl(cpu_cache_ctrl),
+		.clk(clk), .rst(rst), .cpu_cache_ctrl(cpu_cache_ctrl), .dcache_sw_en(1'b1),
 		.cache_inhibit(cache_inhibit), .cpu_cs(cpu_cs), .cpu_adr(cpu_adr),
 		.cpu_bs(cpu_bs), .cpu_we(cpu_we), .cpu_ir(cpu_ir), .cpu_dr(cpu_dr),
 		.cpu_dat_w(cpu_dat_w), .cpu_dat_r(cpu_dat_r), .cpu_ack(cpu_ack),

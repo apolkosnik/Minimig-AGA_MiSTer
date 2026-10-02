@@ -25,6 +25,7 @@ module cpu_cache_new #(
   input             clk,            // clock
   input             rst,            // cache reset
   input       [3:0] cpu_cache_ctrl, // CPU cache control
+  input             dcache_sw_en,
   input             cache_inhibit,  // cache inhibit
 
   // cpu    
@@ -109,6 +110,11 @@ reg [17:0]  tagupd_tag;
 reg         cpu_sm_id;
 reg         cpu_sm_ilru;
 reg         cpu_sm_dlru;
+reg         fill_active;
+reg   [7:0] fill_idx;
+reg  [17:0] fill_tag;
+reg         fill_snooped;
+reg         inv_sel;
 reg   [9:0] sdr_sm_adr;
 reg         sdr_sm_itag_we;
 reg         sdr_sm_dtag_we;
@@ -249,7 +255,8 @@ localparam [3:0]
 	CPU_SM_FILL2 = 4'd7,
 	CPU_SM_FILL3 = 4'd8,
 	CPU_SM_FILL4 = 4'd9,
-	CPU_SM_FILLW = 4'd10;
+	CPU_SM_FILLW = 4'd10,
+	CPU_SM_INVAL = 4'd11;
 
 // sdram-side state machine
 localparam [3:0]
@@ -310,9 +317,12 @@ always @ (posedge clk) begin
 		cc_en_d <= 1'b0;
 	end else if (!cpu_cs) begin
 		cc_en  <= cpu_cache_enable;
-		cc_en_d <= cpu_cache_enable_d;
+		// the processor's data cache enable too (upstream dcache_sw_en);
+		// write hits and snoops keep updating lines whatever the enables,
+		// so lines stay coherent while the data side is off
+		cc_en_d <= cpu_cache_enable_d & dcache_sw_en;
 	end
-end 
+end
 
 // slice up cpu address
 assign cpu_adr_blk = cpu_adr[2:1];    // cache block address (inside cache row), 2 bits for 4x16 rows
@@ -346,6 +356,9 @@ always @ (posedge clk) begin
     cpu_sm_dram0_we   <= 1'b0;
     cpu_sm_dram1_we   <= 1'b0;
     cpu_sm_bs         <= 2'b11;
+    fill_active       <= 1'b0;
+    fill_snooped      <= 1'b0;
+    inv_sel           <= 1'b0;
   end else begin
     // default values
     fill              <= 1'b0;
@@ -433,6 +446,10 @@ always @ (posedge clk) begin
           // on miss fetch data from SDRAM
           sdr_read_req <= 1'b1;
           cpu_sm_state <= CPU_SM_FILL1;
+          fill_active  <= 1'b1;
+          fill_snooped <= 1'b0;
+          fill_idx     <= cpu_adr_idx;
+          fill_tag     <= cpu_adr_tag;
         end
       end
       CPU_SM_WAIT : begin
@@ -452,6 +469,7 @@ always @ (posedge clk) begin
           // stop a CI access being ANSWERED from the cache.
           if (cache_inhibit || (cpu_ir ? !cc_en : !cc_en_d)) begin
             // don't update cache if caching is inhibited
+            fill_active  <= 1'b0;
             cpu_sm_state <= CPU_SM_FILLW;
           end else begin
             // update tag ram (deferred one cycle; see tagupd_* regs).
@@ -524,8 +542,28 @@ always @ (posedge clk) begin
       end
       CPU_SM_FILLW : begin
         if (!cpu_ack) begin
-          cpu_sm_state <= CPU_SM_IDLE;
+          if (fill_active && fill_snooped) begin
+            // a chipset write hit this line while it was being filled:
+            // the fill may hold the old data, so drop the row (both ways).
+            // The tag write is addressed through tagupd_idx like every
+            // other tag write here.
+            inv_sel          <= 1'b1;
+            tagupd_idx       <= fill_idx;
+            cpu_sm_tag_dat_w <= 40'd0;
+            cpu_sm_itag_we   <=  cpu_sm_id;
+            cpu_sm_dtag_we   <= !cpu_sm_id;
+            cpu_sm_state     <= CPU_SM_INVAL;
+          end else begin
+            fill_active  <= 1'b0;
+            cpu_sm_state <= CPU_SM_IDLE;
+          end
         end
+      end
+      CPU_SM_INVAL : begin
+        inv_sel      <= 1'b0;
+        fill_active  <= 1'b0;
+        fill_snooped <= 1'b0;
+        cpu_sm_state <= CPU_SM_IDLE;
       end
     endcase
 
@@ -551,6 +589,9 @@ always @ (posedge clk) begin
       cpu_sm_dtag_we <= !tagupd_is_i && !cc_clear_pending;
       tagupd_fill_v  <= 1'b0;
     end
+    if (fill_active && snoop_act
+        && (snoop_adr[10:3] == fill_idx) && (snoop_adr[28:11] == fill_tag))
+      fill_snooped <= 1'b1;
     // when CPU lowers its request signal, lower ack too
     if (!cpu_cs) cpu_ack <= 1'b0;
   end

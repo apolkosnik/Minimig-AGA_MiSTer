@@ -26,7 +26,9 @@ module tb_ddram_walker_snoop;
 
 	ddram_ctrl dut (
 		.sysclk(clk), .reset_n(reset_n), .cache_rst(1'b1),
-		.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011),
+		.cache_inhibit(1'b0), .cpu_cache_ctrl(4'b0011), .dcache_sw_en(1'b1),
+		// upstream's DMA port (CDTV) idle
+		.dmaAddr(28'd0), .dmaCS(1'b0), .dmaWE(1'b0), .dmaL(1'b1), .dmaU(1'b1), .dmaWR(16'd0), .dmaRD(), .dmaACK(),
 		.DDRAM_CLK(ddram_clk), .DDRAM_BUSY(1'b0),
 		.DDRAM_BURSTCNT(ddram_burstcnt), .DDRAM_ADDR(ddram_addr),
 		.DDRAM_DOUT(64'd0), .DDRAM_DOUT_READY(1'b0),
