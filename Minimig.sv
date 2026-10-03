@@ -382,7 +382,7 @@ wire toccata_ena;
 wire a2065_ena;
 wire [7:0] a2065_base;
 
-// AP030 Fast RAM port (DDR3 Avalon master, clk_114), see fastram_arbiter
+// AP020 Fast RAM port (DDR3 Avalon master, clk_114), see fastram_arbiter
 wire [28:0] fr_address;
 wire  [7:0] fr_burstcount, fr_byteenable;
 wire        fr_read, fr_write, fr_waitrequest, fr_readdatavalid;
@@ -402,7 +402,7 @@ wire        cdtv_dma_ack;
 
 cpu_wrapper cpu_wrapper
 (
-	.clk_cpu      (CLK_50M         ),   // AP030: 50 MHz board clock
+	.clk_cpu      (CLK_50M         ),   // AP020: 50 MHz board clock
 	.clk_mem      (clk_114         ),   // DDR3 side of its Fast RAM port
 	.fr_address   (fr_address      ),
 	.fr_burstcount(fr_burstcount   ),
@@ -719,7 +719,7 @@ chipdma_arb chipdma_arb
 wire [15:0] ram_dout2;
 wire        ram_ready2;
 
-// DDR3: the AP030's Fast RAM port (32-bit synchronous, bursts) has priority;
+// DDR3: the AP020's Fast RAM port (line bursts) has priority;
 // ddram_ctrl (the 16-bit CPU port, the walker and the A2065) shares the rest
 wire        ddr1_busy, ddr1_dout_ready, ddr1_rd, ddr1_we;
 wire  [7:0] ddr1_burstcnt, ddr1_be;

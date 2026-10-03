@@ -37,7 +37,7 @@ module cpu_wrapper
 	output reg        reset_out,
 
 	input             clk,
-	input             clk_cpu,      // AP030 processor clock (50 MHz)
+	input             clk_cpu,      // AP020 processor clock (50 MHz)
 	input             clk_mem,      // DDR3 clock (DDRAM_CLK) for the Fast RAM port
 	input             ph1,
 	input             ph2,
@@ -80,7 +80,7 @@ module cpu_wrapper
 	// guessing the consumption point from a clock-phase marker.
 	output reg        ramconsumed,
 
-	// AP030 Fast RAM: 32-bit synchronous port on its own DDR3 Avalon master
+	// AP020 Fast RAM: native port and line cache on its own DDR3 Avalon master
 	output     [28:0] fr_address,
 	output      [7:0] fr_burstcount,
 	output            fr_read,
@@ -229,7 +229,7 @@ wire  [1:0] cpustate_p;
 wire [31:0] cacr_p;
 
 // the processor's data cache enable (CACR, 68040 layout bit 31 from the
-// AP030 adapter) gates the controllers' data caching, as TG68K's
+// AP020 adapter) gates the controllers' data caching, as TG68K's
 // d_cache_out does upstream
 wire dcache_sw_en_p = cacr_p[31];
 assign dcache_sw_en = cpucfg[1] ? dcache_sw_en_p : 1'b1;
@@ -274,11 +274,17 @@ always @(posedge clk) begin
 	end
 end
 
-// AP030: a pin-level MC68030 on its own clock; Fast RAM is its 32-bit
-// synchronous port, everything else reaches the Minimig bus through a 16-bit
-// asynchronous port.  Its MMU table searches run on its own bus, so the
-// dedicated walker port stays idle.
-ap030_tg68k_compat cpu_inst_p
+// AP020: a pin-level MC68020 on its own clock; Fast RAM is served through
+// its native port, everything else reaches the Minimig bus through a 16-bit
+// asynchronous port.  It has no MMU, so the dedicated walker port stays idle.
+// The 256-byte data cache (the MC68030's, for Fast RAM read through the
+// native port) is left out when the build defines AP020_NO_DCACHE.
+`ifdef AP020_NO_DCACHE
+localparam AP020_DATA_CACHE = 0;
+`else
+localparam AP020_DATA_CACHE = 1;
+`endif
+ap020_tg68k_compat #(.DATA_CACHE(AP020_DATA_CACHE)) cpu_inst_p
 (
 	.clk(clk),
 	.clk_cpu(clk_cpu),
@@ -383,7 +389,7 @@ localparam HALT_BEACON = 0;
 wire         core_halted;
 wire [255:0] core_dbgstat;
 wire [127:0] core_dbgstat2;
-assign core_dbgstat  = 256'd0;     // AP030: no debug status bus (HALT_BEACON is off)
+assign core_dbgstat  = 256'd0;     // AP020: no debug status bus (HALT_BEACON is off)
 assign core_dbgstat2 = 128'd0;
 localparam [31:0] BEACON_ADDR = 32'h4000_0000;   // Z3_1 base (ARM 0x30000000)
 

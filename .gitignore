@@ -42,8 +42,9 @@ c5_pin_model_dump.txt
 tests/ap040/build/cputest/
 __pycache__/
 
-# AP030 test and build byproducts
-tests/ap030/build/
-tests/ap030/asm/t_integer.s
-build_ap030*.log
-quartus_ap030.pid
+# AP020 test and build byproducts
+tests/ap020/build/
+tests/ap020/build_suite.log
+tests/ap020/asm/t_integer.s
+build_ap020*.log
+quartus_ap020.pid
