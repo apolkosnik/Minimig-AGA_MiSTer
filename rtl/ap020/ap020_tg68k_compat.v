@@ -137,7 +137,10 @@ wire sel_z3_1 = (a[31:28] == z3b1_c) && z3e1_c[1];
 wire sel_z2   = (a[31:24] == 8'h00) && (a[23] ^ |a[22:21]) && z2e_c[1];
 // the NMI vector read (supervisor or user data read of VBR + $7C, as
 // cpu_wrapper's sel_nmi_vector) stays on the Minimig bus for the cartridge
-wire [31:0] nmi_vec  = vbr + 32'h7C;
+// registered: VBR changes only through MOVEC, and the adder in front of
+// the Fast RAM select was the processor clock's critical path
+reg  [31:0] nmi_vec = 32'h7C;
+always @(posedge clk_cpu) nmi_vec <= vbr + 32'h7C;
 wire sel_nmi  = rw && (cfc[1:0] == 2'b01) && (a[31:2] == nmi_vec[31:2]);
 wire fast_sel = (cfc != 3'd7) && !sel_nmi && (sel_z3_0 || sel_z3_1 || sel_z2);
 wire [28:1] ramaddr;
@@ -415,7 +418,7 @@ end
 //---------------------------------------------------------------------------
 // processor status into clk
 //---------------------------------------------------------------------------
-reg  [1:0] rsto_k, halt_k, ei_k, ed_k;
+reg  [1:0] rsto_k, halt_k, ei_k;
 reg [31:0] vbr_k1, vbr_k;
 reg        clr_tgl;                 // clk_cpu: cache clear pulses as a toggle
 reg  [2:0] clr_k;
@@ -424,13 +427,15 @@ always @(posedge clk) begin
 	rsto_k <= {rsto_k[0], reset_n_oe};
 	halt_k <= {halt_k[0], cpu_halted};
 	ei_k   <= {ei_k[0], cacr[0]};
-	ed_k   <= {ed_k[0], cacr[8]};
 	vbr_k1 <= vbr; vbr_k <= vbr_k1;
 	clr_k  <= {clr_k[1:0], clr_tgl};
 end
 assign nresetout         = ~rsto_k[1];
 assign debug_halted      = halt_k[1];
-assign cacr_out          = {ed_k[1], 15'd0, ei_k[1], 15'd0};
+// The MC68020 has one enable, E: it switches the controllers' instruction
+// and data caching alike.  (CACR bit 8 is set only when the processor has
+// its own data cache, DATA_CACHE, so it must not gate the controllers.)
+assign cacr_out          = {ei_k[1], 15'd0, ei_k[1], 15'd0};
 assign vbr_out           = vbr_k;
 assign cache_maint_req   = clr_k[2] ^ clr_k[1];
 assign mmu_cache_inhibit = 1'b0;    // Fast RAM is not behind the Minimig caches
@@ -438,7 +443,7 @@ assign mmu_cache_inhibit = 1'b0;    // Fast RAM is not behind the Minimig caches
 initial begin
 	nreset_c = 3'b000; z2e_c = 2'b00; z3e0_c = 2'b00; z3e1_c = 2'b00;
 	z3b0_c1 = 5'd0; z3b0_c = 5'd0; z3b1_c1 = 4'd0; z3b1_c = 4'd0;
-	rsto_k = 2'b00; halt_k = 2'b00; ei_k = 2'b00; ed_k = 2'b00; vbr_k1 = 32'd0; vbr_k = 32'd0;
+	rsto_k = 2'b00; halt_k = 2'b00; ei_k = 2'b00; vbr_k1 = 32'd0; vbr_k = 32'd0;
 	clr_tgl = 1'b0; clr_k = 3'b000;
 	snp_tgl_k = 1'b0; snp_addr_k = 32'd0; snp_tgl_c = 3'b000; snp_we_c = 1'b0; snp_addr_c = 32'd0;
 end

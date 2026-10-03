@@ -8,6 +8,7 @@
 ;   - CPU space cycles other than IACK end in BERR: a coprocessor
 ;     instruction takes the F-line exception, BKPT the illegal one
 ;   - the RESET instruction completes and execution continues
+;   - CACR E switches the controllers' instruction and data caching ($F1C6)
 ;   - ROM ($F80000, the bench mirrors its memory there) with the caches
 ;     on: the port answers as a 32-bit port and delivers each operand's
 ;     bytes at every size and alignment (pin-bus data is not cached)
@@ -139,6 +140,12 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 	movec	d0,cacr
 	move.l	#$0001,d0		; E
 	movec	d0,cacr
+	; the Minimig controllers' instruction and data caching follow E (the
+	; MC68020's only enable), with or without the processor's data cache
+	bsr	ccwait
+	move.w	$F1C6,d0
+	and.l	#7,d0
+	chkl	d0,7,58
 	lea	$F80000+romtab,a0
 	moveq	#0,d0
 	move.b	1(a0),d0		; byte 1
@@ -162,6 +169,10 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 	chkl	d0,$DDEEFF01,57
 	move.l	#$0008,d0
 	movec	d0,cacr
+	bsr	ccwait
+	move.w	$F1C6,d0
+	and.l	#7,d0
+	chkl	d0,0,59			; E clear: both off
 
 ;---------------------------------------------------------------- RESET instruction
 	reset
@@ -170,6 +181,13 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 
 	move.w	#$600D,DONEREG
 	stop	#$2700
+
+; let a CACR change cross into the Minimig clock (two-flop synchronisers)
+ccwait:
+	moveq	#50,d1
+ccw1:	nop
+	dbf	d1,ccw1
+	rts
 
 fail_all:
 	move.w	d7,FAILREG

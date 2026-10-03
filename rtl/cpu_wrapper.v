@@ -228,9 +228,9 @@ wire [31:0] cpu_addr_p;
 wire  [1:0] cpustate_p;
 wire [31:0] cacr_p;
 
-// the processor's data cache enable (CACR, 68040 layout bit 31 from the
-// AP020 adapter) gates the controllers' data caching, as TG68K's
-// d_cache_out does upstream
+// the processor's cache enable (CACR E, 68040 layout bit 31 from the AP020
+// adapter) gates the controllers' data caching, as TG68K's d_cache_out
+// does upstream; it does not depend on the AP020's own data cache
 wire dcache_sw_en_p = cacr_p[31];
 assign dcache_sw_en = cpucfg[1] ? dcache_sw_en_p : 1'b1;
 wire [31:0] vbr_p;
