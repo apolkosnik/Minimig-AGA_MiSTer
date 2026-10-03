@@ -644,6 +644,9 @@ always @(posedge clk_114) begin
 	mem[16'hF150 >> 1] <= cpu_clocks[31:16];
 	mem[16'hF152 >> 1] <= cpu_clocks[15:0];
 	mem[16'hF1C4 >> 1] <= {13'd0, watch_fc};
+	// $F1C6 word: the controller cache enables cpu_wrapper derives from the
+	// processor's CACR -- {dcache_sw_en, cacr[1] (data), cacr[0] (instruction)}
+	mem[16'hF1C6 >> 1] <= {13'd0, dut.dcache_sw_en, dut.cacr[1:0]};
 end
 
 integer result = 0;      // 0 running, 1 pass, 2 fail
