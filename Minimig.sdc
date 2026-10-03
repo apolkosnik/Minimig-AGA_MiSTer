@@ -71,6 +71,13 @@ set_false_path -from {emu|minimig|CPU1|halt}
 # a2065_ddram. Those are self-timed and need no multicycle exception. If the
 # fitter reports real violations across that boundary, add a targeted
 # set_false_path/set_max_delay derived from report_timing — do not guess.
+# The AP020 build (seed 8) reported exactly that: hold -0.605 ns from
+# a2065_regfile|cmd_data[8] (clk_sys) to a2065_ddr3_mailbox|cmd_data_s[8]
+# (clk_114).  cmd_data/cmd_rap change only in W_IDLE, on the edge that
+# raises cmd_pending, and the mailbox uses cmd_data_s/cmd_rap_s only after
+# cmd_pending has passed its two-flop synchroniser: a quasi-static bus.
+set_false_path -from {*a2065_regfile:regfile|cmd_data[*]} -to {*a2065_ddr3_mailbox:mailbox|cmd_data_s[*]}
+set_false_path -from {*a2065_regfile:regfile|cmd_rap[*]}  -to {*a2065_ddr3_mailbox:mailbox|cmd_rap_s[*]}
 
 # yc_out chroma LUT: multicycle retained from the old bridge, where boardram BRAM
 # placement congestion pushed this path to -0.471ns. The flat-DDR3 design removes
