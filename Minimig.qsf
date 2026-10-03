@@ -58,6 +58,8 @@ set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM
 set_global_assignment -name SEED 8
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
+# AP020 without its 256-byte data cache (cpu_wrapper.v)
+set_global_assignment -name VERILOG_MACRO "AP020_NO_DCACHE=1"
 
 source sys/sys.tcl
 # AP040X2 X2.1b: dual-SDRAM build variant.  To drive the io-board's second
