@@ -606,8 +606,11 @@ always @(posedge clk) begin
 					end else begin
 						tr_use <= 1'b1;
 						if (!d_rw) begin
-							// write: cache first (write-through), then the buffer
-							if (dc_en && !tr_ci && cachable_space) begin
+							// write: cache first (write-through), then the buffer.
+							// Existing entries are kept current while the cache
+							// is disabled too: E (or CDIS) does not clear it, and
+							// MC68020 software re-enabling it does not know of it.
+							if (DATA_CACHE && !tr_ci && cachable_space) begin
 								dc_wr_we <= 1'b1; dc_wr_la <= c_addr; dc_wr_fc <= d_fc;
 								dc_wr_be <= be_of(c_addr[1:0], c_pn); dc_wr_data <= wr_lane_img;
 							end
