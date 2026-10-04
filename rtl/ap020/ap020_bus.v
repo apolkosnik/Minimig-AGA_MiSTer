@@ -1,9 +1,7 @@
 //--------------------------------------------------------------------------//
 // AP68020 - MC68020 compatible CPU                                         //
 //                                                                          //
-// ap020_bus.v - bus controller: the MC68030 pin protocol (UM Section 7),   //
-// a superset of the MC68020's: ap020_top ties STERM, CBACK and CIIN off,   //
-// so only the MC68020's asynchronous cycles (DSACK) ever run.              //
+// ap020_bus.v - bus controller: the MC68030 pin protocol (UM Section 7)    //
 //                                                                          //
 // One "transfer" = one longword-aligned portion of an operand (1..4 bytes  //
 // that do not cross a longword boundary), an instruction prefetch, an      //
@@ -67,7 +65,7 @@ module ap020_bus
 	input             halted,       // double bus fault: never begin a cycle
 	output            bus_idle,     // nothing loaded, nothing in progress
 
-	// ---- pins (the MC68030 set; ap020_top uses the MC68020 subset) -------
+	// ---- MC68030 pins ---------------------------------------------------
 	output reg [31:0] a_o,
 	output reg  [2:0] fc_o,
 	output reg  [1:0] siz_o,

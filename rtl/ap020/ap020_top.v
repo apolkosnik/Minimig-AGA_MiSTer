@@ -1,16 +1,17 @@
 //--------------------------------------------------------------------------//
 // AP68020 - MC68020 compatible CPU                                         //
 //                                                                          //
-// ap020_top.v - the processor with the MC68020 pin set (MC68020 UM       //
-// Section 5): asynchronous bus cycles with dynamic bus sizing; no MMU,     //
-// no STERM/burst/CIIN/CIOUT/MMUDIS/STATUS/REFILL (MC68030 only).  An      //
+// ap020_top.v - the MC68020 programming model (no MMU, the MC68020's     //
+// CACR) on the MC68030 bus (MC68030 UM Section 7): asynchronous (DSACKx,   //
+// dynamic bus sizing) and synchronous (STERM) cycles, burst fills with     //
+// CBREQ/CBACK, CIIN and CIOUT.  There is no MMUDIS, STATUS or REFILL.  An  //
 // optional native port serves RAM with line bursts (FAST_PORT).           //
 //                                                                          //
 // Bidirectional and three-state pins are presented as separate input,      //
 // output and enable signals so the module can be used in simulation and    //
 // wrapped for an FPGA's tristate buffers:                                  //
 //   D31-D0    d_i / d_o / d_oe                                              //
-//   A, FC, SIZ, R/W, RMC, AS, DS, DBEN                 driven when bus_oe   //
+//   A, FC, SIZ, R/W, RMC, AS, DS, DBEN, CIOUT, CBREQ   driven when bus_oe   //
 //   RESET     reset_n_i (input) / reset_n_oe (drive low: RESET instruction) //
 // Active-low pins carry the _n suffix.                                     //
 //--------------------------------------------------------------------------//
@@ -25,12 +26,11 @@ module ap020_top
 	// those reads keep the data function code there.
 	parameter PCREL_PROGRAM_SPACE = 1,
 	parameter FAST_PORT = 0,
-	// The data cache (256 bytes, as the MC68030's) is not part of the
-	// MC68020: with DATA_CACHE = 1 it serves data read through the native
-	// port (FAST_PORT, memory the integration declares as RAM) and is
-	// invisible to software -- CACR's E enables it with the instruction
-	// cache and C clears it.  Data on the 68020 pin bus is never cached,
-	// as the 68020 has no cache inhibit input for I/O.
+	// The data cache (256 bytes, the MC68030's) is not part of the
+	// MC68020: with DATA_CACHE = 1 it caches data as the MC68030's does,
+	// from the pin bus (CIIN inhibits, as for the instruction cache) and
+	// the native port, and is invisible to software -- CACR's E enables it
+	// with the instruction cache and its bursts, and C clears it.
 	parameter DATA_CACHE = 1
 )
 (
@@ -47,15 +47,20 @@ module ap020_top
 	output            dben_n,
 	output            ecs_n,
 	output            ocs_n,
+	output            ciout_n,
+	output            cbreq_n,
 	output            bus_oe,
 	output     [31:0] d_o,
 	output            d_oe,
 	input      [31:0] d_i,
 	input             dsack0_n,
 	input             dsack1_n,
+	input             sterm_n,
 	input             berr_n,
 	input             halt_n,
 	input             avec_n,
+	input             ciin_n,
+	input             cback_n,
 	input             br_n,
 	output            bg_n,
 	input             bgack_n,
@@ -183,13 +188,10 @@ ap020_memsys #(.FAST_PORT(FAST_PORT), .DATA_CACHE(DATA_CACHE)) memsys (
 	.i_stb(i_stb), .i_addr(i_addr), .i_fc(i_fc), .i_ready(i_ready), .i_ack(i_ack), .i_data(i_data), .i_fault(i_fault),
 	.bus_quiet(bus_quiet),
 	.a_o(a), .fc_o(fc), .siz_o(siz), .rw_o(rw), .rmc_n_o(rmc_n), .as_n_o(as_n), .ds_n_o(ds_n), .dben_n_o(dben_n),
-	.ecs_n_o(ecs_n), .ocs_n_o(ocs_n), .ciout_n_o(), .cbreq_n_o(), .bus_oe(bus_oe),
+	.ecs_n_o(ecs_n), .ocs_n_o(ocs_n), .ciout_n_o(ciout_n), .cbreq_n_o(cbreq_n), .bus_oe(bus_oe),
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
-	// the MC68020 bus: asynchronous cycles only (no STERM, no bursts), and
-	// no cache inhibit input: program fetches are cachable, pin-bus data
-	// is never cached (ap020_memsys)
-	.dsack0_n(dsack0_n), .dsack1_n(dsack1_n), .sterm_n(1'b1), .berr_n(berr_n), .halt_n(halt_n),
-	.avec_n(avec_n), .ciin_n(1'b1), .cback_n(1'b1), .br_n(br_n), .bgack_n(bgack_n),
+	.dsack0_n(dsack0_n), .dsack1_n(dsack1_n), .sterm_n(sterm_n), .berr_n(berr_n), .halt_n(halt_n),
+	.avec_n(avec_n), .ciin_n(ciin_n), .cback_n(cback_n), .br_n(br_n), .bgack_n(bgack_n),
 	.bg_n_o(bg_n), .bus_granted(),
 	.fast_req(fast_req), .fast_addr(fast_addr), .fast_fc(fast_fc), .fast_rw(fast_rw),
 	.fast_ci(fast_ci), .fast_burst(fast_burst), .fast_be(fast_be), .fast_wdata(fast_wdata),

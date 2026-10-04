@@ -22,7 +22,7 @@ module tb_ap020_wrapchip #(
 	// preceded by a RAM access rather than a chip-bus one.
 	parameter TURBO_CHIP = 0,
 	// AP020: Zorro II Fast RAM offered to autoconfig (fastramcfg), served by
-	// the native port (locked cycles: the DSACK port) through the DDR3 model below
+	// the native port (locked cycles: the STERM port) through the DDR3 model below
 	parameter FASTRAM = 0,
 	parameter DDR_LAT = 12,        // clk_114 cycles from an accepted read to its first beat
 	parameter DDR_WAIT = 0         // 1: pseudo-random waitrequest on the DDR3 model

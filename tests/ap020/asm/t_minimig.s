@@ -9,9 +9,10 @@
 ;     instruction takes the F-line exception, BKPT the illegal one
 ;   - the RESET instruction completes and execution continues
 ;   - CACR E switches the controllers' instruction and data caching ($F1C6)
-;   - ROM ($F80000, the bench mirrors its memory there) with the caches
-;     on: the port answers as a 32-bit port and delivers each operand's
-;     bytes at every size and alignment (pin-bus data is not cached)
+;   - cachable ROM ($F80000, the bench mirrors its memory there) through
+;     the data cache: the port answers as a 32-bit port, and a byte or word
+;     read of cachable space fills the whole longword, so all four bytes
+;     must be delivered, not only the operand's
 ;
 ; protocol with the bench (tb_ap020_wrapchip.sv):
 ;   word write to $F100 = failing test number
@@ -135,7 +136,7 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 	chkl	d0,bk1,35
 	clr.l	skip
 
-;---------------------------------------------------------------- ROM, caches on
+;---------------------------------------------------------------- cachable ROM, data cache
 	move.l	#$0008,d0		; C: clear the cache
 	movec	d0,cacr
 	move.l	#$0001,d0		; E
@@ -148,9 +149,9 @@ bk1:	bkpt	#1			; breakpoint acknowledge: BERR -> illegal
 	chkl	d0,7,58
 	lea	$F80000+romtab,a0
 	moveq	#0,d0
-	move.b	1(a0),d0		; byte 1
+	move.b	1(a0),d0		; byte 1: fills the entry of the longword
 	chkl	d0,$22,50
-	move.l	(a0),d0
+	move.l	(a0),d0			; from that entry
 	chkl	d0,$11223344,51
 	moveq	#0,d0
 	move.w	6(a0),d0		; word at offset 2
