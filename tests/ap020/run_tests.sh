@@ -5,7 +5,8 @@
 # the RAM port (ram_cs_guard, level acknowledge) and the fastchip block,
 # with the processor on its own 50 MHz clock; the FASTRAM configurations add
 # a Zorro II card served by the processor's native port (and, for locked
-# cycles, a 32-bit DSACK port) and a DDR3 model (latency, random waitrequest).
+# cycles, the 32-bit synchronous port) and a DDR3 model (latency, random
+# waitrequest).
 # Needs verilator 5.x, vasmm68k_mot, python3, and vbcc for the C program.
 set -eu
 cd "$(dirname "$0")"

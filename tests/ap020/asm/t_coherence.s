@@ -11,8 +11,9 @@
 ;                    $200100 (DDR3)
 ;   $F184 long: the value the DMA model writes
 ;
-;  1-2  chip RAM with the caches on: the MC68020 caches no data from its
-;       bus, so a chipset write is seen with or without a snoop
+;  1-2  chip RAM with the caches on: CIIN keeps it out of the caches and
+;       the MC68020 CACR has no write allocation, so a chipset write is seen
+;       with or without a snoop
 ;  3-5  Fast RAM line buffers and data cache: an external write is not seen
 ;       from a buffered line (control), is seen after a CACR clear (C); with
 ;       the caches on (E) a cached copy is stale until C clears it

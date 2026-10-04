@@ -1,6 +1,6 @@
-// ap020_fastram_fe unit bench: the native port and the 68020 pin route
-// (a 32-bit DSACK port, no bursts or cache inhibit on the pins) sharing
-// the line buffers, the 8 KiB cache and the DDR3 queues.
+// ap020_fastram_fe unit bench: the native port and the pin route (the
+// MC68030 bus: STERM, CBACK bursts, CIOUT) sharing the line buffers, the
+// 8 KiB cache and the DDR3 queues.
 `timescale 1ns/1ps
 module tb_native_cache;
   reg clk=0; always #5 clk=~clk;
@@ -8,10 +8,10 @@ module tb_native_cache;
   reg [31:0] a=0;
   reg [2:0] fc=5;
   reg [1:0] siz=0;
-  reg rw=1, as_n=1, d_oe=0, sel=1, clear=0;
+  reg rw=1, as_n=1, d_oe=0, cbreq_n=1, sel=1, ci=0, clear=0;
   reg [31:0] d_o=0;
   wire [28:0] ddr_addr=a[31:3];
-  wire dsack_n;
+  wire sterm_n,cback_n;
   wire [31:0] d_i;
   wire cmd_we,rsp_re;
   wire [101:0] cmd_wdata;
@@ -80,16 +80,16 @@ module tb_native_cache;
   task idle(input integer n);
     repeat(n) begin @(posedge clk); #1; end
   endtask
-  task start_bus(input [31:0] addr,input bit reading,input [1:0] size,input bit instruction);
+  task start_bus(input [31:0] addr,input bit reading,input [1:0] size,input bit inhibited,input bit instruction);
     begin
       @(negedge clk); #1;
-      a=addr; rw=reading; siz=size; fc=instruction?6:5;
-      as_n=1; d_oe=!reading;
+      a=addr; rw=reading; siz=size; ci=inhibited; fc=instruction?6:5;
+      as_n=1; d_oe=!reading; cbreq_n=1;
       @(negedge clk); #1; as_n=0;
     end
   endtask
   task end_bus;
-    begin @(negedge clk); #1; as_n=1; d_oe=0; idle(1); end
+    begin @(negedge clk); #1; as_n=1; cbreq_n=1; d_oe=0; idle(1); end
   endtask
   task wait_ack(output [31:0] value);
     integer timeout;
@@ -97,18 +97,18 @@ module tb_native_cache;
     begin
       timeout=0;
       do begin
-        @(posedge clk); accepted=!dsack_n; value=d_i; #1;
+        @(posedge clk); accepted=!sterm_n; value=d_i; #1;
         timeout=timeout+1;
         if(timeout>300) $fatal(1,"bus timeout a=%h",a);
       end while(!accepted);
     end
   endtask
-  task read_long(input [31:0] addr,input [31:0] expected,input integer requests,input bit instruction);
+  task read_long(input [31:0] addr,input [31:0] expected,input integer requests,input bit inhibited,input bit instruction);
     integer before_count;
     reg [31:0] got;
     begin
       before_count=read_commands;
-      start_bus(addr,1,0,instruction);
+      start_bus(addr,1,0,inhibited,instruction);
       wait_ack(got);
       if(got!==expected) $fatal(1,"read %h got %h expected %h",addr,got,expected);
       if(requests>=0 && read_commands-before_count!=requests)
@@ -121,13 +121,29 @@ module tb_native_cache;
     reg [31:0] unused;
     begin
       before_count=write_commands;
-      start_bus(addr,0,size,0); d_o=value;
+      start_bus(addr,0,size,0,0); d_o=value;
       wait_ack(unused); end_bus; idle(2);
       if(write_commands-before_count!=1) $fatal(1,"write did not post exactly once");
     end
   endtask
   task flush;
     begin @(negedge clk); #1; clear=1; idle(1); clear=0; idle(515); end
+  endtask
+  task burst(input [31:0] addr,input integer requests);
+    integer before_count;
+    reg [31:0] got,word_addr;
+    begin
+      before_count=read_commands;
+      start_bus(addr,1,0,0,1); cbreq_n=0;
+      for(integer b=0;b<4;b=b+1) begin
+        wait_ack(got);
+        word_addr=(addr&32'hfffffff0)|(((addr+4*b)&15));
+        if(got!==memory_long(word_addr)) $fatal(1,"burst %h beat %0d got %h",addr,b,got);
+        if(cback_n) $fatal(1,"burst missing CBACK");
+      end
+      if(read_commands-before_count!=requests) $fatal(1,"burst request count");
+      end_bus;
+    end
   endtask
 
 
@@ -199,11 +215,11 @@ module tb_native_cache;
   initial begin
     for(i=0;i<8192;i=i+1) mem[i]={32'hfedcba98^i,32'h01234567^(i*32'd17)};
     idle(3); rst=0; idle(515);
-    read_long('h1000,memory_long('h1000),1,0);
-    read_long('h1010,memory_long('h1010),1,0);
-    read_long('h1000,memory_long('h1000),0,0);
+    read_long('h1000,memory_long('h1000),1,0,0);
+    read_long('h1010,memory_long('h1010),1,0,0);
+    read_long('h1000,memory_long('h1000),0,0,0);
     // Program/data share physical cache lines even when the tiny buffers miss.
-    read_long('h1010,memory_long('h1010),0,1);
+    read_long('h1010,memory_long('h1010),0,0,1);
     $display("PASS cache retention and shared physical tags");
 
     // Check all words, offsets, byte/word/three-byte/long write sizes against
@@ -211,46 +227,45 @@ module tb_native_cache;
     for(word_index=0;word_index<4;word_index=word_index+1)
       for(n=1;n<=4;n=n+1)
         for(off=0;off<4;off=off+1) begin
-          read_long('h1010,memory_long('h1010),0,0);
-          read_long('h1010,memory_long('h1010),0,1);
+          read_long('h1010,memory_long('h1010),0,0,0);
+          read_long('h1010,memory_long('h1010),0,0,1);
           old_value=memory_long('h1000+4*word_index);
           new_value=32'h89abcdef^(word_index*'h1234+n*'h76543+off*'h1357);
           expected=merged(old_value,new_value,off,n);
           write_part('h1000+4*word_index+off,new_value,n[1:0]);
           if(memory_long('h1000+4*word_index)!==expected) $fatal(1,"DDR byte merge");
-          read_long('h1000+4*word_index,expected,0,0);
+          read_long('h1000+4*word_index,expected,0,0,0);
         end
     $display("PASS 64 partial-write combinations with L2-only hits");
 
     flush;
     write_part('h1600,32'haabbccdd,0);
-    read_long('h1600,32'haabbccdd,1,0);
-    read_long('h1610,memory_long('h1610),1,0);
-    read_long('h1600,32'haabbccdd,0,0);
+    read_long('h1600,32'haabbccdd,1,0,0);
+    read_long('h1610,memory_long('h1610),1,0,0);
+    read_long('h1600,32'haabbccdd,0,0,0);
     flush;
-    read_long('h1000,memory_long('h1000),1,0);
-    read_long('h3000,memory_long('h3000),1,0);
-    read_long('h1000,memory_long('h1000),1,0);
+    read_long('h1000,memory_long('h1000),1,0,0);
+    read_long('h3000,memory_long('h3000),1,0,0);
+    read_long('h1000,memory_long('h1000),1,0,0);
     $display("PASS write-through/no-write-allocate and conflicting tags");
 
     // A bypassed external change becomes visible on CI reads and on a clear.
-    // Cache inhibit exists only on the native port (fast_ci).
     old_value=memory_long('h1000);
     mem['h1000>>3]=64'h9876543212345678;
-    native_read('h1000,1,0,0,1);
-    native_read('h1000,1,0,0,1);
+    read_long('h1000,memory_long('h1000),1,1,0);
+    read_long('h1000,memory_long('h1000),1,1,0);
     flush;
-    read_long('h1000,memory_long('h1000),1,0);
+    read_long('h1000,memory_long('h1000),1,0,0);
     flush;
-    native_read('h1200,1,0,0,1);
-    read_long('h1200,memory_long('h1200),1,0);
+    read_long('h1200,memory_long('h1200),1,1,0);
+    read_long('h1200,memory_long('h1200),1,0,0);
     $display("PASS inhibited reads bypass and do not allocate; clear invalidates");
 
     for(i=0;i<4;i=i+1) begin
       flush;
-      native_read('h1800+4*i,0,1,1,1);
-      read_long('h1810,memory_long('h1810),1,1);
-      native_read('h1800+4*i,0,1,1,0);
+      burst('h1800+4*i,1);
+      read_long('h1810,memory_long('h1810),1,0,1);
+      burst('h1800+4*i,0);
     end
     $display("PASS all four burst wrap positions, cold and cached");
 
@@ -259,7 +274,7 @@ module tb_native_cache;
     for(j=0;j<4;j=j+1) begin
       flush;
       fork
-        begin read_long('h1a00,memory_long('h1a00),1,0); end
+        begin read_long('h1a00,memory_long('h1a00),1,0,0); end
         begin
           if(j==0) wait(dut.l2s==1);
           else if(j==1) wait(cmd_we && !cmd_wdata[101]);
@@ -268,34 +283,34 @@ module tb_native_cache;
           clear=1; @(posedge clk); #1; clear=0;
         end
       join
-      read_long('h1a10,memory_long('h1a10),1,0);
-      read_long('h1a00,memory_long('h1a00),1,0);
+      read_long('h1a10,memory_long('h1a10),1,0,0);
+      read_long('h1a00,memory_long('h1a00),1,0,0);
     end
     $display("PASS clear during lookup, outstanding read, and both response beats");
 
     // An abandoned read drains before the new transaction, without retaining
     // its old contents in either cache or line buffer.
     flush; backend_delay=25;
-    start_bus('h1c00,1,0,0);
+    start_bus('h1c00,1,0,0,0);
     wait(read_commands>0 && pending);
     @(negedge clk); #1; rst=1; as_n=1; idle(1); rst=0;
     mem['h1c00>>3]=64'hbbaa998877665544;
-    read_long('h1c00,memory_long('h1c00),1,0);
+    read_long('h1c00,memory_long('h1c00),1,0,0);
     backend_delay=9;
     $display("PASS reset during outstanding read");
 
     flush; cmd_wlevel=8; before_count=read_commands;
     fork
-      begin read_long('h1e00,memory_long('h1e00),1,0); end
+      begin read_long('h1e00,memory_long('h1e00),1,0,0); end
       begin idle(20); if(read_commands!=before_count) $fatal(1,"read ignored full FIFO"); cmd_wlevel=0; end
     join
     cmd_wlevel=7; before_count=write_commands;
     fork
       begin write_part('h1e04,32'hdeadbeef,0); end
-      begin idle(20); if(write_commands!=before_count || !dsack_n) $fatal(1,"write ignored FIFO pressure"); cmd_wlevel=0; end
+      begin idle(20); if(write_commands!=before_count || !sterm_n) $fatal(1,"write ignored FIFO pressure"); cmd_wlevel=0; end
     join
-    read_long('h1e10,memory_long('h1e10),1,0);
-    read_long('h1e04,32'hdeadbeef,0,0);
+    read_long('h1e10,memory_long('h1e10),1,0,0);
+    read_long('h1e04,32'hdeadbeef,0,0,0);
     $display("PASS FIFO pressure and posted-write visibility");
     // Exercise write tag mismatches and replacements across the full memory,
     // alternating program/data reads with varying latency and response gaps.
@@ -310,7 +325,7 @@ module tb_native_cache;
         write_part(random_addr+off,rng,n[1:0]);
         if(memory_long(random_addr)!==expected) $fatal(1,"random DDR write");
       end else expected=memory_long(random_addr);
-      read_long(random_addr,expected,-1,rng[30]);
+      read_long(random_addr,expected,-1,rng[29],rng[30]);
     end
     $display("PASS 1000 deterministic mixed operations with variable backend latency");
 
@@ -322,8 +337,8 @@ module tb_native_cache;
       native_read('h2000+4*first_word,0,1,1,1);
       native_read('h2010,0,1,0,1);
       native_read('h2000+4*first_word,0,1,1,0);
-      read_long('h2000+4*first_word,memory_long('h2000+4*first_word),0,1);
-      read_long('h2010,memory_long('h2010),0,1);
+      burst('h2000+4*first_word,0);
+      read_long('h2010,memory_long('h2010),0,0,1);
       native_read('h2000+4*first_word,0,1,1,0);
     end
     $display("PASS native DDR/L2/buffer bursts and native/pin sharing");
@@ -338,7 +353,7 @@ module tb_native_cache;
         for(integer b=0;b<4;b=b+1) if(mask&(1<<b)) expected[8*b+:8]=new_value[8*b+:8];
         native_write('h2000+4*bank,new_value,mask[3:0]);
         if(memory_long('h2000+4*bank)!==expected) $fatal(1,"native lane merge");
-        read_long('h2000+4*bank,expected,0,0);
+        read_long('h2000+4*bank,expected,0,0,0);
         native_read('h2000+4*bank,0,1,0,0);
         native_read('h2010,0,0,0,-1); native_read('h2010,0,1,0,-1);
         write_part('h2000+4*bank,~new_value,0);
@@ -405,7 +420,7 @@ module tb_native_cache;
         else write_part(random_addr,rng,0);
       end
       if(rng[30]) native_read(random_addr,rng[29],rng[28],rng[26]&&!rng[29],-1);
-      else read_long(random_addr,memory_long(random_addr),-1,rng[28]);
+      else read_long(random_addr,memory_long(random_addr),-1,rng[29],rng[28]);
     end
     $display("PASS 1000 mixed native/pin operations and latency variation");
     $display("ALL CACHE UNIT TESTS PASSED");

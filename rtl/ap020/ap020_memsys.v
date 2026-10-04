@@ -157,8 +157,8 @@ assign mmu_busy = 1'b0;
 // caches
 //---------------------------------------------------------------------------
 wire ic_en  = cacr[`CACR_EI] & ~cdis;
-// the data cache exists with DATA_CACHE only, and holds native-port memory
-// only (see ap020_top): pin-bus data is never allocated
+// the data cache exists with DATA_CACHE only; it caches the pin bus as
+// the MC68030's does (CIIN inhibits) and the native port
 wire dc_en  = DATA_CACHE && cacr[`CACR_ED] && ~cdis;
 wire ic_fill_ok = ic_en & ~cacr[`CACR_FI];
 wire dc_fill_ok = dc_en & ~cacr[`CACR_FD];
@@ -277,10 +277,7 @@ ap020_bus bus (
 	.req(b_req && !native_sel && !native_active), .req_kind(b_kind), .req_addr(b_addr), .req_nbytes(b_nbytes), .req_total(b_total),
 	.req_rw(b_rw), .req_fc(b_fc), .req_rmc(b_rmc), .req_rmc_last(b_rmc_last), .req_ciout(b_ciout),
 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_wdata(b_wdata),
-	// data on the pin bus is not cached, so no extra cycles complete an
-	// entry (they would read neighbouring I/O registers); instruction
-	// fetches complete their longword as the MC68020's prefetch does
-	.req_cache(b_cache && !(owner == OWN_DU && !own_ifetch)),
+	.req_cache(b_cache),
 	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr),
 	.res_avec(pin_avec), .res_ciin(pin_ciin), .fill_stb(pin_fill), .fill_addr(pin_fill_addr),
 	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle),
@@ -768,7 +765,7 @@ always @(posedge clk) begin
 		// The operand may finish before a narrow-port or burst fill does:
 		// r_addr can advance to the next portion and d_fc to the next access.
 		// Use the saved logical line and b_fc, held by the bus slot owner.
-		if (b_fill_stb && owner == OWN_DU && !own_ifetch && dc_fill_ok && native_active) begin
+		if (b_fill_stb && owner == OWN_DU && !own_ifetch && dc_fill_ok) begin
 			dc_fi_we <= 1'b1; dc_fi_addr <= {d_fill_line, b_fill_addr[3:2]}; dc_fi_fc <= b_fc; dc_fi_data <= b_fill_data;
 		end
 

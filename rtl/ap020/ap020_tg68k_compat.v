@@ -1,14 +1,14 @@
 //--------------------------------------------------------------------------//
 // AP020 - MC68020 compatible CPU                                           //
 //                                                                          //
-// ap020_tg68k_compat.v - the AP020 (ap020_top, a pin-level MC68020) in the //
-// Minimig system.  Three clock domains meet here, the way an accelerator   //
-// card joins its own clock to a motherboard through the 68020 bus:         //
+// ap020_tg68k_compat.v - the AP020 (ap020_top: the MC68020 programming    //
+// model, no MMU, on the MC68030 bus) in the Minimig system.  Three clock  //
+// domains meet here, the way an accelerator card joins its own clock to a //
+// motherboard through the 68030 bus:                                       //
 //                                                                          //
 //   clk_cpu  the processor (50 MHz) and the Fast RAM front end:            //
-//            Zorro II/III RAM is served through the processor's native     //
-//            port (FAST_PORT) with line bursts, and as a 32-bit DSACK      //
-//            port for the locked (RMC) cycles, ap020_fastram_fe            //
+//            Zorro II/III RAM is a 32-bit synchronous port (STERM) with    //
+//            burst fills (CBREQ/CBACK), ap020_fastram_fe                   //
 //   clk_mem  the DDR3 side of Fast RAM, ap020_fastram_be, an Avalon-MM     //
 //            master for the DDRAM interface (clk_114)                      //
 //   clk      the Minimig CPU bus (clk_sys): every other cycle goes to a     //
@@ -20,8 +20,8 @@
 // the processor side captures the cycle and flips a request toggle; the    //
 // clk side runs the one or two Minimig word cycles the transfer needs      //
 // (both words of a longword back to back) and flips an answer toggle with  //
-// the data and termination.  DSACK0/DSACK1 (32-bit), BERR and AVEC are     //
-// generated in clk_cpu from the answer and held until AS negates.          //
+// the data and termination.  DSACK0/DSACK1 (32-bit), BERR, AVEC and CIIN   //
+// are generated in clk_cpu from the answer and held until AS negates.      //
 // Each side holds its fields stable from its toggle until the other side's //
 // toggle comes back.                                                       //
 //                                                                          //
@@ -36,11 +36,12 @@
 // with BERR, as on a system without a coprocessor -- so the MC68851/68881  //
 // instructions take the Line F exception.                                  //
 //                                                                          //
-// Caching: the MC68020 instruction cache has no inhibit input and caches   //
-// every program fetch, as on an A1200; software clears it (CACR C) after   //
-// loading code.  The processor's optional data cache (DATA_CACHE) holds    //
-// only native-port (Fast RAM) data; nothing but the processor writes Fast  //
-// RAM.  Chipset writes to chip RAM are still passed on as snoops.          //
+// Caching: CIIN is asserted for everything on this port except ROM, so     //
+// chip RAM and I/O are never filled into the on-chip caches.  The MC68020  //
+// CACR has no write allocation, so no write creates a data cache entry    //
+// either; the chipset's DMA writes to chip RAM are still passed on as      //
+// snoops (snoop_stb/snoop_addr).  Fast RAM is cachable; nothing but the    //
+// processor writes it.                                                     //
 //                                                                          //
 // The NMI vector (VBR + $7C, the level 7 autovector) is always read on     //
 // this port, never from Fast RAM or the data cache, so the cartridge       //
@@ -109,10 +110,10 @@ localparam BUS_FETCH = 2'b00, BUS_IDLE = 2'b01, BUS_READ = 2'b10, BUS_WRITE = 2'
 wire [31:0] a, d_o;
 wire  [2:0] cfc;
 wire  [1:0] siz;
-wire        rw, as_n, ds_n, d_oe, reset_n_oe, cpu_halted;
+wire        rw, as_n, ds_n, d_oe, ciout_n, cbreq_n, reset_n_oe, cpu_halted;
 wire [31:0] cacr, vbr;
 wire        cache_clear;
-wire        fr_dsack_n;
+wire        fr_sterm_n, fr_cback_n;
 wire [31:0] fr_d;
 
 // resets and configuration into clk_cpu
@@ -176,11 +177,11 @@ reg        p_rw = 1'b1;
 reg  [2:0] k_tgl_c = 3'b000;      // the answer toggle, synchronised
 reg        p_own = 1'b0;          // this AS cycle has been handed over
 reg        p_term = 1'b0;         // its answer arrived: terminate until AS negates
-reg        p_berr = 1'b0, p_avec = 1'b0;
+reg        p_berr = 1'b0, p_avec = 1'b0, p_ciin = 1'b0;
 reg [31:0] d_slow = 32'd0;
 wire        k_tgl;                // clk side
 wire [31:0] k_d;
-wire        k_berr, k_avec;
+wire        k_berr, k_avec, k_ciin;
 wire       p_busy   = p_tgl != k_tgl_c[1];
 wire       p_answer = k_tgl_c[2] != k_tgl_c[1];
 // a cycle is presented once AS is asserted, and DS for a write (it follows
@@ -200,7 +201,7 @@ always @(posedge clk_cpu) begin
 		end
 		if (p_own && p_answer) begin
 			p_term <= 1'b1;
-			p_berr <= k_berr; p_avec <= k_avec;
+			p_berr <= k_berr; p_avec <= k_avec; p_ciin <= k_ciin;
 			d_slow <= k_d;
 		end
 	end
@@ -208,9 +209,7 @@ end
 wire p_dsack_n = !(p_term && !p_berr && !p_avec);
 wire p_berr_n  = !(p_term && p_berr);
 wire p_avec_n  = !(p_term && p_avec);
-// Fast RAM answers on the pin bus only for locked cycles (the rest takes
-// the native port); both are 32-bit ports
-wire dsack_n   = fast_sel ? fr_dsack_n : p_dsack_n;
+wire p_ciin_n  = !(p_term && p_ciin);
 
 wire [31:0] d_i = fast_sel ? fr_d : d_slow;
 
@@ -235,10 +234,11 @@ end
 ap020_top #(.PCREL_PROGRAM_SPACE(0), .FAST_PORT(FAST_PORT), .DATA_CACHE(DATA_CACHE)) cpu (
 	.clk(clk_cpu),
 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
-	.ecs_n(), .ocs_n(), .bus_oe(),
+	.ecs_n(), .ocs_n(), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(),
 	.d_o(d_o), .d_oe(d_oe), .d_i(d_i),
-	.dsack0_n(dsack_n), .dsack1_n(dsack_n),
-	.berr_n(p_berr_n), .halt_n(1'b1), .avec_n(p_avec_n),
+	.dsack0_n(p_dsack_n), .dsack1_n(p_dsack_n), .sterm_n(fr_sterm_n),
+	.berr_n(p_berr_n), .halt_n(1'b1),
+	.avec_n(p_avec_n), .ciin_n(p_ciin_n), .cback_n(fr_cback_n),
 	.br_n(1'b1), .bg_n(), .bgack_n(1'b1),
 	.ipl_n(ipl), .ipend_n(), .reset_n_i(nreset_c[2]), .reset_n_oe(reset_n_oe),
 	.cdis_n(1'b1),
@@ -262,9 +262,9 @@ wire   [3:0] rsp_wlevel;
 
 ap020_fastram_fe #(.NATIVE_PORT(FAST_PORT)) fe (
 	.clk(clk_cpu), .rst(rst_c),
-	.a(a), .fc(cfc), .siz(siz), .rw(rw), .as_n(as_n), .d_o(d_o), .d_oe(d_oe),
-	.sel(fast_sel), .clear(cache_clear), .ddr_addr(ddr_addr),
-	.dsack_n(fr_dsack_n), .d_i(fr_d),
+	.a(a), .fc(cfc), .siz(siz), .rw(rw), .as_n(as_n), .d_o(d_o), .d_oe(d_oe), .cbreq_n(cbreq_n),
+	.sel(fast_sel), .ci(!ciout_n), .clear(cache_clear), .ddr_addr(ddr_addr),
+	.sterm_n(fr_sterm_n), .cback_n(fr_cback_n), .d_i(fr_d),
 	.cmd_we(cmd_we), .cmd_wdata(cmd_wdata), .cmd_wlevel(cmd_wlevel),
 	.rsp_rdata(rsp_rdata), .rsp_rempty(rsp_rempty), .rsp_re(rsp_re),
 	.n_req(n_req), .n_ready(n_ready), .n_addr(n_addr), .n_ddr_addr(n_ddr_addr),
@@ -302,6 +302,9 @@ always @(posedge clk) p_tgl_k <= {p_tgl_k[1:0], p_tgl};
 wire cpu_space  = (p_fc == 3'd7);
 wire iack       = cpu_space && (p_a[19:16] == 4'hF);
 wire prog_space = (p_fc[1:0] == 2'b10);
+// ROM ($E00000-$E7FFFF, $F80000-$FFFFFF) is cachable; chip RAM, slow RAM
+// windows and I/O are not
+wire rom        = (p_a[31:24] == 8'h00) && ((p_a[23:19] == 5'b11111) || (p_a[23:19] == 5'b11100));
 // the bytes of the longword this transfer moves on a 32-bit port: from
 // A1-A0 up to the operand size or the longword boundary (UM 7.2.1)
 wire [2:0] k_n    = (p_siz == 2'b00) ? 3'd4 : {1'b0, p_siz};
@@ -313,10 +316,11 @@ assign k_op[3] = (p_a[1:0] == 2'd0);
 assign k_op[2] = (p_a[1:0] <= 2'd1) && (k_last >= 3'd1);
 assign k_op[1] = (p_a[1:0] <= 2'd2) && (k_last >= 3'd2);
 assign k_op[0] = (k_last >= 3'd3);
-// only the operand's bytes are touched, so I/O registers see exactly the
-// accesses the program makes (instruction fetches are aligned longwords,
-// which the instruction cache fills whole)
-wire [3:0] k_be = k_op;
+// a read of cachable space (ROM: CIIN negated) fills the whole longword
+// into a cache entry whatever its size (UM 6.1.3.1), so a 32-bit port must
+// drive all four bytes; elsewhere only the operand's bytes are touched, so
+// I/O registers see exactly the accesses the program makes
+wire [3:0] k_be = (p_rw && rom) ? 4'b1111 : k_op;
 wire       k_w0 = k_be[3] | k_be[2];
 wire       k_w1 = k_be[1] | k_be[0];
 
@@ -326,11 +330,12 @@ reg       k_tgl_r = 1'b0;
 reg       k_wsel;                 // the word in progress: 0 = D31-D16, 1 = D15-D0
 reg       k_more;                 // the second word follows
 reg [31:0] k_d_r = 32'd0;
-reg       k_berr_r = 1'b0, k_avec_r = 1'b0;
+reg       k_berr_r = 1'b0, k_avec_r = 1'b0, k_ciin_r = 1'b0;
 assign k_tgl  = k_tgl_r;
 assign k_d    = k_d_r;
 assign k_berr = k_berr_r;
 assign k_avec = k_avec_r;
+assign k_ciin = k_ciin_r;
 
 wire       k_work = p_tgl_k[1] != k_tgl_r;
 
@@ -356,7 +361,7 @@ always @(posedge clk) begin
 		case (kst)
 			K_IDLE: begin
 				if (k_work) begin
-					k_berr_r <= 1'b0; k_avec_r <= 1'b0;
+					k_berr_r <= 1'b0; k_avec_r <= 1'b0; k_ciin_r <= !rom;
 					if (cpu_space) begin
 						// answered here, no Minimig request
 						if (iack) begin

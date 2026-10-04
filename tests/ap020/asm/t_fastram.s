@@ -1,6 +1,6 @@
 ; AP020 Fast RAM: the native port with line bursts and, for locked cycles,
-; the 32-bit DSACK port (ap020_fastram_fe/_be), on Zorro II RAM enabled
-; through autoconfig
+; the 32-bit synchronous port (STERM, ap020_fastram_fe/_be), on Zorro II
+; RAM enabled through autoconfig
 ; assembled with vasmm68k_mot -Fbin -m68020
 ;
 ; Runs from chip RAM; the bench (tb_ap020_wrapchip.sv, FASTRAM=1) offers a

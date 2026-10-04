@@ -2,13 +2,15 @@
 // AP020 - MC68020 compatible CPU                                           //
 //                                                                          //
 // ap020_fastram_fe.v - shared Fast RAM cache with optional native port.   //
-// Pin bus: a 32-bit port terminating with DSACK1/DSACK0 (MC68020 UM 5.2).  //
-// Runs on the processor clock; the DDR3 side (ap020_fastram_be) is reached //
+// Pin bus: STERM termination and CBACK bursts (UM 7.3.2, 7.3.7). Runs      //
+// on the processor clock; the DDR3 side (ap020_fastram_be) is reached      //
 // through two dual-clock FIFOs.                                            //
 //                                                                          //
 // Reads are served from two line buffers (16 bytes each, one for program  //
 // fetches, one for data): every read of a buffered line terminates at      //
-// once.  Behind the buffers is an 8 KiB cache of Fast RAM (512 lines of 16  //
+// once.  A cache burst (CBREQ) is accepted with CBACK and its four         //
+// longwords follow at one per clock, wrapping modulo 4 from the requested  //
+// one.  Behind the buffers is an 8 KiB cache of Fast RAM (512 lines of 16  //
 // bytes, direct mapped on the physical DDR3 line, block RAM): a buffer    //
 // miss looks it up (two clocks) and a hit loads the whole line into the   //
 // buffer; a miss reads the line from DDR3 and allocates it.  The           //
@@ -20,17 +22,17 @@
 // still use pins. Native responses return the requested                    //
 // longword first and wrap through the line without response backpressure. //
 //                                                                          //
-// Writes are posted: DSACK as soon as the command FIFO has room.  They     //
+// Writes are posted: STERM as soon as the command FIFO has room.  They     //
 // update any buffered copy of their line and the cache's copy (write      //
 // through, no allocation), and they reach DDR3 in order with the reads,   //
 // so a read never overtakes a write to the same address.                   //
 //                                                                          //
 // Coherence: the buffers and the cache follow the processor's cache       //
-// maintenance -- a CACR clear (C, CE) empties the buffers and sweeps the   //
-// cache invalid (512 clocks, reads go to DDR3 meanwhile), as does a        //
-// processor reset -- and a cache-inhibited native access (fast_ci) is      //
-// never answered from a buffered line or the cache: it fetches the line,   //
-// which is not allocated and is dropped when that cycle ends.  A           //
+// maintenance -- a CACR clear (C or CE) empties the buffers and sweeps    //
+// the cache invalid (512 clocks, reads go to DDR3 meanwhile), as does a    //
+// processor reset -- and a cache-inhibited access (CIOUT) is never         //
+// answered from a buffered line or the cache: it fetches the line, which  //
+// is not allocated and is dropped when that cycle ends.  A                 //
 // fill in flight when the buffers are cleared serves only the cycle that   //
 // waits for it and is not allocated.  The processor is the only master     //
 // that writes Fast RAM through its caches; a DMA writer (CDTV) relies on   //
@@ -48,7 +50,7 @@ module ap020_fastram_fe
 	input             clk,
 	input             rst,
 
-	// the 68020 bus
+	// the processor bus (the MC68030's)
 	input      [31:0] a,
 	input       [2:0] fc,
 	input       [1:0] siz,
@@ -56,10 +58,13 @@ module ap020_fastram_fe
 	input             as_n,
 	input      [31:0] d_o,
 	input             d_oe,
+	input             cbreq_n,
 	input             sel,          // the address is Fast RAM (decode of a)
+	input             ci,           // CIOUT: the access is cache inhibited
 	input             clear,        // pulse: a CACR cache clear (drop the line buffers)
 	input      [28:0] ddr_addr,     // DDR3 64-bit word address of a
-	output            dsack_n,      // DSACK1 and DSACK0: a 32-bit port
+	output            sterm_n,
+	output            cback_n,
 	output     [31:0] d_i,
 
 	// command FIFO (to DDR3): {write, ddr address, byte enables, data}
@@ -95,8 +100,7 @@ reg [1:0] n_pos;
 reg [2:0] n_left;
 wire use_native = n_active || (NATIVE_PORT && n_req && as_n);
 wire prog = use_native ? (n_active ? n_prog_q : n_fc[1:0] == 2'b10) : fc[1:0] == 2'b10;
-// the 68020 has no CIOUT: pin cycles are cachable
-wire access_ci = use_native ? (n_active ? n_ci_q : n_ci) : 1'b0;
+wire access_ci = use_native ? (n_active ? n_ci_q : n_ci) : ci;
 wire access_rw = n_active ? n_rw_q : rw;
 wire access_active = n_active || (sel && as_asserted);
 
@@ -131,9 +135,7 @@ function [31:0] beat_long; input [63:0] b; input m;
 	begin beat_long = m ? {b[47:32], b[63:48]} : {b[15:0], b[31:16]}; end endfunction
 
 //---------------------------------------------------------------------------
-// the cycle: DSACK1/DSACK0 for a 32-bit port.  The processor samples them
-// at the falling edge that ends S2 and latches the data a clock later; both
-// hold until AS negates.
+// the cycle: STERM, CBACK, burst beats (the slave timing of UM Figure 7-45)
 //---------------------------------------------------------------------------
 wire wr_room  = (cmd_wlevel <= 4'd6);             // a push may still be pending
 // Pin acknowledgements have a half-cycle path to the write capture. They
@@ -142,13 +144,23 @@ wire wr_room  = (cmd_wlevel <= 4'd6);             // a push may still be pending
 wire pin_prog = fc[1:0] == 2'b10;
 wire pin_hit_d = lb_valid[0] && lb_line[0] == ddr_addr[28:1];
 wire pin_hit_p = lb_valid[1] && lb_line[1] == ddr_addr[28:1];
-wire pin_rd_hit = pin_prog ? pin_hit_p : pin_hit_d;
+wire pin_once = pin_prog ? lb_once[1] : lb_once[0];
+wire pin_rd_hit = (pin_prog ? pin_hit_p : pin_hit_d) && (!ci || pin_once);
 wire ready    = rw ? pin_rd_hit : wr_room;
-assign dsack_n = !(sel && as_asserted && !n_active && ready);
-assign d_i = lb_d[pin_prog][a[3:2]];
+assign sterm_n = !(sel && as_asserted && !n_active && ready);
+assign cback_n = !(sel && as_asserted);
+
+reg  [1:0] beat_idx;
+reg        burst_active, sterm_rec;
+always @(posedge clk) sterm_rec <= sel && !sterm_n && as_asserted && rw && (!cbreq_n || burst_active);
+always @(negedge clk) begin
+	if (!as_asserted) begin beat_idx <= a[3:2]; burst_active <= 1'b0; end
+	else if (sterm_rec) begin burst_active <= 1'b1; beat_idx <= beat_idx + 2'd1; end
+end
+assign d_i = lb_d[fc[1:0] == 2'b10][beat_idx];
 
 //---------------------------------------------------------------------------
-// writes: the data is captured on the falling edge after DSACK (as the
+// writes: the data is captured on the falling edge after STERM (as the
 // memory would latch it), merged into the line buffers and posted
 //---------------------------------------------------------------------------
 // byte lanes of a 32-bit port (UM Table 7-7): siz bytes from a[1:0], within the longword
@@ -176,7 +188,7 @@ reg wcap_ack;
 always @(negedge clk) begin
 	if (wcap_ack) wcap <= 1'b0;
 	if (!as_asserted) wcap_done <= 1'b0;
-	else if (sel && !rw && !dsack_n && d_oe && !wcap_done) begin
+	else if (sel && !rw && !sterm_n && d_oe && !wcap_done) begin
 		wcap <= 1'b1; wcap_done <= 1'b1;
 		w_lanes <= lanes(a[1:0], nbytes);
 		w_data <= d_o;
@@ -340,7 +352,7 @@ always @(posedge clk) begin
 				lb_line[lk_ent]  <= lk_line;
 			end
 		end
-		// post a captured write (it always fits: DSACK waited for room)
+		// post a captured write (it always fits: STERM waited for room)
 		else if (post_now || native_post) begin
 			cmd_we    <= 1'b1;
 			cmd_wdata <= {1'b1, post_addr, post_be, post_data64};
@@ -428,6 +440,7 @@ initial begin
 	for (k = 0; k < 4; k = k + 1) begin lb_d[0][k] = 32'd0; lb_d[1][k] = 32'd0; end
 	rd_pend = 1'b0; rd_ent = 1'b0; rd_half = 1'b0; rd_drop = 1'b0;
 	wcap = 1'b0; wcap_done = 1'b0; wcap_ack = 1'b0; cmd_we = 1'b0; cmd_wdata = 0;
+	beat_idx = 2'd0; burst_active = 1'b0; sterm_rec = 1'b0;
 	w_lanes = 4'd0; w_data = 32'd0; w_addr = 29'd0; w_long = 2'd0;
 	l2s = L_IDLE; sweeping = 1'b1; sw_idx = 9'd0; f_alloc = 1'b0; f_pend = 1'b0;
 	lk_ent = 1'b0; lk_line = 28'd0; f_idx = 9'd0; f_tag = 19'd0; f_ent = 1'b0;
