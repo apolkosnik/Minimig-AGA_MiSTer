@@ -56,6 +56,8 @@ module ap020_bus
 	output reg        done,         // pulse: operand available, result registers valid
 	output reg [31:0] rd_data,      // portion bytes, right justified
 	output reg        res_berr,     // an operand cycle ended in bus error
+	output reg  [2:0] res_got,      // with res_berr: bytes of the portion moved before the
+	                                // faulted cycle (rd_data holds them, right justified)
 	output reg        res_avec,     // IACK terminated by AVEC
 	output reg        res_ciin,     // CIIN seen on an operand cycle: do not cache
 	output reg        fill_stb,     // pulse: a complete cachable longword
@@ -64,6 +66,7 @@ module ap020_bus
 	input             rmc_release,  // negate RMC without another cycle (CAS mismatch)
 	input             halted,       // double bus fault: never begin a cycle
 	output            bus_idle,     // nothing loaded, nothing in progress
+	output            locked,       // inside a locked (RMC) sequence: request its cycles only
 
 	// ---- MC68030 pins ---------------------------------------------------
 	output reg [31:0] a_o,
@@ -161,6 +164,13 @@ reg  [1:0] beat_idx;      // line entry of the beat being latched
 reg [31:4] beat_line;     // the line being burst-filled (address pins stay constant)
 // pin-side posedge registers
 reg        rmc_p, ciout_p, cbreq_p, ecs_p, ocs_p, ecs_tog, d_oe_p;
+// a CAS mismatch ends the locked sequence while another transfer (a
+// prefetch) may be loaded: the release waits for it instead of being lost
+reg        rmc_rel_pend;
+wire       rmc_rel = rmc_release | rmc_rel_pend;
+// UM 7.6: the locked sequence is indivisible -- no other cycle starts while
+// RMC is asserted, until the sequence ends or is released
+assign     locked  = rmc_p & ~rmc_rel;
 reg        dben_rd_tp;    // read DBEN: toggles at the S2 rising edge (assert)
 reg        dben_rd_tn;    //            toggles at the S5 falling edge (negate)
 reg        dben_wr_tn;    // write DBEN: toggles at the S1 falling edge (assert)
@@ -484,7 +494,8 @@ wire more_cycles = chk_late && !fin && !late_retry && !late_err && !term_burst &
 wire halt_gate   = halt_l | tristate | halted | arb_t;
 wire retry_go    = (bst == B_RETRY) && !halt_l;
 wire idle_go     = (bst == B_IDLE) && !chk_late && !beat_pend && t_valid;
-wire start_now   = !halt_gate && (accept || more_cycles || retry_go || idle_go);
+wire lock_gate   = locked && !n_rmc;
+wire start_now   = !halt_gate && !lock_gate && (accept || more_cycles || retry_go || idle_go);
 
 // IACK vector byte on the low byte of the responding port (UM Figure 7-44)
 wire [7:0] iack_vec = (term_port == `PORT_32) ? din_l[7:0] :
@@ -540,10 +551,10 @@ always @(posedge clk) begin
 		term_sync <= 1'b0; term_port <= `PORT_32; term_ciin <= 1'b0; term_burst <= 1'b0;
 		beat_pend <= 1'b0; beat_ciin <= 1'b0; beat_last <= 1'b0; beat_cnt <= 2'd0; beat_idx <= 2'd0;
 		beat_line <= 28'd0;
-		rmc_p <= 1'b0; ciout_p <= 1'b0; cbreq_p <= 1'b0; ecs_p <= 1'b0; ocs_p <= 1'b0;
+		rmc_p <= 1'b0; rmc_rel_pend <= 1'b0; ciout_p <= 1'b0; cbreq_p <= 1'b0; ecs_p <= 1'b0; ocs_p <= 1'b0;
 		ecs_tog <= 1'b0; d_oe_p <= 1'b0; dben_rd_tp <= 1'b0; dben_wr_tp <= 1'b0;
 		c_as_set <= 1'b0; c_as_clr <= 1'b0; c_ds_wr <= 1'b0; c_cbreq_clr <= 1'b0; c_latch <= 1'b0;
-		done <= 1'b0; rd_data <= 32'd0; res_berr <= 1'b0; res_avec <= 1'b0; res_ciin <= 1'b0;
+		done <= 1'b0; rd_data <= 32'd0; res_berr <= 1'b0; res_got <= 3'd0; res_avec <= 1'b0; res_ciin <= 1'b0;
 		fill_stb <= 1'b0; fill_addr <= 30'd0; fill_data <= 32'd0;
 		a_o <= 32'd0; fc_o <= 3'd0; siz_o <= 2'd0; rw_o <= 1'b1;
 	end else begin
@@ -554,7 +565,10 @@ always @(posedge clk) begin
 		ecs_p <= 1'b0; ocs_p <= 1'b0;
 		chk_late <= 1'b0; beat_pend <= 1'b0;
 
-		if (rmc_release && !t_valid) rmc_p <= 1'b0;
+		// RMC negates at once when no transfer is loaded; otherwise when the
+		// loaded transfer finishes or, if it has not begun, as its cycle starts
+		if (rmc_rel && !t_valid) begin rmc_p <= 1'b0; rmc_rel_pend <= 1'b0; end
+		else if (rmc_release) rmc_rel_pend <= 1'b1;
 
 		//------------------------------------------------------ terminated cycle
 		if (chk_late) begin
@@ -615,7 +629,14 @@ always @(posedge clk) begin
 			res_berr <= fin_err;
 			res_avec <= fin_avec;
 			res_ciin <= t_noc | term_ciin;
-			rd_data  <= (t_kind == `BK_IACK) ? {24'd0, iack_vec} : extract(ebuf_n, t_off, t_nbytes);
+			// a bus error on a later cycle of a dynamically sized transfer
+			// reports what the earlier cycles moved (UM 8.2.1: the fault
+			// describes the remaining part of the operand)
+			res_got  <= (fin_err && !t_fill) ? (t_nbytes - t_rem) : 3'd0;
+			if (fin_err)
+				rd_data <= (t_fill || t_nbytes == t_rem) ? 32'd0 : extract(ebuf_n, t_off, t_nbytes - t_rem);
+			else
+				rd_data <= (t_kind == `BK_IACK) ? {24'd0, iack_vec} : extract(ebuf_n, t_off, t_nbytes);
 		end
 		if (entry_fill && !term_burst) begin
 			fill_stb <= 1'b1; fill_addr <= t_addr[31:2]; fill_data <= ebuf_n;
@@ -624,7 +645,7 @@ always @(posedge clk) begin
 			t_valid <= 1'b0;
 			t_fill  <= 1'b0;
 			t_opdone <= 1'b0;
-			if (t_rmc_last || fin_err) rmc_p <= 1'b0;
+			if (t_rmc_last || fin_err || rmc_rel) begin rmc_p <= 1'b0; rmc_rel_pend <= 1'b0; end
 			if (bst == B_BURST && !beat_abort) bst <= B_IDLE;
 		end
 
@@ -649,7 +670,8 @@ always @(posedge clk) begin
 			siz_o <= siz_enc(n_siz);
 			rw_o  <= n_rw;
 			ciout_p <= n_ciout;
-			if (n_rmc) rmc_p <= 1'b1;
+			if (n_rmc) begin rmc_p <= 1'b1; rmc_rel_pend <= 1'b0; end
+			else if (rmc_rel) begin rmc_p <= 1'b0; rmc_rel_pend <= 1'b0; end
 			cbreq_p <= n_cbreq;
 			c_as_set <= 1'b1;
 			t_ocs <= 1'b0;
