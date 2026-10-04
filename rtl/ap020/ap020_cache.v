@@ -92,7 +92,13 @@ wire       wr_long    = (wr_be == 4'b1111);
 // or a WA partial write into a tag-matching invalid entry)
 wire       wr_store   = wr_we && (wr_hit || (wr_wa && wr_allow_fill && (wr_long || wr_tag_hit)));
 wire       wr_alloc   = wr_we && !wr_hit && wr_wa && wr_allow_fill && wr_long;   // tag replaced/validated
-wire       wr_kill    = wr_we && !wr_hit && wr_wa && wr_allow_fill && !wr_long;  // entry invalidated
+// entry invalidated: a WA partial write miss (UM 6.1.2.1), or a write
+// through another function code to an address the line holds -- without an
+// MMU every function code reaches the same memory, and MC68020 software
+// (which knows of no data cache) must not read the old value back through
+// the code it was cached under
+wire       wr_fc_alias = !wr_tag_hit && (tag_la[wr_idx] == wr_la[31:8]);
+wire       wr_kill    = wr_we && !wr_hit && ((wr_wa && wr_allow_fill && !wr_long) || wr_fc_alias);
 
 wire [5:0] fi_a = fi_addr[7:2];
 wire [5:0] wr_a = wr_la[7:2];
