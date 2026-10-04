@@ -233,6 +233,8 @@ wire native_sel = FAST_PORT && fast_match && b_kind == `BK_DATA && !b_rmc;
 reg native_active, native_first;
 wire pin_ack, pin_busy, pin_done, pin_berr, pin_avec, pin_ciin, pin_fill, pin_idle;
 wire [31:0] pin_rdata, pin_fill_data;
+wire  [2:0] pin_got;
+wire        pin_locked;          // a locked (RMC) sequence holds the pin bus
 wire [31:2] pin_fill_addr;
 assign fast_req = b_req && native_sel && !native_active && !pin_busy &&
                   !bus_granted && !halted && halt_n;
@@ -261,6 +263,8 @@ assign b_idle = pin_idle && !native_active;
 assign b_done = pin_done || (native_response && native_first);
 assign b_rdata = native_active ? extract(fast_rdata, b_addr[1:0], b_nbytes) : pin_rdata;
 assign b_berr = pin_berr && !native_active;
+// with b_berr: bytes of the portion moved before the faulted cycle (b_rdata)
+wire  [2:0] b_got = pin_got;
 assign b_avec = pin_avec && !native_active;
 assign b_ciin = pin_ciin && !native_active;
 assign b_fill_stb = pin_fill || (native_response && b_rw && b_cache && !b_ciout);
@@ -278,9 +282,9 @@ ap020_bus bus (
 	.req_rw(b_rw), .req_fc(b_fc), .req_rmc(b_rmc), .req_rmc_last(b_rmc_last), .req_ciout(b_ciout),
 	.req_cbreq(b_cbreq), .req_ocs(b_ocs), .req_wdata(b_wdata),
 	.req_cache(b_cache),
-	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr),
+	.req_ack(pin_ack), .busy(pin_busy), .done(pin_done), .rd_data(pin_rdata), .res_berr(pin_berr), .res_got(pin_got),
 	.res_avec(pin_avec), .res_ciin(pin_ciin), .fill_stb(pin_fill), .fill_addr(pin_fill_addr),
-	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle),
+	.fill_data(pin_fill_data), .rmc_release(b_rmc_release), .halted(halted), .bus_idle(pin_idle), .locked(pin_locked),
 	.a_o(a_o), .fc_o(fc_o), .siz_o(siz_o), .rw_o(rw_o), .rmc_n_o(rmc_n_o), .as_n_o(as_n_o),
 	.ds_n_o(ds_n_o), .dben_n_o(dben_n_o), .ecs_n_o(ecs_n_o), .ocs_n_o(ocs_n_o), .ciout_n_o(ciout_n_o),
 	.cbreq_n_o(cbreq_n_o), .bus_oe(bus_oe), .d_o(d_o), .d_oe(d_oe), .d_i(d_i),
@@ -537,10 +541,13 @@ always @(posedge clk) begin
 		end
 		if (owner == OWN_WB && b_done) begin
 			if (b_berr) begin
-				// UM 8.2.1: the remaining part of the operand is described
-				f_addr <= wb_stage ? wb_la1 : wb_la0;
+				// UM 8.2.1: the remaining part of the operand is described,
+				// past the cycles of a dynamically sized portion that
+				// completed (b_got); the data output buffer is right
+				// justified, so it holds the remaining bytes as it is
+				f_addr <= (wb_stage ? wb_la1 : wb_la0) + {29'd0, b_got};
 				f_fc   <= wb_fc;
-				f_size <= siz_of(wb_stage ? wb_n1 : wb_total);
+				f_size <= siz_of((wb_stage ? wb_n1 : wb_total) - b_got);
 				f_rw   <= 1'b0;
 				f_rm   <= wb_rmc;
 				f_dob  <= wb_stage ? (wb_data & (32'hFFFF_FFFF >> (8 * (3'd4 - wb_n1)))) : wb_data;
@@ -708,8 +715,12 @@ always @(posedge clk) begin
 						
 						ds <= DS_IDLE;
 					end else if (b_berr) begin
-						f_addr <= r_addr; f_fc <= d_fc; f_size <= siz_of(r_rem); f_rw <= 1'b1; f_rm <= d_rmc;
-						f_dob <= 32'd0; f_got <= r_got; f_partial <= r_data;
+						// the cycles of the portion that completed before the
+						// faulted one (b_got bytes, in b_rdata) count as read
+						f_addr <= r_addr + {29'd0, b_got}; f_fc <= d_fc; f_size <= siz_of(r_rem - b_got); f_rw <= 1'b1; f_rm <= d_rmc;
+						f_dob <= 32'd0; f_got <= r_got + b_got;
+						f_partial <= ((b_got == 3'd0) ? r_data : ((r_data << (8 * b_got)) | b_rdata)) &
+						             ~(32'hFFFF_FFFF << (8 * (r_got + b_got)));
 						d_fault <= 1'b1; 
 						ds <= DS_IDLE;
 					end else if (r_pn != r_rem) begin
@@ -803,7 +814,9 @@ always @(posedge clk) begin
 			end
 			IS_BUSREQ: begin
 				// lowest priority
-				if (slot_free && !w_req && !walker_busy && !wb_valid && !lk_act && ds != DS_BUSREQ) begin
+				// not inside a locked sequence: a prefetch there would hold
+				// the bus slot the sequence's write needs
+				if (slot_free && !w_req && !walker_busy && !wb_valid && !lk_act && ds != DS_BUSREQ && !pin_locked) begin
 					b_req <= 1'b1; b_kind <= `BK_DATA;
 					b_addr <= ir_pa; b_nbytes <= 3'd4; b_total <= 3'd4;
 					b_rw <= 1'b1; b_fc <= ir_fc; b_rmc <= 1'b0; b_rmc_last <= 1'b0;
