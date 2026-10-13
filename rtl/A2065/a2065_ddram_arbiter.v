@@ -73,6 +73,8 @@ module a2065_ddram_arbiter #(
 
     reg               busy;          // a burst is in flight
     reg               owner;         // which master owns it
+    reg               held;          // a command is presented and stalled:
+    reg               held_m;        // ... whose (kept until the slave takes it)
     reg               owner_is_read;
     reg [BURST_W:0]   beats_left;
 
@@ -80,9 +82,13 @@ module a2065_ddram_arbiter #(
     wire m1_req = m1_read | m1_write;
 
     // While idle, m0 wins outright; m1 is granted only when m0 is quiet.
-    wire       start_m0 = !busy && m0_req;
-    wire       start_m1 = !busy && !m0_req && m1_req;
-    wire       sel      = busy ? owner : (m0_req ? M0 : M1);
+    // A command once presented stays presented until the slave accepts it:
+    // Avalon requires address, burstcount, read/write and data to hold while
+    // waitrequest is asserted, so a request arriving meanwhile -- even m0's --
+    // waits for the next decision.
+    wire       start_m0 = !busy && (held ? (held_m == M0 && m0_req) : m0_req);
+    wire       start_m1 = !busy && (held ? (held_m == M1 && m1_req) : (!m0_req && m1_req));
+    wire       sel      = busy ? owner : held ? held_m : (m0_req ? M0 : M1);
     wire       starting = start_m0 | start_m1;
 
     wire [BURST_W-1:0] sel_burstcount = (sel == M0) ? m0_burstcount : m1_burstcount;
@@ -99,8 +105,14 @@ module a2065_ddram_arbiter #(
             owner         <= M0;
             owner_is_read <= 1'b0;
             beats_left    <= 0;
+            held          <= 1'b0;
+            held_m        <= M0;
         end
         else if (!busy) begin
+            // a presented command the slave stalls: hold its owner (dropped
+            // only if that master withdraws it, which Avalon does not allow)
+            held   <= starting && s_waitrequest;
+            held_m <= sel;
             if (starting && !s_waitrequest) begin
                 owner         <= sel;
                 owner_is_read <= sel_read;
@@ -146,12 +158,14 @@ module a2065_ddram_arbiter #(
     // which in turn would keep it held off — a deadlock that never lets the
     // 68k reach fast RAM. Only a master that genuinely cannot have the bus
     // right now is stalled.
-    assign m0_waitrequest = (busy && owner == M1) ? 1'b1          // m1 mid-burst
-                                                  : s_waitrequest;
+    assign m0_waitrequest = (busy && owner == M1)  ? 1'b1          // m1 mid-burst
+                          : (held && held_m == M1) ? 1'b1          // m1's command stalled
+                                                   : s_waitrequest;
 
-    assign m1_waitrequest = (busy && owner == M1) ? s_waitrequest // m1 owns it
-                          : (busy || m0_req)      ? 1'b1          // m0 owns or wants it
-                                                  : s_waitrequest;
+    assign m1_waitrequest = (busy && owner == M1)  ? s_waitrequest // m1 owns it
+                          : (held && held_m == M1) ? s_waitrequest // m1's command stalled
+                          : (busy || m0_req)       ? 1'b1          // m0 owns or wants it
+                                                   : s_waitrequest;
 
     assign m0_readdata       = s_readdata;
     assign m1_readdata       = s_readdata;

@@ -1,6 +1,13 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
+# AP68060: the processor clock (pll_cpu, 50 MHz) is unrelated to the Minimig
+# clocks.  ap060_tg68k_compat crosses with request/answer toggles through
+# three-stage synchronisers, each side holding its fields from its toggle
+# until answered; IPL, reset, RSTO, VBR and the Fast RAM windows cross
+# through synchronisers of their own.  Nothing else connects the domains.
+set_clock_groups -asynchronous -group [get_clocks {*pll_cpu*}]
+
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
 set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
 

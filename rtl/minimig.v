@@ -509,7 +509,7 @@ assign cachecfg = {cachecfg_pre[2],
 always @(posedge clk) if (clk7_en && reset) ntsc <= chipset_config[1];
 
 assign ide_ena  = ide_config[0];
-assign ide_fast = ~ide_config[5] & cpucfg[1];
+assign ide_fast = ~ide_config[5];       // (the AP68060 is the only CPU)
 
 //--------------------------------------------------------------------------------------
 

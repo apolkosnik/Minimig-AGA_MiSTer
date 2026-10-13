@@ -37,3 +37,8 @@ c5_pin_model_dump.txt
 *.xml
 *_netlist
 *.cdf
+tests/ap060/build/
+build_ap060*.log
+build_ap060.pid
+build_ap060.current
+tests/ap060/.run_tests_*.sh

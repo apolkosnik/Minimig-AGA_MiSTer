@@ -74,7 +74,10 @@ module ddram_ctrl
 	input             dmaU,
 	input      [15:0] dmaWR,
 	output reg [15:0] dmaRD,
-	output            dmaACK
+	output            dmaACK,
+	// a DMA write reached DDR3 (accepted there; anything read from DDR3 later
+	// sees it): the AP68060's Fast RAM port invalidates its own cache on it
+	output reg        dma_wr_stb
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -279,6 +282,8 @@ assign mem2_readdata = DDRAM_DOUT;
 
 reg        ddr_swap;
 reg [15:0] ddr_data;
+reg        dma_we_cmd = 0;      // the write presented is a DMA write
+initial dma_wr_stb = 0;
 
 always @ (posedge sysclk) begin
 	reg  [2:0] state = 0;
@@ -287,6 +292,8 @@ always @ (posedge sysclk) begin
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
+	dma_wr_stb <= ram_we & ~ram_busy & dma_we_cmd;
+	if (~ram_busy) dma_we_cmd <= 0;
 
 	if(~ram_busy) begin
 		ram_we  <= 0;
@@ -308,6 +315,7 @@ always @ (posedge sysclk) begin
 						ram_be        <= {6'b000000,dmaWriteBE}<<{dmaWriteAddr[2:1],1'b0};
 						ram_din       <= {dmaWriteDat,dmaWriteDat,dmaWriteDat,dmaWriteDat};
 						ram_we        <= 1;
+						dma_we_cmd    <= 1;
 						dma_write_ack <= 1;
 					end
 					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight) begin
@@ -334,7 +342,9 @@ always @ (posedge sysclk) begin
 						ddr_swap   <= ramshared;
 					end
 				end
-			1: if(~ram_busy & ram_dout_ready) begin
+			// read data is taken whenever it is valid: Avalon lets the slave
+			// return it while it holds waitrequest for a new command
+			1: if(ram_dout_ready) begin
 					if (dma_read_in_flight) begin
 						dmaRD              <= ram_dout[{dmaReadBA, 4'b0000} +:16];
 						dma_read_ack       <= 1;

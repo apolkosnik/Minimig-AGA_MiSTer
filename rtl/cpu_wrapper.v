@@ -25,11 +25,28 @@
 //--------------------------------------------------------------------------//
 
 module cpu_wrapper
+#(
+	parameter AP060_FPU = 0          // 1: a full MC68060; 0: an MC68LC060 (no FPU, ~5,000 ALMs less)
+)
 (
 	input             reset,
 	output reg        reset_out,
 
 	input             clk,
+	input             clk_cpu,         // 2x clk, edges aligned: the AP68060's processor clock
+	input             clk_mem,         // DDRAM_CLK: the processor's Fast RAM port
+	input             fr_dma_wr,       // (clk_mem) ddram_ctrl: a DMA write reached DDR3
+	// the processor's Fast RAM port: an Avalon-MM master on clk_mem (Minimig.sv
+	// gives it priority over ddram_ctrl in front of DDRAM)
+	output     [28:0] fr_address,
+	output      [7:0] fr_burstcount,
+	output            fr_read,
+	output            fr_write,
+	output     [63:0] fr_writedata,
+	output      [7:0] fr_byteenable,
+	input             fr_waitrequest,
+	input      [63:0] fr_readdata,
+	input             fr_readdatavalid,
 	input             ph1,
 	input             ph2,
 
@@ -92,7 +109,7 @@ module cpu_wrapper
 );
 
 wire dcache_sw_en_p;
-assign dcache_sw_en = cpucfg[1] ? dcache_sw_en_p : 1'b1;
+assign dcache_sw_en = dcache_sw_en_p;
 
 assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
@@ -156,46 +173,24 @@ reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
 always @* begin
-	if(cpucfg[1:0]) begin
-		cpu_dout     = cpu_dout_p;
-		cpu_addr     = cpu_addr_p;
-		cpustate     = cpustate_p;
-		cacr         = cacr_p;
-		vbr          = vbr_p;
-		wr           = wr_p;
-		uds_in       = uds_p;
-		lds_in       = lds_p;
-		reset_out    = reset_out_p;
-		chip_as      = c_as;
-		chip_rw      = c_rw;
-		chip_uds     = c_uds;
-		chip_lds     = c_lds;
-		chip_addr    = cpu_addr_p[23:1];
-		chip_din     = cpu_dout_p;
-		chip_data    = chipdout_i;
-		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
-		fastchip_lw  = longword;
-	end
-	else begin
-		cpu_dout     = cpu_dout_o;
-		cpu_addr     = {cpu_addr_o,1'b0};
-		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
-		cacr         = 1;
-		vbr          = 0;
-		wr           = wr_o;
-		uds_in       = uds_o;
-		lds_in       = lds_o;
-		reset_out    = reset_out_o;
-		chip_as      = ramsel | as_o;
-		chip_rw      = wr_o;
-		chip_uds     = uds_o;
-		chip_lds     = lds_o;
-		chip_addr    = cpu_addr_o[23:1];
-		chip_din     = cpu_dout_o;
-		chip_data    = chip_dout;
-		fastchip_sel = 0;
-		fastchip_lw  = 0;
-	end
+	cpu_dout     = cpu_dout_p;
+	cpu_addr     = cpu_addr_p;
+	cpustate     = cpustate_p;
+	cacr         = cacr_p;
+	vbr          = vbr_p;
+	wr           = wr_p;
+	uds_in       = uds_p;
+	lds_in       = lds_p;
+	reset_out    = reset_out_p;
+	chip_as      = c_as;
+	chip_rw      = c_rw;
+	chip_uds     = c_uds;
+	chip_lds     = c_lds;
+	chip_addr    = cpu_addr_p[23:1];
+	chip_din     = cpu_dout_p;
+	chip_data    = chipdout_i;
+	fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+	fastchip_lw  = longword;
 end
 
 wire [15:0] cpu_dout_p;
@@ -209,80 +204,45 @@ wire        lds_p;
 wire        reset_out_p;
 wire        longword;
 
-TG68KdotC_Kernel
-#(
-	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
-	.vbr_stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-)
-cpu_inst_p
-(
-  .clk(clk),
-  .nreset(reset),
-  .clkena_in(clkena_p_throttled),
-  .data_in(cpu_din),
-  .ipl(cpu_ipl),
-  .ipl_autovector(1),
-  .regin_out(),
-  .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
-  .nwr(wr_p),
-  .nuds(uds_p),
-  .nlds(lds_p),
-  .nresetout(reset_out_p),
-  .longword(longword),
-  
-  .cpu(cpucfg[1:0]),
-  .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
-  .cacr_out(cacr_p),
-  .d_cache_out(dcache_sw_en_p),
-  .vbr_out(vbr_p)
-);
-
-wire [15:0] cpu_dout_o;
-wire [23:1] cpu_addr_o;
-wire  [2:0] fc_o;
-wire        wr_o;
-wire        as_o;
-wire        uds_o;
-wire        lds_o;
-wire        reset_out_o;
-
-fx68k cpu_inst_o
+// the CPU: the AP68060 in TG68K's place, whatever the CPU type option
+// says; cpucfg[2] (stock speed) still throttles the bus
+ap060_tg68k_compat #(.NO_FPU(AP060_FPU == 0), .DEBUG_CAPTURE(0)) cpu_inst_p
 (
 	.clk(clk),
-	.enPhi1(ph1),
-	.enPhi2(ph2),
-
-	.extReset(~reset),
-	.pwrUp(~reset),
-	.oRESETn(reset_out_o),
-	.HALTn(1),
-
-	.eRWn(wr_o),
-	.ASn(as_o),
-	.LDSn(lds_o),
-	.UDSn(uds_o),
-	.DTACKn(ramsel ? ~ramready : chip_dtack),
-
-	.FC0(fc_o[0]),
-	.FC1(fc_o[1]),
-	.FC2(fc_o[2]), 
-
-	.VPAn(~&fc_o),
-	.BERRn(1),
-	.BRn(1),
-	.BGACKn(1),
-	.IPL0n(chip_ipl[0]),
-	.IPL1n(chip_ipl[1]),
-	.IPL2n(chip_ipl[2]),
-	.iEdb(cpu_din),
-	.oEdb(cpu_dout_o),
-	.eab(cpu_addr_o)
+	.clk_cpu(clk_cpu),
+	.nreset(reset),
+	.clkena_in(clkena_p_throttled),
+	.data_in(cpu_din),
+	.ipl(cpu_ipl),
+	.addr_out(cpu_addr_p),
+	.data_write(cpu_dout_p),
+	.nwr(wr_p),
+	.nuds(uds_p),
+	.nlds(lds_p),
+	.nresetout(reset_out_p),
+	.longword(longword),
+	.busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
+	.cacr_out(cacr_p),
+	.d_cache_out(dcache_sw_en_p),
+	.vbr_out(vbr_p),
+	.z2ram_ena(z2ram_ena),
+	.z3ram_base0(z3ram_base0),
+	.z3ram_ena0(z3ram_ena0),
+	.z3ram_base1(z3ram_base1),
+	.z3ram_ena1(z3ram_ena1),
+	.clk_mem(clk_mem),
+	.fr_dma_wr(fr_dma_wr),
+	.fr_address(fr_address),
+	.fr_burstcount(fr_burstcount),
+	.fr_read(fr_read),
+	.fr_write(fr_write),
+	.fr_writedata(fr_writedata),
+	.fr_byteenable(fr_byteenable),
+	.fr_waitrequest(fr_waitrequest),
+	.fr_readdata(fr_readdata),
+	.fr_readdatavalid(fr_readdatavalid)
 );
+
 
 wire cpu_req = (cpustate != 1);
 
@@ -299,8 +259,8 @@ always @(posedge clk) begin
 		dcache_d    <= 0;
 	end
 	else if (~cpu_req) begin	// No mem access, so safe to switch chipram access mode
-		turbochip_d <= cachecfg[0] & cpucfg[1];
-		turbokick_d <= cachecfg[1] & cpucfg[1];
+		turbochip_d <= cachecfg[0];
+		turbokick_d <= cachecfg[1];
 		dcache_d    <= cachecfg[2];
 	end
 end
@@ -498,7 +458,7 @@ always @(posedge clk) begin
 	old_uds <= chip_uds;
 
 	if (~reset | ~reset_out) begin
-		ac_memcard  <= cpucfg[1] ? fastramcfg : fastramcfg[2] ? 3'd3 : {1'b0, fastramcfg[1:0]};
+		ac_memcard  <= fastramcfg;
 		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
 		ac_a2065    <= 1;
 		ac_cdtv     <= cdtv_mode;
