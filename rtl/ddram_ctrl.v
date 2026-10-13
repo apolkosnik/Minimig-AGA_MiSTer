@@ -189,6 +189,8 @@ reg        dma_read_ack;
 reg [28:1] dmaReadAddr;
 reg  [1:0] dmaReadBA;
 reg        dma_read_in_flight;
+reg        dma_after_wr;
+wire       wr_first = dma_after_wr & write_req & ~write_ack;
 
 assign dmaACK = dmaACK_r;
 
@@ -199,8 +201,12 @@ always @ (posedge sysclk) begin
 		dma_write_req <= 0;
 		dma_read_req  <= 0;
 		dmaACK_r      <= 0;
+		dma_after_wr  <= 0;
 	end else begin
+		if (write_ack) dma_after_wr <= 0;
+
 		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r) begin
+			dma_after_wr <= write_req & ~write_ack;
 			if (dmaWE) begin
 			dmaWriteAddr  <= dmaAddr;
 			dmaWriteDat   <= dmaWR;
@@ -310,7 +316,7 @@ always @ (posedge sysclk) begin
 	else begin
 		case(state)
 			0: if(~ram_busy) begin
-					if(~dma_write_ack & dma_write_req) begin
+					if(~dma_write_ack & dma_write_req & ~wr_first) begin
 						ram_addr      <= {3'b001, dmaWriteAddr[28:3]};
 						ram_be        <= {6'b000000,dmaWriteBE}<<{dmaWriteAddr[2:1],1'b0};
 						ram_din       <= {dmaWriteDat,dmaWriteDat,dmaWriteDat,dmaWriteDat};
@@ -318,7 +324,7 @@ always @ (posedge sysclk) begin
 						dma_we_cmd    <= 1;
 						dma_write_ack <= 1;
 					end
-					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight) begin
+					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight & ~wr_first) begin
 						ram_addr           <= {3'b001, dmaReadAddr[28:3]};
 						ram_be             <= 8'hFF;
 						ram_rd             <= 1;
