@@ -26,7 +26,7 @@
 
 module cpu_wrapper
 #(
-	parameter AP060_FPU = 0          // 1: a full MC68060; 0: an MC68LC060 (no FPU, ~5,000 ALMs less)
+	parameter AP060_FPU = 1          // 1: a full MC68060; 0: an MC68LC060 (no FPU, ~4,000 ALMs less)
 )
 (
 	input             reset,
