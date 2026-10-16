@@ -113,10 +113,10 @@ S_DWAIT: begin
 			exc_data_fault(1'b1, RK_BOUNDARY, S_FETCH);
 		end else begin
 			// an RMW fault is rerun as a whole instruction, or the instruction
-			// counts as emulated when DF is cleared (UM 8.2.2); so is the RTE
-			// whose frame validation read faulted.  The rerun must not repeat
+			// counts as emulated when DF is cleared (UM 8.2.2).  An RTE frame
+			// validation read is an ordinary read: the RTE goes on after it.
+			// The rerun must not repeat
 			// an (An)+ / -(An) update of TAS or CAS: it is undone here.
-			rte_val <= 1'b0;
 			if (d_rmc && (ir[5:3] == 3'b011 || ir[5:3] == 3'b100) &&
 			    (ir[15:6] == 10'b0100101011 || (ir[15:11] == 5'b00001 && ir[8:6] == 3'b011))) begin : rmw_undo
 				reg [2:0] nb;
@@ -126,7 +126,7 @@ S_DWAIT: begin
 				if (ir[5:3] == 3'b011) wreg({1'b1, ir[2:0]}, ea);
 				else wreg({1'b1, ir[2:0]}, ea + step);
 			end
-			exc_data_fault(1'b0, (d_rmc || rte_val) ? RK_RMW : d_rw ? RK_READ : RK_WRITE, S_DWAIT);
+			exc_data_fault(1'b0, d_rmc ? RK_RMW : d_rw ? RK_READ : RK_WRITE, S_DWAIT);
 		end
 	end
 end

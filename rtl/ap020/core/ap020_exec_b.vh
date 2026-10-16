@@ -90,10 +90,11 @@ S_RTE2: begin
 		`FMT_CPMID, `FMT_SHORTBUS, `FMT_LONGBUS: begin
 			fr[0] <= tmp; fr[1] <= tmp2;
 			cnt <= 8'd2;
-			// validate the frame first (MC68020 UM 6.1.12): a fault on its far
-			// end is an ordinary bus error that reruns the RTE; only then can
-			// a fault while loading internal state halt (UM 8.1.13)
-			rte_val <= 1'b1;
+			// validate the frame first (MC68020 UM 6.1.12): its far end and,
+			// for the long frame, the version number.  A fault there is an
+			// ordinary read bus error (rerun with DF, or completed by software
+			// with DF cleared, UM 6.2.2) after which the RTE goes on; only a
+			// fault while loading internal state halts (UM 8.1.13)
 			rd_sd(rf_c + {(frame_lw(tmp2[15:12]) - 6'd1), 2'b00}, `SZ_L, DW_NONE, S_RTE_VAL);
 		end
 		default: begin
@@ -104,7 +105,20 @@ S_RTE2: begin
 		end
 	endcase
 end
-S_RTE_VAL: begin rte_val <= 1'b0; exc_busfault <= 1'b1; state <= S_RTE3; end
+// fr[0]/fr[1] are reloaded from tmp/tmp2: after a validation fault the bus
+// error handler's own RTE has used fr[], and the long frame restores tmp/tmp2
+S_RTE_VAL: begin
+	fr[0] <= tmp; fr[1] <= tmp2; cnt <= 8'd2;
+	if (tmp2[15:12] == `FMT_LONGBUS)
+		rd_sd(rf_c + 32'h34, `SZ_L, DW_EA, S_RTE_VAL2);     // the version number (word $36)
+	else begin exc_busfault <= 1'b1; state <= S_RTE3; end
+end
+S_RTE_VAL2: begin
+	fr[0] <= tmp; fr[1] <= tmp2; cnt <= 8'd2;
+	// version mismatch (UM 8.1.8): a format error, T1/T0 kept as above
+	if (ea[15:12] != 4'h0) exc_pre(`VEC_FMTERR);
+	else begin exc_busfault <= 1'b1; state <= S_RTE3; end
+end
 S_RTE3: begin
 	if (cnt[5:0] < frame_lw(fr[1][15:12])) rd_sd(rf_c + {cnt[5:0], 2'b00}, `SZ_L, DW_FRAME, S_RTE3);
 	else state <= S_RTE4;
@@ -113,9 +127,7 @@ S_RTE4: begin : rte4
 	reg [3:0] fmt;
 	fmt = fr[1][15:12];
 	exc_busfault <= 1'b0;
-	if (fmt == `FMT_LONGBUS && frw[6'd27][15:12] != 4'h0) begin
-		exc_pre(`VEC_FMTERR);            // version mismatch (UM 8.1.8), T1/T0 kept as above
-	end else begin
+	begin
 		sr <= fr_word(6'd0) & `SR_MASK;
 		wreg(4'd15, rf_c + {frame_lw(fmt), 2'b00});
 		exc_pc <= fr_long(6'd1);
@@ -198,15 +210,11 @@ S_RTE_PIPE: begin : rte_pipe
 			RK_BOUNDARY: begin
 				// a boundary fault resumes at the PC field, which the handler
 				// may have changed (address error repair, UM 8.2.2); stage C
-				// and B words the handler supplied (RC/RB cleared) are used,
-				// only the rest is fetched (UM 6.1.7)
-				if (!exc_ssw[13]) begin
-					pipe_load = 1'b1; flush_pc = exc_pc;
-					pipe_c = fr_word(6'd6); pipe_c_v = 1'b1;
-					pipe_b = fr_word(6'd7); pipe_b_v = ~exc_ssw[12];
-				end else begin
-					flush_req = 1'b1; flush_pc = exc_pc;
-				end
+				// and B words the handler supplied (RC/RB cleared) are used
+				// independently, only the rest is fetched (UM 6.1.7, 6.2.1)
+				pipe_load = 1'b1; flush_pc = exc_pc;
+				pipe_c = fr_word(6'd6); pipe_c_v = ~exc_ssw[13];
+				pipe_b = fr_word(6'd7); pipe_b_v = ~exc_ssw[12];
 				state <= S_FETCH;
 			end
 			default: begin

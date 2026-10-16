@@ -238,3 +238,4 @@ localparam S_RTMA2    = 8'd224;  //   access status
 localparam S_RTMA3    = 8'd225;  //   decide
 localparam S_RTM5     = 8'd226;  // restore CCR and the data area register
 localparam S_RTM6     = 8'd227;  // restore SP, return
+localparam S_RTE_VAL2  = 8'd228;  // RTE: the long frame's version number
