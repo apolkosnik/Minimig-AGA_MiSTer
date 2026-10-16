@@ -275,6 +275,10 @@ reg  [2:0] exc_got;
 reg [31:0] exc_partial;
 reg  [2:0] rte_kind;
 reg        trace_after_exc;
+// the trace taken after an instruction trap reports the trapping
+// instruction, not the handler it entered, in its six-word frame
+reg [31:0] trace_ia;
+reg        trace_ia_sel;
 // coprocessor
 reg  [2:0] cp_id;
 reg [15:0] cp_resp;
@@ -589,7 +593,7 @@ always @(posedge clk) begin
 		exc_busfault <= 1'b1;          // faults during the reset sequence halt (UM 8.1.1)
 		exc_is_reset <= 1'b1;
 		exc_is_irq <= 1'b0; exc_throw <= 1'b0;
-		trace_after_exc <= 1'b0;
+		trace_after_exc <= 1'b0; trace_ia <= 32'd0; trace_ia_sel <= 1'b0;
 		cp_trace_wait <= 1'b0;
 		status_cnt <= 2'd3;
 		d_addr <= 32'd0; d_size <= 2'd0; d_rw <= 1'b1; d_rmc <= 1'b0; d_rmc_last <= 1'b0; d_iack <= 1'b0;

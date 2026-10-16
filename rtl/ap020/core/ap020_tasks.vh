@@ -125,7 +125,8 @@ task exc_go;
 		// T1 tracing survives the instruction traps (UM 8.1.7 / 8.1.12)
 		trace_after_exc <= (tr_t1 | tr_t0) && ((vec == `VEC_DIVZERO) || (vec == `VEC_CHK) ||
 		                   (vec == `VEC_TRAPCC) || (vec[7:4] == 4'h2 || vec[7:4] == 4'h3 && vec[7:0] < 8'd48));
-		trace_pend <= 1'b0;
+		trace_ia <= pc_i;                // the trapping instruction (UM 8.1.12)
+		trace_pend <= 1'b0; trace_ia_sel <= 1'b0;
 		if (vec == `VEC_BUSERR || vec == `VEC_ADDRERR || vec == `VEC_SPURIOUS || vec == `VEC_FLINE ||
 		    (vec >= `VEC_AUTOVEC && vec < `VEC_TRAP)) status_cnt <= 2'd3;
 		state <= S_EXC0;

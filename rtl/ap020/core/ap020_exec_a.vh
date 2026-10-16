@@ -29,7 +29,7 @@ S_FETCH: begin
 	end else if (trace_pend) begin
 		trace_pend <= 1'b0;
 		status_cnt <= 2'd2;
-		exc_go(`VEC_TRACE, `FMT_SIXWORD, scan_pc, pc_i);
+		exc_go(`VEC_TRACE, `FMT_SIXWORD, scan_pc, trace_ia_sel ? trace_ia : pc_i);
 	end else if (irq_pend) begin
 		stopped <= 1'b0;
 		status_cnt <= 2'd2;
