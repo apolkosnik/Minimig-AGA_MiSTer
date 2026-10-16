@@ -182,6 +182,11 @@ reg [31:0] flush_pc;
 reg        pipe_load;      // RTE: preload stages C/B from the frame
 reg [15:0] pipe_c, pipe_b;
 reg        pipe_c_v, pipe_b_v;
+// RTE with stage C refetched but stage B from the frame (RC=1, RB=0): the
+// second word appended after the preload is replaced by the frame's B
+reg        pb_ov_v;        // the override is armed
+reg        pb_ov_c;        // stage C has been appended
+reg [15:0] pb_ov;          // the frame's stage B
 
 wire        w0_v  = pq_v[0];
 wire        w1_v  = pq_v[1];
@@ -275,7 +280,6 @@ reg  [2:0] exc_got;
 reg [31:0] exc_partial;
 reg  [2:0] rte_kind;
 reg        trace_after_exc;
-reg        rte_val;        // RTE is validating its frame: a fault reruns the RTE
 // the trace taken after an instruction trap reports the trapping
 // instruction, not the handler it entered, in its six-word frame
 reg [31:0] trace_ia;
@@ -588,6 +592,7 @@ always @(posedge clk) begin
 		sfc <= 3'd0; dfc <= 3'd0;
 		pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
 		scan_pc <= 32'd0; fetch_pc <= 32'd0; fetch_skip <= 1'b0; fetch_out <= 2'd0;
+		pb_ov_v <= 1'b0; pb_ov_c <= 1'b0; pb_ov <= 16'd0;
 		fetch_disc <= 2'd0; fetch_hold <= 1'b1;
 		trace_pend <= 1'b0; late_fault_pend <= 1'b0; stream_fault_pend <= 1'b0;
 		stopped <= 1'b0; halted_r <= 1'b0;
@@ -596,7 +601,7 @@ always @(posedge clk) begin
 		exc_busfault <= 1'b1;          // faults during the reset sequence halt (UM 8.1.1)
 		exc_is_reset <= 1'b1;
 		exc_is_irq <= 1'b0; exc_throw <= 1'b0;
-		trace_after_exc <= 1'b0; trace_ia <= 32'd0; trace_ia_sel <= 1'b0; rte_val <= 1'b0;
+		trace_after_exc <= 1'b0; trace_ia <= 32'd0; trace_ia_sel <= 1'b0;
 		cp_trace_wait <= 1'b0;
 		status_cnt <= 2'd3;
 		d_addr <= 32'd0; d_size <= 2'd0; d_rw <= 1'b1; d_rmc <= 1'b0; d_rmc_last <= 1'b0; d_iack <= 1'b0;
@@ -647,6 +652,7 @@ always @(posedge clk) begin
 		//---------------------------------------------------------- prefetch and pipe maintenance
 		if (flush_req) begin
 			pq_v <= 6'd0; pq_f <= 6'd0; pq_n <= 3'd0;
+			pb_ov_v <= 1'b0;
 			scan_pc <= flush_pc;
 			fetch_pc <= {flush_pc[31:2], 2'b00};
 			fetch_skip <= flush_pc[1];
@@ -677,6 +683,7 @@ always @(posedge clk) begin
 				pq_v <= {4'd0, pipe_b_v & pipe_c_v, pipe_c_v};
 				pq_f <= 6'd0;
 				pq_n <= pipe_c_v ? (pipe_b_v ? 3'd2 : 3'd1) : 3'd0;
+				pb_ov_v <= pipe_b_v & ~pipe_c_v; pb_ov_c <= 1'b0; pb_ov <= pipe_b;
 				scan_pc <= flush_pc;
 				fetch_pc <= {resume_fetch[31:2], 2'b00};
 				fetch_skip <= resume_fetch[1];
@@ -691,6 +698,7 @@ always @(posedge clk) begin
 				reg [5:0] nv, nf;
 				reg [2:0] nn;
 				reg ret, disc_now;
+				reg ov_v, ov_c;
 				reg [1:0] out_after, disc_after, live;
 				integer j;
 				ret = i_ack | i_fault;                    // a fetch returns this clock
@@ -708,13 +716,21 @@ always @(posedge clk) begin
 					nn = pq_n - pop_n;
 					scan_pc <= scan_pc + {29'd0, pop_n, 1'b0};
 				end
+				ov_v = pb_ov_v; ov_c = pb_ov_c;
 				if (ret && !disc_now) begin
 					if (!fetch_skip) begin
-						nq[nn] = i_data[31:16]; nv[nn] = 1'b1; nf[nn] = i_fault; nn = nn + 3'd1;
+						nq[nn] = i_data[31:16]; nv[nn] = 1'b1; nf[nn] = i_fault;
+						if (ov_v && ov_c) begin nq[nn] = pb_ov; nf[nn] = 1'b0; ov_v = 1'b0; end
+						else ov_c = 1'b1;
+						nn = nn + 3'd1;
 					end
-					nq[nn] = i_data[15:0]; nv[nn] = 1'b1; nf[nn] = i_fault; nn = nn + 3'd1;
+					nq[nn] = i_data[15:0]; nv[nn] = 1'b1; nf[nn] = i_fault;
+					if (ov_v && ov_c) begin nq[nn] = pb_ov; nf[nn] = 1'b0; ov_v = 1'b0; end
+					else ov_c = 1'b1;
+					nn = nn + 3'd1;
 					fetch_skip <= 1'b0;
 				end
+				pb_ov_v <= ov_v; pb_ov_c <= ov_c;
 				for (j = 0; j < 6; j = j + 1) begin pq[j] <= nq[j]; pq_v[j] <= nv[j]; pq_f[j] <= nf[j]; end
 				pq_n <= nn;
 				fetch_disc <= disc_after;

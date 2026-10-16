@@ -12,7 +12,8 @@
 //   +$04 argument count (low byte)     +$06 reserved
 //   +$08 descriptor pointer            +$0C saved PC (after the CALLM)
 //   +$10 saved data area register      +$14 saved SP (at the CALLM)
-//   +$18 the arguments (on a stack change, copied there)
+//   +$18 the arguments (on a stack change with opt 000, copied there; opt
+//        100 leaves them on the calling stack, reached through the saved SP)
 // RTM Rn reverses it: CCR, PC and Rn from the frame, then SP past the frame
 // and the argument count (type $01: the saved SP plus the argument count).
 // Opt must be 000 or 100 and type $00 or $01, else a format error (no
@@ -52,9 +53,12 @@ S_CALLMA1: begin
 	dreq(rf_c, `SZ_W, 1'b1, 32'd0, fc_data, 1'b0, 1'b0, DW_NONE, S_CALLMA2);
 end
 S_CALLMA2: begin
-	// the descriptor's address, for validation of a type $01 descriptor
+	// the descriptor's address, for validation of a type $01 descriptor, in
+	// the descriptor address register of the space it was read from (a
+	// PC-relative descriptor is a program reference, see rd)
 	cpu_flt_fmt <= 1'b1;
-	dreq(`AC_SPACE(32'h40 | {27'd0, fc_data, 2'b00}), `SZ_L, 1'b0, imm, `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, S_CALLMA3);
+	dreq(`AC_SPACE(32'h40 | {27'd0, (ea_pc && PCREL_PROGRAM_SPACE) ? fc_prog : fc_data, 2'b00}), `SZ_L, 1'b0, imm,
+	     `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, S_CALLMA3);
 end
 S_CALLMA3: dreq(`AC_SPACE(32'h08), `SZ_B, 1'b0, {24'd0, tmp[23:16]}, `FC_CPU_SPACE, 1'b0, 1'b0, DW_NONE, S_CALLMA4);
 S_CALLMA4: dreq(`AC_SPACE(32'h04), `SZ_B, 1'b1, 32'd0, `FC_CPU_SPACE, 1'b0, 1'b0, DW_EA, S_CALLMA5);
@@ -69,8 +73,10 @@ S_CALLMA5: begin
 	end else rd(imm + 32'd4, `SZ_L, DW_TMP2, S_CALLM2);
 end
 S_CALLMA6: begin
-	// the frame goes below the arguments copied to the new stack
-	ea2 <= ea - {24'd0, ext[7:0]} - 32'd24;
+	// the frame goes below the arguments copied to the new stack; opt 100
+	// copies nothing, the module reaches the arguments through the saved SP
+	// (UM 9.7.1)
+	ea2 <= ea - (tmp[31] ? 32'd0 : {24'd0, ext[7:0]}) - 32'd24;
 	rd(imm + 32'd4, `SZ_L, DW_TMP2, S_CALLM2);
 end
 S_CALLM2: rd(imm + 32'd8, `SZ_L, DW_SRC, S_CALLM3);
@@ -79,7 +85,7 @@ S_CALLM4: begin tmp3[15:12] <= ea[15:12]; state <= S_CALLM5; end
 S_CALLM5: begin
 	cnt <= 8'd0;
 	if (!tmp3[8]) begin ea2 <= rf_c - 32'd24; state <= S_CALLM6; end
-	else if (ext[7:0] != 8'd0) state <= S_CALLMC;
+	else if (ext[7:0] != 8'd0 && !tmp[31]) state <= S_CALLMC;
 	else state <= S_CALLM6;
 end
 // stack change: the arguments from the calling stack to the new one
