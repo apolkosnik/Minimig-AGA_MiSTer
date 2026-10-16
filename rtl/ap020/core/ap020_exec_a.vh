@@ -71,7 +71,9 @@ S_DWAIT: begin
 		reg [31:0] data;
 		reg  [1:0] dsz;
 		data = rte_fake ? rte_fake_data : d_rdata;
-		dsz  = d_size;
+		// a software-completed read (RTE with DF clear) has the width of the
+		// faulted access (the frame's SSW), not of RTE's own frame reads
+		dsz  = rte_fake ? sz_of_siz(exc_ssw[5:4]) : d_size;
 		if (rerun_merge) begin
 			// UM 8.2.1: a rerun of the second portion completes the operand;
 			// the rerun moves the SSW SIZE bytes, the operand is those plus
@@ -105,12 +107,26 @@ S_DWAIT: begin
 			cpu_flt_ill <= 1'b0; exc_pre(`VEC_ILLEGAL);           // BKPT acknowledge terminated by BERR
 		end else if (cpu_flt_fline) begin
 			cpu_flt_fline <= 1'b0; exc_pre(`VEC_FLINE);           // no coprocessor answered (UM 10.5.2.8)
+		end else if (cpu_flt_fmt) begin
+			cpu_flt_fmt <= 1'b0; exc_pre(`VEC_FMTERR);           // CALLM/RTM: no access control answered (UM 9.8)
 		end else if (exc_active) begin
 			exc_data_fault(1'b1, RK_BOUNDARY, S_FETCH);
 		end else begin
 			// an RMW fault is rerun as a whole instruction, or the instruction
-			// counts as emulated when DF is cleared (UM 8.2.2)
-			exc_data_fault(1'b0, d_rmc ? RK_RMW : d_rw ? RK_READ : RK_WRITE, S_DWAIT);
+			// counts as emulated when DF is cleared (UM 8.2.2); so is the RTE
+			// whose frame validation read faulted.  The rerun must not repeat
+			// an (An)+ / -(An) update of TAS or CAS: it is undone here.
+			rte_val <= 1'b0;
+			if (d_rmc && (ir[5:3] == 3'b011 || ir[5:3] == 3'b100) &&
+			    (ir[15:6] == 10'b0100101011 || (ir[15:11] == 5'b00001 && ir[8:6] == 3'b011))) begin : rmw_undo
+				reg [2:0] nb;
+				reg [31:0] step;
+				nb = (ir[15:12] == 4'h4 || ir[10:9] == 2'b01) ? 3'd1 : (ir[10:9] == 2'b10) ? 3'd2 : 3'd4;
+				step = (nb == 3'd1 && ir[2:0] == 3'd7) ? 32'd2 : {29'd0, nb};
+				if (ir[5:3] == 3'b011) wreg({1'b1, ir[2:0]}, ea);
+				else wreg({1'b1, ir[2:0]}, ea + step);
+			end
+			exc_data_fault(1'b0, (d_rmc || rte_val) ? RK_RMW : d_rw ? RK_READ : RK_WRITE, S_DWAIT);
 		end
 	end
 end

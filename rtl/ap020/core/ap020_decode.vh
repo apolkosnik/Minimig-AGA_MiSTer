@@ -111,12 +111,18 @@ always @* begin
 			if (ea_dn) begin dc_dstk = DK_REG; dc_dreg = {1'b0, dw[2:0]}; dc_size = `SZ_L; end
 			else begin dc_dstk = DK_EA; if (!(dw[7:6] == 2'b00 ? ea_mem : ea_memalt)) dc_illegal = 1'b1; end
 		end else if (dw[7:6] == 2'b11) begin
-			// CHK2/CMP2 (00C0/02C0/04C0), CAS (0AC0/0CC0/0EC0), CAS2 (0CFC/0EFC), CALLM/RTM (illegal)
+			// CHK2/CMP2 (00C0/02C0/04C0), CAS (0AC0/0CC0/0EC0), CAS2 (0CFC/0EFC), RTM/CALLM (06C0)
 			case (dw[11:9])
 				3'b000, 3'b001, 3'b010: begin
 					dc_first = S_CHK2_0;
 					dc_size = dw[10:9];
 					if (!ea_ctrl) dc_illegal = 1'b1;
+				end
+				3'b011: begin
+					// RTM Rn (Dn/An field), CALLM #n,<ea> (control): the MC68020's
+					// module call and return (UM 9.7)
+					if (dw[5:4] == 2'b00) dc_first = S_RTM0;
+					else begin dc_first = S_CALLM0; if (!ea_ctrl) dc_illegal = 1'b1; end
 				end
 				3'b101, 3'b110, 3'b111: begin
 					dc_size = dw[10:9] - 2'd1;
@@ -513,14 +519,14 @@ end
 
 // instructions whose second word is part of the operation (popped with the opcode)
 wire dc_needs_ext = (dc_first == S_MULDIV0 && dw[15:12] == 4'h4) || (dc_first == S_CHK2_0) ||
-                    (dc_first == S_CAS0) || (dc_first == S_CAS2_0) || (dc_first == S_BF0) ||
+                    (dc_first == S_CAS0) || (dc_first == S_CAS2_0) || (dc_first == S_BF0) || (dc_first == S_CALLM0) ||
                     (dc_first == S_MOVES0) || (dc_first == S_MOVEC) ||
                     (dc_first == S_CP0) || (dc_first == S_CPSCC) || (dc_first == S_CPDBCC) || (dc_first == S_CPTRAP) ||
                     (dc_first == S_MOVEP0) || (dc_first == S_MOVEM0) || (dc_first == S_LINK) || (dc_first == S_RTD) || (dc_first == S_STOP) ||
                     (dc_first == S_DBCC) || (dc_first == S_PACK && (dw[8:6] == 3'b101 || dw[8:6] == 3'b110) && dw[15:12] == 4'h8);
 // instructions that evaluate their memory EA (no operand read) before their first state
 wire dc_eaonly = ea_mem && ((dc_first == S_LEA) || (dc_first == S_PEA) || (dc_first == S_JMP) || (dc_first == S_JSR) ||
-                            (dc_first == S_TAS) || (dc_first == S_SCC) || (dc_first == S_MOVE_FSR) || (dc_first == S_CAS0) ||
+                            (dc_first == S_TAS) || (dc_first == S_SCC) || (dc_first == S_MOVE_FSR) || (dc_first == S_CAS0) || (dc_first == S_CALLM0) ||
                             (dc_first == S_CHK2_0) || (dc_first == S_BF0) || (dc_first == S_MOVES0) ||
                             (dc_first == S_CPSAVE0 && !ea_pd) || (dc_first == S_CPREST0 && !ea_pi) ||   // the frame length sets the step
                             (dc_first == S_MOVEM0 && !ea_pi && !ea_pd));

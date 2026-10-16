@@ -275,6 +275,7 @@ reg  [2:0] exc_got;
 reg [31:0] exc_partial;
 reg  [2:0] rte_kind;
 reg        trace_after_exc;
+reg        rte_val;        // RTE is validating its frame: a fault reruns the RTE
 // the trace taken after an instruction trap reports the trapping
 // instruction, not the handler it entered, in its six-word frame
 reg [31:0] trace_ia;
@@ -318,6 +319,7 @@ reg        rerun_merge;    // a rerun read completes a partially read operand
 reg        exc_active;     // exception processing in progress
 reg        cpu_flt_ill;    // a bus error on this CPU-space cycle is an illegal instruction (BKPT)
 reg        cpu_flt_fline;  // ... is an F-line exception (first coprocessor access)
+reg        cpu_flt_fmt;    // ... is a format error (CALLM/RTM access control, UM 9.8)
 reg        iack_pc_i;      // interrupt frame carries the instruction address (Busy primitive)
 
 // interrupt processing in progress (masks IPEND)
@@ -488,6 +490,7 @@ always @* begin
 		end
 		S_PACK, S_PACK2, S_PACK3: begin ra_a = {ir[3], ir[2:0]}; ra_b = {ir[3], ir[11:9]}; end
 		S_LINK, S_LINK2, S_LINK3, S_UNLK, S_UNLK2, S_UNLK3, S_MOVE_USP: ra_a = {1'b1, ir[2:0]};
+		S_CALLM10: ra_a = tmp3[15:12];             // CALLM: the entry word's data area register
 		S_MOVEP0, S_MOVEP1, S_MOVEP2, S_MOVEP3: begin ra_a = {1'b1, ir[2:0]}; ra_b = {1'b0, ir[11:9]}; end
 		S_DBCC, S_CPDBCC, S_CPDBCC2: ra_a = {1'b0, ir[2:0]};
 		S_CP2, S_CP3, S_CP4, S_CP5, S_CP6, S_CP7, S_CP8, S_CP10, S_CPREG, S_CPCTRL, S_CPCTRL2, S_CPTOS, S_CPEAX,
@@ -593,7 +596,7 @@ always @(posedge clk) begin
 		exc_busfault <= 1'b1;          // faults during the reset sequence halt (UM 8.1.1)
 		exc_is_reset <= 1'b1;
 		exc_is_irq <= 1'b0; exc_throw <= 1'b0;
-		trace_after_exc <= 1'b0; trace_ia <= 32'd0; trace_ia_sel <= 1'b0;
+		trace_after_exc <= 1'b0; trace_ia <= 32'd0; trace_ia_sel <= 1'b0; rte_val <= 1'b0;
 		cp_trace_wait <= 1'b0;
 		status_cnt <= 2'd3;
 		d_addr <= 32'd0; d_size <= 2'd0; d_rw <= 1'b1; d_rmc <= 1'b0; d_rmc_last <= 1'b0; d_iack <= 1'b0;
@@ -614,7 +617,7 @@ always @(posedge clk) begin
 		sh_wait <= 1'b0;
 		g_sext <= 1'b0; g_bitop <= 1'b0; g_shift <= 1'b0; g_move_mem <= 1'b0; g_dstrd <= 1'b0; nx <= S_FETCH;
 		rte_fake <= 1'b0; rte_fake_data <= 32'd0; rerun_merge <= 1'b0; exc_active <= 1'b0;
-		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0; iack_pc_i <= 1'b0;
+		cpu_flt_ill <= 1'b0; cpu_flt_fline <= 1'b0; cpu_flt_fmt <= 1'b0; iack_pc_i <= 1'b0;
 		cp_id <= 3'd0; cp_resp <= 16'd0; cp_cond <= 1'b0; cp_len <= 8'd0; cp_pos <= 8'd0; cp_dr <= 1'b0;
 		cp_ca <= 1'b0; cp_pcbit <= 1'b0; cp_base <= 32'd0; cp_kind <= 4'd0;
 		md_div <= 1'b0; md_sign <= 1'b0; md_a <= 32'd0; md_hi <= 32'd0; md_lo <= 32'd0;

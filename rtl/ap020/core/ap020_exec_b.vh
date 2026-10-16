@@ -90,8 +90,11 @@ S_RTE2: begin
 		`FMT_CPMID, `FMT_SHORTBUS, `FMT_LONGBUS: begin
 			fr[0] <= tmp; fr[1] <= tmp2;
 			cnt <= 8'd2;
-			exc_busfault <= 1'b1;        // a fault while loading internal state halts (UM 8.1.13)
-			state <= S_RTE3;
+			// validate the frame first (MC68020 UM 6.1.12): a fault on its far
+			// end is an ordinary bus error that reruns the RTE; only then can
+			// a fault while loading internal state halt (UM 8.1.13)
+			rte_val <= 1'b1;
+			rd_sd(rf_c + {(frame_lw(tmp2[15:12]) - 6'd1), 2'b00}, `SZ_L, DW_NONE, S_RTE_VAL);
 		end
 		default: begin
 			// the MC68020 keeps T1/T0 for the format error: its frame
@@ -101,6 +104,7 @@ S_RTE2: begin
 		end
 	endcase
 end
+S_RTE_VAL: begin rte_val <= 1'b0; exc_busfault <= 1'b1; state <= S_RTE3; end
 S_RTE3: begin
 	if (cnt[5:0] < frame_lw(fr[1][15:12])) rd_sd(rf_c + {cnt[5:0], 2'b00}, `SZ_L, DW_FRAME, S_RTE3);
 	else state <= S_RTE4;
@@ -193,8 +197,16 @@ S_RTE_PIPE: begin : rte_pipe
 			end
 			RK_BOUNDARY: begin
 				// a boundary fault resumes at the PC field, which the handler
-				// may have changed (address error repair, UM 8.2.2)
-				flush_req = 1'b1; flush_pc = exc_pc;
+				// may have changed (address error repair, UM 8.2.2); stage C
+				// and B words the handler supplied (RC/RB cleared) are used,
+				// only the rest is fetched (UM 6.1.7)
+				if (!exc_ssw[13]) begin
+					pipe_load = 1'b1; flush_pc = exc_pc;
+					pipe_c = fr_word(6'd6); pipe_c_v = 1'b1;
+					pipe_b = fr_word(6'd7); pipe_b_v = ~exc_ssw[12];
+				end else begin
+					flush_req = 1'b1; flush_pc = exc_pc;
+				end
 				state <= S_FETCH;
 			end
 			default: begin
