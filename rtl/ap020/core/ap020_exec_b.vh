@@ -43,7 +43,7 @@ S_EXC2: begin
 end
 S_EXC4: begin
 	exc_active <= 1'b0; exc_is_irq <= 1'b0; exc_throw <= 1'b0; exc_busfault <= 1'b0;
-	if (trace_after_exc) begin trace_pend <= 1'b1; trace_after_exc <= 1'b0; end
+	if (trace_after_exc) begin trace_pend <= 1'b1; trace_ia_sel <= 1'b1; trace_after_exc <= 1'b0; end
 	pc_i <= tmp;
 	if (tmp[0]) begin
 		// odd vector: address error (a double fault while processing a bus fault)
@@ -94,11 +94,10 @@ S_RTE2: begin
 			state <= S_RTE3;
 		end
 		default: begin
-			// the MC68030 clears T1/T0 before the format error: its frame
-			// stacks SR without them (WinUAE gencpu, 68030 corpus)
+			// the MC68020 keeps T1/T0 for the format error: its frame
+			// stacks SR with them (the MC68030 clears them first; WinUAE
+			// gencpu, 68020 and 68030 corpora)
 			exc_pre(`VEC_FMTERR);
-			exc_sr <= {2'b00, sr[13:0]};
-			sr[15:14] <= 2'b00;
 		end
 	endcase
 end
@@ -111,9 +110,7 @@ S_RTE4: begin : rte4
 	fmt = fr[1][15:12];
 	exc_busfault <= 1'b0;
 	if (fmt == `FMT_LONGBUS && frw[6'd27][15:12] != 4'h0) begin
-		exc_pre(`VEC_FMTERR);            // version mismatch (UM 8.1.8)
-		exc_sr <= {2'b00, sr[13:0]};     // T1/T0 cleared, as for any format error
-		sr[15:14] <= 2'b00;
+		exc_pre(`VEC_FMTERR);            // version mismatch (UM 8.1.8), T1/T0 kept as above
 	end else begin
 		sr <= fr_word(6'd0) & `SR_MASK;
 		wreg(4'd15, rf_c + {frame_lw(fmt), 2'b00});
