@@ -31,7 +31,12 @@ module ap020_top
 	// from the pin bus (CIIN inhibits, as for the instruction cache) and
 	// the native port, and is invisible to software -- CACR's E enables it
 	// with the instruction cache and its bursts, and C clears it.
-	parameter DATA_CACHE = 1
+	parameter DATA_CACHE = 1,
+	// The coprocessor interface (UM Section 10).  A system with no
+	// coprocessor can build without it (COPROCESSOR = 0): a coprocessor
+	// instruction then takes the Line F exception where its first
+	// coprocessor access would be, as when no coprocessor answers it.
+	parameter COPROCESSOR = 1
 )
 (
 	input             clk,
@@ -177,7 +182,7 @@ assign dbg_cache_clear = cacr_ci | cacr_cd | cacr_cei | cacr_ced;
 wire  [7:2] caar_idx;
 wire        halted;
 
-ap020_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE), .DATA_CACHE(DATA_CACHE)) core (
+ap020_core #(.PCREL_PROGRAM_SPACE(PCREL_PROGRAM_SPACE), .DATA_CACHE(DATA_CACHE), .COPROCESSOR(COPROCESSOR)) core (
 	.clk(clk), .rst(rst),
 	.d_stb(d_stb), .d_addr(d_addr), .d_size(d_size), .d_rw(d_rw), .d_rmc(d_rmc), .d_rmc_last(d_rmc_last),
 	.d_rmc_release(d_rmc_release), .d_iack(d_iack), .d_nocache(d_nocache), .d_fc(d_fc), .d_wdata(d_wdata),

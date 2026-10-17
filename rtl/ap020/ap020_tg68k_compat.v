@@ -320,7 +320,10 @@ cpu_cycles #(.CLK_HZ100(500000)) limiter
 // cpu_wrapper's busstate treats program space as an instruction fetch (the
 // turbo chip/kick paths and the controllers' instruction caches), so the
 // PC-relative operand reads keep the data function code here
-ap020_top #(.PCREL_PROGRAM_SPACE(0), .FAST_PORT(FAST_PORT), .DATA_CACHE(DATA_CACHE)) cpu (
+// Minimig has no coprocessor (CPU space coprocessor cycles end in BERR
+// here): the processor is built without its coprocessor interface, which
+// takes the Line F exception just as one that gets no answer
+ap020_top #(.PCREL_PROGRAM_SPACE(0), .FAST_PORT(FAST_PORT), .DATA_CACHE(DATA_CACHE), .COPROCESSOR(0)) cpu (
 	.clk(clk_cpu),
 	.a(a), .fc(cfc), .siz(siz), .rw(rw), .rmc_n(), .as_n(as_n), .ds_n(ds_n), .dben_n(),
 	.ecs_n(), .ocs_n(), .ciout_n(ciout_n), .cbreq_n(cbreq_n), .bus_oe(),

@@ -21,7 +21,8 @@
 module ap020_core
 #(
 	parameter PCREL_PROGRAM_SPACE = 1,  // see ap020_top
-	parameter DATA_CACHE = 1            // see ap020_top
+	parameter DATA_CACHE = 1,           // see ap020_top
+	parameter COPROCESSOR = 1           // see ap020_top
 )
 (
 	input             clk,
@@ -567,6 +568,14 @@ always @* begin
 		S_CAS1:    `ALU_SET(`ALU_CMP, g_size, rf_a, dst, 6'd0)
 		S_CAS2_4:  `ALU_SET(`ALU_CMP, g_size, rf_a, src, 6'd0)
 		S_CAS2_5:  `ALU_SET(`ALU_CMP, g_size, rf_a, dst, 6'd0)
+		// bit fields: the shifter's rotate, its result read in the next clock
+		// (the operation held there); see ap020_exec_b.vh
+		S_BF3, S_BF3R: `ALU_SET(`ALU_ROL, `SZ_L, 32'd0, dst, {1'b0, tmp[4:0]})
+		S_BF4, S_BF4I, S_BF5: `ALU_SET(`ALU_ROL, `SZ_L, 32'd0,
+		                       (ir[10:8] == 3'b111) ? tmp2 :
+		                       (ir[10:8] == 3'b011 && imm[31]) ? (imm | ~topmask(cnt[5:0])) : (imm & topmask(cnt[5:0])),
+		                       {1'b0, (ir[10:8] == 3'b111) ? 5'd0 - cnt[4:0] : cnt[4:0]})
+		S_BF6, S_BF6R: `ALU_SET(`ALU_ROL, `SZ_L, 32'd0, imm, {1'b0, 5'd0 - tmp[4:0]})
 		default: ;
 	endcase
 end

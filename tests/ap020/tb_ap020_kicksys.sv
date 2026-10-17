@@ -478,7 +478,7 @@ initial begin
 	for (cycles = 0; cycles < max_cycles; cycles = cycles + 1) begin
 		@(posedge clk_114);
 		if (cycles % 5000000 == 0)
-			$display("... cycle %0d pc=%h sr=%h ovl=%b v=%0d d1=%h d2=%h a0=%h", cycles, `CORE.pc_i, `CORE.sr, ovl, vpos, `CORE.rf.r[1], `CORE.rf.r[2], `CORE.rf.r[8]);
+			$display("... cycle %0d pc=%h sr=%h ovl=%b v=%0d d1=%h d2=%h a0=%h", cycles, `CORE.pc_i, `CORE.sr, ovl, vpos, `CORE.rf.ra[1], `CORE.rf.ra[2], `CORE.rf.ra[8]);
 	end
 	finish_run;
 end

@@ -1,22 +1,17 @@
 // AP68020 core - helper functions (included by ap020_core.v at module level)
 
 // rotates for register bit fields
-function [31:0] rotl32; input [31:0] v; input [4:0] n;
-	begin rotl32 = (v << n) | (v >> (6'd32 - {1'b0, n})); if (n == 0) rotl32 = v; end endfunction
-function [31:0] rotr32; input [31:0] v; input [4:0] n;
-	begin rotr32 = (v >> n) | (v << (6'd32 - {1'b0, n})); if (n == 0) rotr32 = v; end endfunction
-
 // mask of the top w bits (w = 1..32)
 function [31:0] topmask; input [5:0] w;
 	begin topmask = (w >= 6'd32) ? 32'hFFFFFFFF : ~(32'hFFFFFFFF >> w); end endfunction
 
-// leading zeros of a w-bit field held in the low bits of v (returns w when zero)
-function [5:0] field_lz; input [31:0] v; input [5:0] w;
+// leading zeros of v (32 when v is zero)
+function [5:0] lz32; input [31:0] v;
 	integer i; reg found;
 	begin
-		field_lz = w; found = 1'b0;
+		lz32 = 6'd32; found = 1'b0;
 		for (i = 31; i >= 0; i = i - 1) begin
-			if (!found && (i < w) && v[i]) begin field_lz = w - 6'd1 - i[5:0]; found = 1'b1; end
+			if (!found && v[i]) begin lz32 = 6'd31 - i[5:0]; found = 1'b1; end
 		end
 	end
 endfunction
@@ -69,25 +64,10 @@ function [1:0] sz_of_siz; input [1:0] siz;
 	end
 endfunction
 
-// bit field extraction from a 40-bit memory image (bit 39 = first byte MSB)
-function [31:0] bf_extract40; input [39:0] d; input [2:0] boff; input [5:0] w;
-	reg [39:0] sh;
-	begin
-		sh = d << boff;
-		bf_extract40 = sh[39:8] >> (6'd32 - w);
-		if (w >= 6'd32) bf_extract40 = sh[39:8];
-	end
-endfunction
-function [39:0] bf_insert40; input [39:0] d; input [2:0] boff; input [5:0] w; input [31:0] v;
-	reg [39:0] mask, val;
-	reg [6:0] sh;
-	begin
-		sh = 7'd40 - {4'd0, boff} - {1'b0, w};
-		mask = (w >= 6'd32) ? 40'hFFFFFFFF : ((40'd1 << w) - 40'd1);
-		val  = {8'd0, v} & mask;
-		bf_insert40 = (d & ~(mask << sh)) | (val << sh);
-	end
-endfunction
+// bit fields in memory: the nb bytes read (1..5) as a 40-bit image with the
+// first byte at bit 39 (four in d, the fifth in the low byte of e)
+function [39:0] bf_image; input [31:0] d; input [7:0] e; input [2:0] nb;
+	begin bf_image = (nb == 3'd5) ? {d, e} : ({d, 8'd0} << (8 * (3'd4 - nb))); end endfunction
 
 // MMU instruction function code field (PRM PFLUSH/PLOAD/PTEST): 10xxx immediate,
 // 01ddd Dn, 00000 SFC, 00001 DFC; the caller supplies Dn

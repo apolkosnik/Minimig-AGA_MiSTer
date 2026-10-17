@@ -512,52 +512,63 @@ S_BF1: begin : bf1
 end
 // the fifth byte goes to src: tmp2 holds the BFINS source register
 S_BF2: rd(ea + 32'd4, `SZ_B, DW_SRC, S_BF3);
-S_BF3: begin : bf3
-	reg [39:0] d40, n40;
-	reg [31:0] fld, nfld, rot, rot2;
-	reg [5:0] w;
-	reg [2:0] nb;
-	reg n, z;
-	w = cnt[5:0];
-	nb = sub[2:0];
-	if (ir[5:3] == 3'b000) begin
-		rot = rotl32(dst, tmp[4:0]);
-		fld = (w >= 6'd32) ? rot : (rot >> (6'd32 - w));
-		d40 = 40'd0; n40 = 40'd0;
-	end else begin
-		d40 = (nb == 3'd5) ? {dst, src[7:0]} : ({dst, 8'd0} << (8 * (3'd4 - nb)));
-		fld = bf_extract40(d40, tmp[2:0], w);
-		rot = 32'd0;
+// The field is worked on top aligned in a 32-bit window (imm): its first bit
+// at bit 31 and the w bits below it.  A register operand is rotated left by
+// the offset (mod 32) into the window and back; memory bytes are shifted by
+// the bit offset (0..7) within their 40-bit image.  The rotations use the
+// ALU's shifter: its operands are presented in one state and its result
+// read in the next (ap020_core.v's ALU operand select).
+S_BF3: begin
+	if (ir[5:3] == 3'b000) state <= S_BF3R;                      // rotl(Dn, offset)
+	else begin : bf3m
+		reg [39:0] d40;
+		d40 = bf_image(dst, src[7:0], sub[2:0]) << tmp[2:0];
+		imm <= d40[39:8];
+		state <= S_BF4;
 	end
+end
+S_BF3R: begin imm <= alu_r; state <= S_BF4; end
+S_BF4: begin : bf4
+	reg [31:0] tm;
+	reg [5:0] w;
+	w = cnt[5:0];
+	tm = topmask(w);
+	// N is the field's first bit, Z the field all zero (BFINS: the source's)
+	if (ir[10:8] != 3'b111) begin sr[3] <= imm[31]; sr[2] <= ((imm & tm) == 32'd0); sr[1] <= 1'b0; sr[0] <= 1'b0; end
 	case (ir[10:8])
-		3'b010: nfld = ~fld;                       // BFCHG
-		3'b100: nfld = 32'd0;                      // BFCLR
-		3'b110: nfld = 32'hFFFFFFFF;               // BFSET
-		3'b111: nfld = tmp2;                       // BFINS
-		default: nfld = fld;
-	endcase
-	nfld = (w >= 6'd32) ? nfld : (nfld & ~(32'hFFFFFFFF << w));
-	n = (ir[10:8] == 3'b111) ? nfld[w[4:0] - 5'd1] : fld[w[4:0] - 5'd1];
-	z = (ir[10:8] == 3'b111) ? (nfld == 32'd0) : (fld == 32'd0);
-	sr[3] <= n; sr[2] <= z; sr[1] <= 1'b0; sr[0] <= 1'b0;
-	case (ir[10:8])
-		3'b001: begin wreg({1'b0, ext[14:12]}, fld); finish; end                                   // BFEXTU
-		3'b011: begin wreg({1'b0, ext[14:12]}, (w >= 6'd32) ? fld : (fld[w[4:0] - 5'd1] ? (fld | (32'hFFFFFFFF << w)) : fld)); finish; end   // BFEXTS
-		3'b101: begin wreg({1'b0, ext[14:12]}, tmp + {26'd0, field_lz(fld, w)}); finish; end      // BFFFO
-		3'b000: finish;                                                                           // BFTST
-		default: begin
-			// BFCHG / BFCLR / BFSET / BFINS write back
-			if (ir[5:3] == 3'b000) begin
-				rot2 = (w >= 6'd32) ? nfld : ((rot & ~topmask(w)) | (nfld << (6'd32 - w)));
-				wreg({1'b0, ir[2:0]}, rotr32(rot2, tmp[4:0]));
-				finish;
-			end else begin
-				n40 = bf_insert40(d40, tmp[2:0], w, nfld);
-				tmp3 <= {24'd0, n40[7:0]};
-				if (nb == 3'd5) wr(ea, `SZ_L, n40[39:8], S_BFWR);
-				else begin finish; wr(ea, sz_of_bytes(nb), n40[39:8] >> (8 * (3'd4 - nb)), S_FETCH); end
-			end
+		3'b000: finish;                                             // BFTST
+		3'b001, 3'b011: state <= S_BF5;                             // BFEXTU / BFEXTS: rotl(field, w)
+		3'b101: begin                                               // BFFFO: a guard bit below the field ends the count at w
+			wreg({1'b0, ext[14:12]}, tmp + {26'd0, lz32((imm & tm) | ((w >= 6'd32) ? 32'd0 : (32'h80000000 >> w)))});
+			finish;
 		end
+		3'b111: state <= S_BF4I;                                    // BFINS: rotr(Dn, w)
+		3'b010: begin imm <= imm ^ tm; state <= S_BF6; end          // BFCHG
+		3'b100: begin imm <= imm & ~tm; state <= S_BF6; end         // BFCLR
+		default: begin imm <= imm | tm; state <= S_BF6; end         // BFSET
 	endcase
 end
+S_BF4I: begin : bf4i
+	reg [31:0] tm, ins;
+	tm = topmask(cnt[5:0]);
+	ins = alu_r & tm;
+	sr[3] <= ins[31]; sr[2] <= (ins == 32'd0); sr[1] <= 1'b0; sr[0] <= 1'b0;
+	imm <= (imm & ~tm) | ins;
+	state <= S_BF6;
+end
+S_BF5: begin wreg({1'b0, ext[14:12]}, alu_r); finish; end
+S_BF6: begin
+	if (ir[5:3] == 3'b000) state <= S_BF6R;                      // rotr(window, offset)
+	else begin : bf6m
+		reg [39:0] d40, n40;
+		reg [2:0] nb;
+		nb = sub[2:0];
+		d40 = bf_image(dst, src[7:0], nb);
+		n40 = (d40 & ~({32'hFFFFFFFF, 8'd0} >> tmp[2:0])) | ({imm, 8'd0} >> tmp[2:0]);
+		tmp3 <= {24'd0, n40[7:0]};
+		if (nb == 3'd5) wr(ea, `SZ_L, n40[39:8], S_BFWR);
+		else begin finish; wr(ea, sz_of_bytes(nb), n40[39:8] >> (8 * (3'd4 - nb)), S_FETCH); end
+	end
+end
+S_BF6R: begin wreg({1'b0, ir[2:0]}, alu_r); finish; end
 S_BFWR: begin finish; wr(ea + 32'd4, `SZ_B, tmp3, S_FETCH); end

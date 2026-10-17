@@ -632,7 +632,7 @@ wire  [7:0] ddr1_burstcnt, ddr1_be;
 wire [28:0] ddr1_addr;
 wire [63:0] ddr1_dout, ddr1_din;
 
-a2065_ddram_arbiter fastram_arbiter
+a2065_ddram_arbiter #(.M0_PIPELINE(0)) fastram_arbiter
 (
 	.clk             (clk_114),
 	.rst             (reset_d),

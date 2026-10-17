@@ -29,7 +29,12 @@ module a2065_ddram_arbiter #(
     parameter ADDR_W  = 29,
     parameter DATA_W  = 64,
     parameter BURST_W = 8,
-    parameter BYTE_W  = 8
+    parameter BYTE_W  = 8,
+    // 1: master 0 may issue another read while its earlier beats are still
+    // coming back.  0 for a master 0 that waits for its beats before its
+    // next command: the end of a burst is then decided from the beat count
+    // alone, off the path from the slave's waitrequest.
+    parameter M0_PIPELINE = 1
 )(
     input  wire                clk,
     input  wire                rst,
@@ -96,7 +101,7 @@ module a2065_ddram_arbiter #(
     // issued. Read data comes back later and is counted by readdatavalid.
     wire write_beat = sel_write && !s_waitrequest;
     wire beat_done  = owner_is_read ? s_readdatavalid : write_beat;
-    wire [BURST_W:0] m0_more = (owner == M0 && owner_is_read && m0_read && !s_waitrequest)
+    wire [BURST_W:0] m0_more = (M0_PIPELINE && owner == M0 && owner_is_read && m0_read && !s_waitrequest)
                              ? {1'b0, m0_burstcount} : {(BURST_W+1){1'b0}};
 
     always @(posedge clk or posedge rst) begin
@@ -124,9 +129,13 @@ module a2065_ddram_arbiter #(
                 end
             end
         end
-        else begin
+        else if (M0_PIPELINE) begin
             beats_left <= beats_left + m0_more - beat_done;
             if (beats_left + m0_more - beat_done == 0) busy <= 1'b0;
+        end
+        else begin
+            beats_left <= beats_left - beat_done;
+            if (beat_done ? (beats_left == 1) : (beats_left == 0)) busy <= 1'b0;
         end
     end
 

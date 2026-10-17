@@ -4,9 +4,14 @@
 // ap020_regfile.v - D0-D7, A0-A6 and the three stack pointers              //
 //                                                                          //
 // Index 0..7 = D0..D7, 8..14 = A0..A6, 15 = A7 (USP/ISP/MSP by SR.S/SR.M). //
-// Three combinational read ports, one write port (full 32 bits; the core   //
+// Five combinational read ports, one write port (full 32 bits; the core    //
 // merges byte and word results), direct access to the stack pointers for   //
 // MOVE USP / MOVEC and the exception logic.                                //
+//                                                                          //
+// D0-D7/A0-A6 are a copy per read port in LUT RAM (MLAB: synchronous       //
+// write, combinational read), all written alike.  As on the MC68020 they   //
+// are not cleared by a reset (UM 8.1.1 defines only SSP and PC); the stack //
+// pointers are.                                                            //
 //--------------------------------------------------------------------------//
 
 module ap020_regfile
@@ -43,7 +48,11 @@ module ap020_regfile
 	output     [31:0] msp_q
 );
 
-reg [31:0] r [0:14];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] ra [0:14];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] rb [0:14];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] rc [0:14];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] rd [0:14];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] re [0:14];
 reg [31:0] usp, isp, msp;
 
 wire [1:0] act = !sr_s ? 2'd0 : (sr_m ? 2'd2 : 2'd1);
@@ -63,19 +72,26 @@ wire        fwd_c  = we && (waddr == raddr_c) && (raddr_c != 4'd15);
 wire        fwd_d  = we && (waddr == raddr_d) && (raddr_d != 4'd15);
 wire        fwd_e  = we && (waddr == raddr_e) && (raddr_e != 4'd15);
 
-assign rdata_a = (raddr_a == 4'd15) ? rd_a7 : fwd_a ? wdata : r[raddr_a];
-assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : r[raddr_b];
-assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : r[raddr_c];
-assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : r[raddr_d];
-assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : r[raddr_e];
+assign rdata_a = (raddr_a == 4'd15) ? rd_a7 : fwd_a ? wdata : ra[raddr_a];
+assign rdata_b = (raddr_b == 4'd15) ? rd_a7 : fwd_b ? wdata : rb[raddr_b];
+assign rdata_c = (raddr_c == 4'd15) ? rd_a7 : fwd_c ? wdata : rc[raddr_c];
+assign rdata_d = (raddr_d == 4'd15) ? rd_a7 : fwd_d ? wdata : rd[raddr_d];
+assign rdata_e = (raddr_e == 4'd15) ? rd_a7 : fwd_e ? wdata : re[raddr_e];
 assign usp_q = usp;
 assign isp_q = isp;
 assign msp_q = msp;
 
+// D0-D7/A0-A6: no reset (LUT RAM)
+always @(posedge clk)
+	if (we && waddr != 4'd15) begin
+		ra[waddr] <= wdata; rb[waddr] <= wdata; rc[waddr] <= wdata;
+		rd[waddr] <= wdata; re[waddr] <= wdata;
+	end
 integer i;
+initial for (i = 0; i < 15; i = i + 1) begin ra[i] = 32'd0; rb[i] = 32'd0; rc[i] = 32'd0; rd[i] = 32'd0; re[i] = 32'd0; end
+
 always @(posedge clk) begin
 	if (rst) begin
-		for (i = 0; i < 15; i = i + 1) r[i] <= 32'd0;
 		usp <= 32'd0; isp <= 32'd0; msp <= 32'd0;
 	end else begin
 		if (we) begin
@@ -87,7 +103,7 @@ always @(posedge clk) begin
 					2'd1: isp <= wdata;
 					default: msp <= wdata;
 				endcase
-			end else r[waddr] <= wdata;
+			end
 		end
 		if (sp_we) begin
 			case (sp_sel)

@@ -119,7 +119,7 @@ reg         m1_read = 0, m1_write = 0;
 reg  [63:0] m1_writedata = 0;
 wire        m1_waitrequest, m1_readdatavalid;
 wire [63:0] m1_readdata;
-a2065_ddram_arbiter fastram_arbiter (
+a2065_ddram_arbiter #(.M0_PIPELINE(0)) fastram_arbiter (
 	.clk(clk_114), .rst(1'b0),
 	.m0_address(fr_address), .m0_burstcount(fr_burstcount), .m0_read(fr_read), .m0_readdata(fr_readdata),
 	.m0_readdatavalid(fr_readdatavalid), .m0_writedata(fr_writedata), .m0_byteenable(fr_byteenable),
