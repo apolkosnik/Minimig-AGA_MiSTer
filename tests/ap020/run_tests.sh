@@ -70,7 +70,7 @@ echo "== compiling =="
 VFLAGS="--binary --timing --no-assert -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-TIMESCALEMOD -Wno-CASEINCOMPLETE \
         -Wno-MULTIDRIVEN -Wno-PINMISSING -Wno-BLKANDNBLK -O1 -I$A -I$A/core -I$R -I$R/fx68k -DCPU_CYCLES_HEX"
 SRC="$R/cpu_wrapper.v $R/memory_router.v $R/cpu_cycles.v $R/fastchip.v $R/rtg.v $R/akiko.v $R/akiko_hps_bridge.v \
-     $R/akiko_nvram.v $R/gayle.v $R/ide.v sim_dpram.v $R/A2065/a2065_ddram_arbiter.v \
+     $R/akiko_nvram.v $R/gayle.v $R/ide.v sim_dpram.v $R/A2065/a2065_ddram_arbiter.v $R/ddram_slice.v \
      $R/fx68k/fx68k.sv $R/fx68k/fx68kAlu.sv $R/fx68k/uaddrPla.sv \
      $A/ap020_tg68k_compat.v $A/ap020_async_fifo.v $A/ap020_l2ram.sv $A/ap020_fastram_fe.v $A/ap020_fastram_be.v $A/ap020_top.v $A/ap020_core.v $A/ap020_memsys.v \
      $A/ap020_cache.v $A/ap020_bus.v $A/ap020_alu.v $A/ap020_muldiv.v $A/ap020_regfile.v"

@@ -632,6 +632,12 @@ wire  [7:0] ddr1_burstcnt, ddr1_be;
 wire [28:0] ddr1_addr;
 wire [63:0] ddr1_dout, ddr1_din;
 
+// the arbiter's slave side, through ddr_slice to the HPS port
+wire        ddr_busy, ddr_dout_ready, ddr_rd, ddr_we;
+wire  [7:0] ddr_burstcnt, ddr_be;
+wire [28:0] ddr_addr;
+wire [63:0] ddr_dout, ddr_din;
+
 a2065_ddram_arbiter #(.M0_PIPELINE(0)) fastram_arbiter
 (
 	.clk             (clk_114),
@@ -654,15 +660,41 @@ a2065_ddram_arbiter #(.M0_PIPELINE(0)) fastram_arbiter
 	.m1_byteenable   (ddr1_be),
 	.m1_write        (ddr1_we),
 	.m1_waitrequest  (ddr1_busy),
+	.s_address       (ddr_addr),
+	.s_burstcount    (ddr_burstcnt),
+	.s_read          (ddr_rd),
+	.s_readdata      (ddr_dout),
+	.s_readdatavalid (ddr_dout_ready),
+	.s_writedata     (ddr_din),
+	.s_byteenable    (ddr_be),
+	.s_write         (ddr_we),
+	.s_waitrequest   (ddr_busy)
+);
+
+// a register slice before the HPS port: the two arbiters in series (this
+// one and ddram_ctrl's) would otherwise be one combinational path to it
+ddram_slice ddr_slice
+(
+	.clk             (clk_114),
+	.rst             (reset_d),
+	.m_address       (ddr_addr),
+	.m_burstcount    (ddr_burstcnt),
+	.m_read          (ddr_rd),
+	.m_write         (ddr_we),
+	.m_writedata     (ddr_din),
+	.m_byteenable    (ddr_be),
+	.m_waitrequest   (ddr_busy),
+	.m_readdata      (ddr_dout),
+	.m_readdatavalid (ddr_dout_ready),
 	.s_address       (DDRAM_ADDR),
 	.s_burstcount    (DDRAM_BURSTCNT),
 	.s_read          (DDRAM_RD),
-	.s_readdata      (DDRAM_DOUT),
-	.s_readdatavalid (DDRAM_DOUT_READY),
+	.s_write         (DDRAM_WE),
 	.s_writedata     (DDRAM_DIN),
 	.s_byteenable    (DDRAM_BE),
-	.s_write         (DDRAM_WE),
-	.s_waitrequest   (DDRAM_BUSY)
+	.s_waitrequest   (DDRAM_BUSY),
+	.s_readdata      (DDRAM_DOUT),
+	.s_readdatavalid (DDRAM_DOUT_READY)
 );
 
 ddram_ctrl ram2

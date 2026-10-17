@@ -127,9 +127,23 @@ a2065_ddram_arbiter #(.M0_PIPELINE(0)) fastram_arbiter (
 	.m1_address(m1_address), .m1_burstcount(8'd1), .m1_read(m1_read), .m1_readdata(m1_readdata),
 	.m1_readdatavalid(m1_readdatavalid), .m1_writedata(m1_writedata), .m1_byteenable(8'hFF),
 	.m1_write(m1_write), .m1_waitrequest(m1_waitrequest),
-	.s_address(s_address), .s_burstcount(s_burstcount), .s_read(s_read), .s_readdata(s_readdata),
-	.s_readdatavalid(s_readdatavalid), .s_writedata(s_writedata), .s_byteenable(s_byteenable),
-	.s_write(s_write), .s_waitrequest(s_waitrequest)
+	.s_address(a_address), .s_burstcount(a_burstcount), .s_read(a_read), .s_readdata(a_readdata),
+	.s_readdatavalid(a_readdatavalid), .s_writedata(a_writedata), .s_byteenable(a_byteenable),
+	.s_write(a_write), .s_waitrequest(a_waitrequest)
+);
+// Minimig.sv's register slice between the arbiter and the HPS port
+wire [28:0] a_address;
+wire  [7:0] a_burstcount, a_byteenable;
+wire        a_read, a_write, a_waitrequest, a_readdatavalid;
+wire [63:0] a_writedata, a_readdata;
+ddram_slice ddr_slice (
+	.clk(clk_114), .rst(1'b0),
+	.m_address(a_address), .m_burstcount(a_burstcount), .m_read(a_read), .m_write(a_write),
+	.m_writedata(a_writedata), .m_byteenable(a_byteenable), .m_waitrequest(a_waitrequest),
+	.m_readdata(a_readdata), .m_readdatavalid(a_readdatavalid),
+	.s_address(s_address), .s_burstcount(s_burstcount), .s_read(s_read), .s_write(s_write),
+	.s_writedata(s_writedata), .s_byteenable(s_byteenable), .s_waitrequest(s_waitrequest),
+	.s_readdata(s_readdata), .s_readdatavalid(s_readdatavalid)
 );
 reg  [63:0] ddr [0:524287];            // 4 MB: the 2 MB card (word bit 18 set) and the second master
 reg  [15:0] lfsr = 16'hACE1;
