@@ -16,7 +16,7 @@ This version has been modified to add support for MiSTer Floppy, SCP and IPF sup
 * ChipRAM : 0.5MB - 2.0MB
 * SlowRAM : 0.0MB - 1.5MB
 * FastRAM : 0.0MB - 384MB
-* CPU core : 68000, 68010, 68EC020, 68030 (with MMU, no FPU)
+* CPU core : 68000 (fx68k) and AP68020, an MC68020 (no MMU, no FPU) for the 68EC020 and 68030 entries
 * Kickstart : 1.2, 1.3, 2.0, 3.0, 3.1, 3.1.4, 3.2 (256kB, 512kB & 1MB kickstart ROMs currently supported)
 * HRTmon with custom registers mirror
 * Floppy drives : 1-4 floppies (supports ADF floppy image format), with normal & turbo speeds
@@ -115,17 +115,23 @@ New video modes will appear in ScreenMode preference. For more screen modes use 
 If you want to see RTG video on VGA output, then set vga_scaler=1 in MiSTer.ini.
 RTG is available only for 68030 CPU.
 
-### 68030 CPU
+### CPU
 
-The CPU item of the System page offers 68000, 68010, 68EC020 and 68030.
+The CPU item of the System page offers 68000, 68010, 68EC020 and 68030. This version runs the 68000 and 68010
+entries on fx68k (a 68000) and the others on AP68020, an MC68020 with its
+256-byte instruction cache, on its own 50MHz clock; TG68K is not included.
 
-* **68EC020** runs at the speed of a stock A1200.
-* **68030** has an MMU and runs at 25, 33, 40 or 50MHz, the clocks of the real accelerator cards, or at 56.7MHz with
-  no speed limit. There is no FPU.
+* **68EC020** runs at the speed of a stock A1200, with 24 address lines.
+* **68030** runs the MC68020 at the speeds of the 68030 cards, 25, 33, 40 or 50MHz, or with no speed limit
+  (the 56.7MHz setting). There is no MMU and no FPU.
 
-From 25 to 50MHz the 68030 runs as fast as a real 68030 card at the same clock (checked with AIBB against an
-ACA1233n). As on the real machines, chip RAM, ROM and the custom registers are always read through the bus, and the
-data cache is switched on and off by software (SetPatch, CPU, WHDLoad).
+The speed limit is the one TG68K had (the instruction and memory timings of the A1200 and of the 68030 cards); here
+it follows the AP68020's own instruction stream and holds its next instruction while it is ahead. Code that waits on
+chip RAM runs at the speed of the chip bus, which can be slower than the card's.
+
+Fast RAM in DDR3 (Zorro II and the Zorro III banks there) is reached through the AP68020's own port and an 8KB line
+cache; the Zorro III RAM in SDRAM, RTG and the rest through the Minimig bus. As on an MC68020, instructions are
+cached from anywhere; data from chip RAM and the custom registers is not.
 
 FastRAM can be none, 2M, 4M or 8M, and with the 68030 also 64M, 128M, 256M or 384M.
 
@@ -214,7 +220,9 @@ ARM firmware updates and Minimig-tc64 port changes by Christian Vogelsang ([mini
 
 MiSTer project by Sorgelig ([MiSTer](https://github.com/MiSTer-devel)).
 
-TG68K.C core by Tobias Gubener.
+TG68K.C core by Tobias Gubener (the CPU of the upstream core).
+
+AP68020 CPU core by Adam Polkosnik.
 
 
 ## Links & more info

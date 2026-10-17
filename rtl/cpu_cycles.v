@@ -1,5 +1,10 @@
 
 module cpu_cycles
+#(
+	// the clock in units of 100 Hz; 0 = clk_sys (28.375/28.636 MHz, PAL/NTSC),
+	// otherwise the rates are computed for this fixed clock
+	parameter integer CLK_HZ100 = 0
+)
 (
 	input             clk,
 	input             reset,
@@ -26,6 +31,22 @@ module cpu_cycles
 	output reg        hold
 );
 
+// target cycles per clock, in 1/4096: the stock A1200 speed (twice the
+// colour clock) and 25, 33, 40 and 50 MHz
+function [13:0] r_of; input integer hz100;
+	r_of = CLK_HZ100 ? (hz100 * 4096 + CLK_HZ100 / 2) / (CLK_HZ100 ? CLK_HZ100 : 1) : 0;
+endfunction
+localparam [13:0] R_020P = CLK_HZ100 ? r_of(141876) : 14'd2048;
+localparam [13:0] R_020N = CLK_HZ100 ? r_of(143182) : 14'd2048;
+localparam [13:0] R_25P  = CLK_HZ100 ? r_of(250000) : 14'd3609;
+localparam [13:0] R_25N  = CLK_HZ100 ? r_of(250000) : 14'd3576;
+localparam [13:0] R_33P  = CLK_HZ100 ? r_of(330000) : 14'd4764;
+localparam [13:0] R_33N  = CLK_HZ100 ? r_of(330000) : 14'd4720;
+localparam [13:0] R_40P  = CLK_HZ100 ? r_of(400000) : 14'd5774;
+localparam [13:0] R_40N  = CLK_HZ100 ? r_of(400000) : 14'd5721;
+localparam [13:0] R_50P  = CLK_HZ100 ? r_of(500000) : 14'd7218;
+localparam [13:0] R_50N  = CLK_HZ100 ? r_of(500000) : 14'd7152;
+
 reg [13:0] rate;
 reg  [5:0] chip_c;
 reg  [5:0] rom_c;
@@ -34,15 +55,15 @@ always @* begin
 	chip_c = 6'd0;
 	rom_c = 6'd0;
 	if (mode == 2'd1) begin
-		rate = 14'd2048;
+		rate = ntsc ? R_020N : R_020P;
 		chip_c = 6'd9;
 	end
 	else if (mode == 2'd2) case (speed)
-		3'd1:    begin rate = ntsc ? 14'd5721 : 14'd5774; chip_c = 6'd21; rom_c = 6'd7;  end
-		3'd2:    begin rate = ntsc ? 14'd7152 : 14'd7218; chip_c = 6'd27; rom_c = 6'd8;  end
-		3'd3:    begin rate = 14'd0;                       chip_c = 6'd0;  rom_c = 6'd0;  end
-		3'd4:    begin rate = ntsc ? 14'd4720 : 14'd4764; chip_c = 6'd17; rom_c = 6'd6;  end
-		default: begin rate = ntsc ? 14'd3576 : 14'd3609; chip_c = 6'd13; rom_c = 6'd4;  end
+		3'd1:    begin rate = ntsc ? R_40N : R_40P; chip_c = 6'd21; rom_c = 6'd7;  end
+		3'd2:    begin rate = ntsc ? R_50N : R_50P; chip_c = 6'd27; rom_c = 6'd8;  end
+		3'd3:    begin rate = 14'd0;                chip_c = 6'd0;  rom_c = 6'd0;  end
+		3'd4:    begin rate = ntsc ? R_33N : R_33P; chip_c = 6'd17; rom_c = 6'd6;  end
+		default: begin rate = ntsc ? R_25N : R_25P; chip_c = 6'd13; rom_c = 6'd4;  end
 	endcase
 end
 
@@ -50,8 +71,19 @@ wire run  = |rate;
 wire m020 = (mode == 2'd1);
 wire go   = opc_start & cpu_ena & run;
 
-(* ram_init_file = "rtl/tg68k/m68k_cyc_idx.mif" *) reg [5:0] cyc_rom[16384];
-(* ram_init_file = "rtl/tg68k/m68k_ea_idx.mif"  *) reg [4:0] ea_rom[2048];
+(* ram_init_file = "rtl/cycles/m68k_cyc_idx.mif" *) reg [5:0] cyc_rom[16384];
+(* ram_init_file = "rtl/cycles/m68k_ea_idx.mif"  *) reg [4:0] ea_rom[2048];
+`ifdef CPU_CYCLES_HEX
+// simulation: the same tables as $readmemh files, +cyc_rom=<file> and
+// +ea_rom=<file> (tests/ap020/run_tests.sh converts the .mif files)
+reg [8*512-1:0] cyc_rom_f, ea_rom_f;
+initial begin
+	if ($value$plusargs("cyc_rom=%s", cyc_rom_f)) $readmemh(cyc_rom_f, cyc_rom);
+	else $display("cpu_cycles: no +cyc_rom, the timing tables are empty");
+	if ($value$plusargs("ea_rom=%s", ea_rom_f)) $readmemh(ea_rom_f, ea_rom);
+	else $display("cpu_cycles: no +ea_rom, the timing tables are empty");
+end
+`endif
 
 reg [15:0] opc_p, opc_l, opc_q;
 reg [15:0] snd_l, snd_q;
@@ -81,9 +113,9 @@ reg  [4:0] ea_i;
 reg [19:0] cyc_e;
 reg [19:0] misc_e;
 reg [15:0] ea_e;
-`include "tg68k/m68k_cyc_pal.vh"
-`include "tg68k/m68k_ea_pal.vh"
-`include "tg68k/m68k_misc_030.vh"
+`include "cycles/m68k_cyc_pal.vh"
+`include "cycles/m68k_ea_pal.vh"
+`include "cycles/m68k_misc_030.vh"
 
 wire [19:0] op_e = misc ? misc_e : movem ? movem_e : cyc_e;
 

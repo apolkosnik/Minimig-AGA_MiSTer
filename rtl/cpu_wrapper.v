@@ -32,6 +32,8 @@ module cpu_wrapper
 	input             clk,
 	input             ph1,
 	input             ph2,
+	input             clk_cpu,      // AP020 processor clock (50 MHz)
+	input             clk_mem,      // DDR3 clock (DDRAM_CLK) for its Fast RAM port
 
 	input       [4:0] cpucfg,
 	input             ntsc,
@@ -105,7 +107,19 @@ module cpu_wrapper
 	output     [15:0] ramdin_lo,
 	input      [15:0] ramdout_hi,
 	input             ramready_l,
-	output            dcache_sw_en
+	output            dcache_sw_en,
+
+	// AP020 Fast RAM: its own DDR3 Avalon master (clk_mem) for the Zorro RAM
+	// in DDR3, shared with ddram_ctrl in Minimig.sv
+	output     [28:0] fr_address,
+	output      [7:0] fr_burstcount,
+	output            fr_read,
+	output            fr_write,
+	output     [63:0] fr_writedata,
+	output      [7:0] fr_byteenable,
+	input             fr_waitrequest,
+	input      [63:0] fr_readdata,
+	input             fr_readdatavalid
 );
 
 assign dcache_sw_en = 1'b1;
@@ -183,7 +197,7 @@ reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
 always @* begin
-	if(cpucfg[1:0]) begin
+	if(cpucfg[1]) begin
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_m;
 		cpustate     = cpustate_p;
@@ -240,62 +254,66 @@ wire        uds_p;
 wire        lds_p;
 wire        reset_out_p;
 wire        longword;
-wire        opc_start;
-wire [15:0] opc_out;
-wire        opc_cond;
-wire [15:0] opc_snd;
-wire        opc_dbx;
-wire [13:0] cacr_x;
-wire        mmu_busy;
-wire        s21_en;
-wire        long_cand;
-wire [15:0] cpu_dout_lo_p;
-wire        long_ack;
 
-TG68KdotC_Kernel
-#(
-	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
-	.vbr_stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-)
-cpu_inst_p
+// AP020: the MC68020 for every mode above the 68000 (68020, the stock
+// 68EC020 and the 68030 entry, which runs it at the 68030 card speeds; the
+// 68010 entry runs fx68k).  It has its own clock; Fast RAM in DDR3 is served
+// through its native port and line cache on a DDR3 Avalon master, the rest
+// through this wrapper as TG68K's bus.  Its data cache (on the native
+// port) is left out when the build defines AP020_NO_DCACHE.
+`ifdef AP020_NO_DCACHE
+localparam AP020_DATA_CACHE = 0;
+`else
+localparam AP020_DATA_CACHE = 1;
+`endif
+wire cpu030      = (cpucfg[1:0] == 2'b10);
+wire stock_speed = cpucfg[2] & (cpucfg[1:0] == 2'b11);
+
+ap020_tg68k_compat #(.DATA_CACHE(AP020_DATA_CACHE)) cpu_inst_p
 (
-  .clk(clk),
-  .nreset(reset),
-  .clkena_in(clkena_p_throttled),
-  .data_in(cpu_din),
-  .ipl(cpu_ipl),
-  .ipl_autovector(1),
-  .regin_out(),
-  .addr_out(cpu_addr_p),
-  .data_write(cpu_dout_p),
-  .nwr(wr_p),
-  .nuds(uds_p),
-  .nlds(lds_p),
-  .nresetout(reset_out_p),
-  .longword(longword),
-  .s21_en(s21_en),
-  .long_cand(long_cand),
-  .long_ack(long_ack),
-  .data_in_hi(ramdout_hi),
-  .data_write_lo(cpu_dout_lo_p),
-  
-  .cpu({cpucfg[1], cpucfg[1] | cpucfg[0]}),
-  .cpu030(cpu030),
-  .opc_start(opc_start),
-  .opc_out(opc_out),
-  .opc_cond(opc_cond),
-  .opc_snd(opc_snd),
-  .opc_dbx(opc_dbx),
-  .opc_cacr(cacr_x),
-  .mmu_busy(mmu_busy),
-  .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
-  .cacr_out(cacr_p),
-  .d_cache_out(),
-  .vbr_out(vbr_p)
+	.clk(clk),
+	.clk_cpu(clk_cpu),
+	.clk_mem(clk_mem),
+	.nreset(reset & cpucfg[1]),
+	.clkena_in(clkena_p_base),
+	.ram_path(ramsel_i),
+	.data_in(cpu_din),
+	.ipl(cpu_ipl),
+	.berr(1'b0),
+	.snoop_stb(1'b0),
+	.snoop_addr(32'd0),
+	.z2ram_ena(z2ram_ena),
+	.z3ram_base0(z3ram_base0),
+	.z3ram_ena0(z3ram_ena0),
+	.z3ram_base1(z3ram_base1),
+	.z3ram_ena1(z3ram_ena1),
+	.sdr_hi(z3sdr_ena1),
+	.ec020(ec020),
+	.thr_mode({cpu030, stock_speed}),
+	.thr_speed({cpu030 & cpucfg[2], cpucfg[4:3]}),
+	.ntsc(ntsc),
+	.addr_out(cpu_addr_p),
+	.data_write(cpu_dout_p),
+	.nwr(wr_p),
+	.nuds(uds_p),
+	.nlds(lds_p),
+	.busstate(cpustate_p),       // 0: fetch code, 1: no memaccess, 2: read data, 3: write data
+	.longword(longword),
+	.fc(),
+	.nresetout(reset_out_p),
+	.nmi_ack_toggle(),
+	.cacr_out(cacr_p),
+	.vbr_out(vbr_p),
+	.debug_halted(),
+	.fr_address(fr_address),
+	.fr_burstcount(fr_burstcount),
+	.fr_read(fr_read),
+	.fr_write(fr_write),
+	.fr_writedata(fr_writedata),
+	.fr_byteenable(fr_byteenable),
+	.fr_waitrequest(fr_waitrequest),
+	.fr_readdata(fr_readdata),
+	.fr_readdatavalid(fr_readdatavalid)
 );
 
 wire [15:0] cpu_dout_o;
@@ -358,48 +376,14 @@ always @(posedge clk) begin
 	end
 end
 
-wire cpu030        = (cpucfg[1:0] == 2'b10);
-wire stock_speed   = cpucfg[2] & (cpucfg[1:0] == 2'b11);
+// the AP020 limits its own speed (cpu_cycles in its clock domain, see
+// ap020_tg68k_compat), so its bus requests are never gated here; the
+// 32-bit DDR3 path (ramlong1) was TG68K's in the 68030 mode
 wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready;
+wire req_gate      = 1'b0;
 
-wire cyc_hold;
-cpu_cycles cycles
-(
-	.clk(clk),
-	.reset(reset),
-	.ntsc(ntsc),
-	.mode({cpu030, stock_speed}),
-	.speed({cpu030 & cpucfg[2], cpucfg[4:3]}),
-	.opc_start(opc_start),
-	.opc(opc_out),
-	.opc_cond(opc_cond),
-	.opc_snd(opc_snd),
-	.opc_dbx(opc_dbx),
-	.cpu_ena(clkena_p_throttled & ~mmu_busy),
-	.bus_ack(clkena_p_throttled & cpu_req),
-	.bus_state(cpustate_p),
-	.bus_addr(cpu_addr_m),
-	.bus_long(longword),
-	.bus_l1(clkena_p_throttled & long_ack),
-	.cacr(cacr_x),
-	.cacr_clr(cacr_p[3]),
-	.hold(cyc_hold)
-);
-
-reg inflight;
-always @(posedge clk) begin
-	if (~reset)                   inflight <= 0;
-	else if (clkena_p_throttled)  inflight <= cpu_req & longword & ~long_ack;
-	else if (cpu_req & ~cyc_hold) inflight <= 1;
-end
-
-wire req_gate = cyc_hold & ~inflight;
-wire clkena_p_throttled = clkena_p_base & (cpu_req ? ~req_gate : ~cyc_hold);
-
-assign s21_en    = cpu030;
-assign ramlong1  = long_cand & s21_en & sel_zram & ~sel_rtg & ~sel_dd & ~req_gate;
-assign ramdin_lo = cpu_dout_lo_p;
-assign long_ack  = ramlong1 & ramready_l;
+assign ramlong1  = 1'b0;
+assign ramdin_lo = 16'd0;
 
 reg       chipreq;
 reg [2:0] cpu_ipl;
