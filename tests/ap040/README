@@ -1,3 +1,19 @@
+The CPU is the AP68040 (rtl/ap68040), the pipelined 68040 from
+github.com/apolkosnik/AP68040 branch faster, behind ap68040_minimig.sv and
+the 16-bit bus adapter in cpu_wrapper.v.  The regression is
+run_verilator_tests.sh (run_tests.sh calls it): the four programs in asm/
+through the real cpu_wrapper over the chip bus, the fast-chip block, the
+SDRAM controller and both RAM controllers, plus the benches around the CPU.
+The core's own regression and the cputest corpus live in its repository.
+The coherence programs (asm/coh_*.s, tb_cpu_wrapper_chip with FASTRAM_CFG=4)
+pin the platform's cache policy: only configured fast RAM is cacheable (the
+bridge asserts TCI for everything else, so device registers, chip RAM under
+DMA and self-modified chip code are never stale), and a level 7 interrupt
+reads its vector past the cache so the cartridge's HRTMon override is seen.
+Each has a control with the region inhibited through a TTR instead.
+The text below describes the previous core (rtl/ap040) and its benches;
+the ones not listed in run_verilator_tests.sh test that core only.
+
 AP040 test suite
 ================
 

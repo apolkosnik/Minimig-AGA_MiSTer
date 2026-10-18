@@ -115,6 +115,7 @@ assign VGA_SCALER   = FB_EN;
 
 wire clk_114;
 wire clk_sys;
+wire clk_cpu;   // the AP68040's clock: clk_114 / 2, twice clk_sys, edges aligned
 wire locked;
 
 pll pll
@@ -122,6 +123,7 @@ pll pll
 	.refclk(CLK_50M),
 	.outclk_0(clk_114),
 	.outclk_1(clk_sys),
+	.outclk_2(clk_cpu),
 	.reconfig_to_pll(reconfig_to_pll),
 	.reconfig_from_pll(reconfig_from_pll),
 	.locked(locked)
@@ -295,45 +297,6 @@ wire        zram_sel  = |ram_addr[28:26];
 wire        ramshared;
 wire        cpu_cache_inhibit;
 
-// AP040 table-search port.  The CPU-side request crosses into clk_114 once,
-// then goes directly to the selected RAM controller as one 32-bit transfer.
-wire        walker_req_cpu, walker_we_cpu, walker_ddr_cpu, walker_bad_cpu;
-wire [28:2] walker_addr_cpu;
-wire [31:0] walker_wdat_cpu, walker_rdata_cpu;
-wire        walker_ack_cpu, walker_berr_cpu;
-wire        walker_req_mem, walker_we_mem, walker_ddr_mem;
-wire [28:2] walker_addr_mem;
-wire [31:0] walker_wdat_mem;
-wire        walker_ack_mem, walker_berr_mem;
-wire [31:0] walker_rdata_mem;
-wire        walker_ack1, walker_ack2;
-wire [31:0] walker_rdata1, walker_rdata2;
-
-assign walker_ack_mem   = walker_ddr_mem ? walker_ack2   : walker_ack1;
-assign walker_rdata_mem = walker_ddr_mem ? walker_rdata2 : walker_rdata1;
-
-// Walker watchdog.  The CPU port has had a bus timeout from the start,
-// but a table-walk transaction that a controller never answers stalled
-// the MMU -- and therefore the CPU, mid-instruction -- forever, with the
-// CPU-port watchdog blind to it: the live NetBSD freeze signature (every
-// interrupt dead, zero progress).  The working 030 core on this platform
-// carries the same armor for the same reason (its BUG #138/#387 walker
-// deadlock timeouts).  A timeout completes the transaction as a bus
-// error through the normal handshake: the MMU's walk_err path turns it
-// into an access error with the B bit set, so the OS reports a fault at
-// the failing walk instead of freezing the machine.  2^16 cycles at
-// 114 MHz is ~0.6 ms -- orders of magnitude beyond any legitimate
-// walker transaction, contention included.
-wire walker_wd_berr;
-ap040_bus_timeout #(.COUNTER_BITS(16)) walker_timeout (
-	.clk(clk_114),
-	.nreset(~reset_d & cpu_rst),
-	.req(walker_req_mem),
-	.complete(walker_ack_mem),
-	.berr(walker_wd_berr)
-);
-assign walker_berr_mem  = walker_wd_berr;
-
 wire [7:0] toccata_base;
 wire toccata_ena;
 wire a2065_ena;
@@ -347,6 +310,7 @@ cpu_wrapper cpu_wrapper
 	.reset_out    (cpu_nrst_out    ),
 
 	.clk          (clk_sys         ),
+	.clk_cpu      (clk_cpu         ),
 	.ph1          (cpu_ph1         ),
 	.ph2          (cpu_ph2         ),
 
@@ -390,16 +354,6 @@ cpu_wrapper cpu_wrapper
 	.cache_inhibit(cpu_cache_inhibit ),
 	.ramshared    (ramshared       ),
 
-	.walker_mem_req  (walker_req_cpu  ),
-	.walker_mem_we   (walker_we_cpu   ),
-	.walker_mem_addr (walker_addr_cpu ),
-	.walker_mem_wdat (walker_wdat_cpu ),
-	.walker_mem_ddr  (walker_ddr_cpu  ),
-	.walker_mem_bad  (walker_bad_cpu  ),
-	.walker_mem_ack  (walker_ack_cpu  ),
-	.walker_mem_rdata(walker_rdata_cpu),
-	.walker_mem_berr (walker_berr_cpu ),
-
 	//custom CPU signals
 	.cpustate     (cpu_state       ),
 	.cacr         (cpu_cacr        ),
@@ -407,45 +361,12 @@ cpu_wrapper cpu_wrapper
 	.nmi_addr     (cpu_nmi_addr    )
 );
 
-ap040_walker_cdc walker_cdc
-(
-	.s_clk     (clk_sys),
-	.s_reset_n (cpu_rst),
-	.s_req     (walker_req_cpu),
-	.s_we      (walker_we_cpu),
-	.s_addr    (walker_addr_cpu),
-	.s_wdata   (walker_wdat_cpu),
-	.s_ddr     (walker_ddr_cpu),
-	.s_bad     (walker_bad_cpu),
-	.s_ack     (walker_ack_cpu),
-	.s_rdata   (walker_rdata_cpu),
-	.s_berr    (walker_berr_cpu),
-
-	.m_clk     (clk_114),
-	.m_reset_n (~reset_d),
-	.m_req     (walker_req_mem),
-	.m_we      (walker_we_mem),
-	.m_addr    (walker_addr_mem),
-	.m_wdata   (walker_wdat_mem),
-	.m_ddr     (walker_ddr_mem),
-	.m_ack     (walker_ack_mem),
-	.m_rdata   (walker_rdata_mem),
-	.m_berr    (walker_berr_mem)
-);
-
 wire [15:0] ram_dout1;
 wire        ram_ready1;
 
-// The controller caches no longer carry the system alone: ap040_cache is
-// enabled as of 2026-08-18 (cpu_wrapper.v).  Both halves of the old
-// objection to it are gone.  Snoop loss is fixed -- the cache's snoop
-// port is free-running and ce-independent since the 5.1 fix, with
-// tb_ap040_cache_snoop T1 covering exactly the frozen-clkena window.
-// And the "ran SLOWER" measurement turns out to describe only
-// straight-line miss-heavy code, which is what the regression programs
-// are: on loop-heavy code the internal cache is 1.41x faster with a
-// zero-latency bus and 2.27x with a latent one, and it makes the CPU
-// nearly immune to bus latency (bench_loop.s under +prof).
+// The AP68040's own caches (4 KB instruction, 4 KB data, copyback) sit
+// in front of the controller caches; what reaches here are its misses,
+// its pushes and its uncached accesses.
 `ifdef MISTER_DUAL_SDRAM
 // X2.1b: the io-board's second SDRAM in lockstep with the primary makes
 // the pair one 32-bit bus (sdram32_ctrl; 16-bit-facing contract proven
@@ -543,12 +464,13 @@ sdram_ctrl #(.CPU_CACHE(1)) ram1
 	.cpuRD        (ram_dout1       ),
 	.ramready     (ram_ready1      ),
 
-	.walker_req   (walker_req_mem & ~walker_ddr_mem),
-	.walker_we    (walker_we_mem),
-	.walker_addr  (walker_addr_mem[24:2]),
-	.walker_wdata (walker_wdat_mem),
-	.walker_ack   (walker_ack1),
-	.walker_rdata (walker_rdata1),
+	// the AP68040 walks its tables over the CPU port
+	.walker_req   (1'b0),
+	.walker_we    (1'b0),
+	.walker_addr  (23'd0),
+	.walker_wdata (32'd0),
+	.walker_ack   (),
+	.walker_rdata (),
 
 	.chipWR       (ram_data        ),
 	.chipAddr     (ram_address     ),
@@ -605,12 +527,12 @@ ddram_ctrl #(.CPU_CACHE(1)) ram2
 	.ramshared    (ramshared       ),
 	.ramready     (ram_ready2      ),
 
-	.walker_req   (walker_req_mem & walker_ddr_mem),
-	.walker_we    (walker_we_mem),
-	.walker_addr  (walker_addr_mem),
-	.walker_wdata (walker_wdat_mem),
-	.walker_ack   (walker_ack2),
-	.walker_rdata (walker_rdata2)
+	.walker_req   (1'b0),
+	.walker_we    (1'b0),
+	.walker_addr  (27'd0),
+	.walker_wdata (32'd0),
+	.walker_ack   (),
+	.walker_rdata ()
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////

@@ -1,6 +1,6 @@
-// Turbo-chipram co-simulation: cpu_wrapper (28MHz) + sdram_ctrl +
-// cpu_cache_new (113MHz) + behavioral SDR SDRAM, phase-locked 4:1 as on
-// the board.  This is the ONE topology the other benches do not model:
+// Turbo-chipram co-simulation: cpu_wrapper (28MHz, the AP68040 on its
+// 56MHz clock behind it) + sdram_ctrl + cpu_cache_new (113MHz) +
+// behavioral SDR SDRAM, phase-locked 4:1 as on the board.  This is the ONE topology the other benches do not model:
 // with turbo chipram and the data cache enabled, chip-RAM data reads go
 // through cpu_cache_new and the SDRAM burst engine instead of the 7MHz
 // chip bus.  The hardware cputest FABS.X ([0]) +2-window corruption is
@@ -25,6 +25,8 @@ reg [3:0] div = 0;
 always @(posedge clk113) div <= div + 1'd1;
 parameter CPU_PHASE = 3;
 wire clk28 = (div[1:0] == CPU_PHASE[1:0]) | (div[1:0] == ((CPU_PHASE[1:0] + 2'd1) & 2'd3));
+// the processor clock: half clk113, rising with clk28's rising edge
+wire clk_cpu = (div[0] == CPU_PHASE[0]);
 
 // 7MHz square for the SDRAM slot engine (16 clk113 per CCK)
 wire c_7m = div[3];
@@ -64,43 +66,29 @@ wire        cache_inhibit;
 // chip-side cache changes every hit/miss pattern).  Data ops keep the
 // full controller path.  Assigns live below the memory model.
 reg         isplit = 0;
-// exception and wild-PC tracer for MMU debug
-integer exctrc = 0;
-reg [7:0] prev_cstate = 0;
-always @(posedge clk28) begin
-	prev_cstate <= cpu.cpu_inst_p.core.state;
-	if (cpu.cpu_inst_p.core.state == 8'd41 && prev_cstate != 8'd41 && exctrc < 200) begin
-		$display("EXC t=%0d vec=%0d pc=%08x sr=%04x", $time,
-			cpu.cpu_inst_p.core.exc_vec, cpu.cpu_inst_p.core.pc, cpu.cpu_inst_p.core.sr);
-		exctrc = exctrc + 1;
-	end
-	if (cpu.cpu_inst_p.core.state == 8'd42 && prev_cstate != 8'd42 && exctrc < 200) begin
-		$display("EXCJMP t=%0d target=%08x", $time, cpu.cpu_inst_p.core.m_val);
-		exctrc = exctrc + 1;
-	end
-end
-
-// PC history ring: dumped on timeout to localize where execution went wild
+// PC history ring (the retired PC): dumped on timeout to localize where
+// execution went wild
+wire [31:0] core_pc = cpu.cpu_inst_p.debug_pc;
 reg [31:0] prev_pc = 0;
 reg [31:0] pc_ring [0:63];
 reg [31:0] pc_time [0:63];
 integer pc_rp = 0;
 integer kk;
 reg wild_logged = 0;
-always @(posedge clk28) begin
-	if (cpu.cpu_inst_p.core.pc != prev_pc) begin
-		pc_ring[pc_rp & 63] <= cpu.cpu_inst_p.core.pc;
+always @(posedge clk_cpu) begin
+	if (core_pc != prev_pc) begin
+		pc_ring[pc_rp & 63] <= core_pc;
 		pc_time[pc_rp & 63] <= $time;
 		pc_rp <= pc_rp + 1;
-		if (cpu.cpu_inst_p.core.pc > 32'h8000 && !wild_logged) begin
+		if (core_pc > 32'h8000 && !wild_logged) begin
 			wild_logged <= 1;
 			$display("WILD: pc left program at t=%0d: %08x -> %08x", $time,
-				prev_pc, cpu.cpu_inst_p.core.pc);
+				prev_pc, core_pc);
 			for (kk = 0; kk < 64; kk = kk + 1)
 				$display("  ring[%0d] t=%0d pc=%08x", kk,
 					pc_time[(pc_rp + kk) & 63], pc_ring[(pc_rp + kk) & 63]);
 		end
-		prev_pc <= cpu.cpu_inst_p.core.pc;
+		prev_pc <= core_pc;
 	end
 end
 
@@ -129,22 +117,15 @@ wire  [1:0] cpu_state;
 wire  [3:0] cpu_cacr;
 wire        cpu_nrst_out;
 
-wire        cw_req, cw_we, cw_ddr, cw_bad;
-wire [28:2] cw_addr;
-wire [31:0] cw_wdat;
-wire        cw_ack, cw_berr;
-wire [31:0] cw_rdata;
-wire        mw_req, mw_we, mw_ddr;
-wire [28:2] mw_addr;
-wire [31:0] mw_wdata;
-
 reg  [2:0] ipl_lvl = 0;
 reg [15:0] ipl_delay = 0;
 reg        ipl_set_w = 0, ipl_arm_w = 0;
 reg  [2:0] ipl_set_v = 0;
 reg [15:0] ipl_arm_v = 0;
 
-cpu_wrapper cpu
+// the watchdog shortened for the bench: the SDRAM path answers in tens of
+// cycles even under the DMA load below
+cpu_wrapper #(.BUS_TIMEOUT_BITS(12)) cpu
 (
 	.snoop_tgl(1'b0),
 	.snoop_adr(24'd0),
@@ -152,6 +133,7 @@ cpu_wrapper cpu
 	.reset_out(cpu_nrst_out),
 
 	.clk(clk28),
+	.clk_cpu(clk_cpu),
 	.ph1(ph1),
 	.ph2(ph2),
 
@@ -189,16 +171,6 @@ cpu_wrapper cpu
 	.ramuds(ramuds),
 	.ramshared(),
 
-	.walker_mem_req(cw_req),
-	.walker_mem_we(cw_we),
-	.walker_mem_addr(cw_addr),
-	.walker_mem_wdat(cw_wdat),
-	.walker_mem_ddr(cw_ddr),
-	.walker_mem_bad(cw_bad),
-	.walker_mem_ack(cw_ack),
-	.walker_mem_rdata(cw_rdata),
-	.walker_mem_berr(cw_berr),
-
 	.toccata_ena(),
 	.toccata_base(),
 	.a2065_ena(),
@@ -235,57 +207,25 @@ wire [15:0] sd_data;
 wire        sd_clk;
 
 // Direct walker-port exercise against the REAL controller and SDRAM
-// model: the MMU table-walk path (32-bit reads, dual-CAS 32-bit writes)
-// has no other bench through sdram_ctrl.  Level-held request semantics
-// exactly like ap040_walker_cdc: req holds until ack.
-// CPU-side walker path: wrapper (clk28) -> CDC -> SDRAM walker port (clk113),
-// same topology as Minimig.sv. The selftest wk_* driver shares the port; it
-// only runs after the program has quiesced, so a simple OR-mux suffices.
+// model: the controller's 32-bit port (32-bit reads, dual-CAS 32-bit
+// writes) has no other bench.  The AP68040 does not use it -- its table
+// walks are ordinary CPU-port accesses -- so the selftest's wk_* driver is
+// the port's only user; it runs after the program has quiesced.
 reg         wk_req = 0, wk_we = 0;
 reg  [24:2] wk_addr = 0;
 reg  [31:0] wk_wdata = 0;
 wire        wk_ack;
 wire [31:0] wk_rdata;
 
-// $F146 (WBERRCTL) arms a one-shot bus error on the NEXT walker descriptor
-// fetch, mirroring the flat TB back-door used by the MMUSR B-bit tests.
+// $F146 (WBERRCTL) arms a bus error for the NEXT table-search access
+// (MMUSR B-bit tests).  The core walks its tables over the CPU port with
+// TM = 3 (data) or 4 (code); the armed access is never acknowledged -- the
+// controller's ready is masked from the wrapper -- and cpu_wrapper's
+// watchdog turns it into the bus error, as a dead address does on the
+// board.
 reg  wberr_arm = 0;
-reg  wberr_fire = 0;
-reg  mw_req_d = 0;
-always @(posedge clk113) begin
-	wberr_fire <= 0;
-	mw_req_d <= mw_req;
-	if (mw_req && !mw_req_d && wberr_arm) begin
-		wberr_fire <= 1;
-		wberr_arm <= 0;
-	end
-end
-
-ap040_walker_cdc walker_cdc
-(
-	.s_clk     (clk28),
-	.s_reset_n (reset),
-	.s_req     (cw_req),
-	.s_we      (cw_we),
-	.s_addr    (cw_addr),
-	.s_wdata   (cw_wdat),
-	.s_ddr     (cw_ddr),
-	.s_bad     (cw_bad),
-	.s_ack     (cw_ack),
-	.s_rdata   (cw_rdata),
-	.s_berr    (cw_berr),
-
-	.m_clk     (clk113),
-	.m_reset_n (reset),
-	.m_req     (mw_req),
-	.m_we      (mw_we),
-	.m_addr    (mw_addr),
-	.m_wdata   (mw_wdata),
-	.m_ddr     (mw_ddr),
-	.m_ack     (wk_ack & ~wberr_arm & ~wberr_fire),
-	.m_rdata   (wk_rdata),
-	.m_berr    (wberr_fire)
-);
+wire tblacc     = cpu.cpu_req && (cpu.adapter.fc == 3'd3 || cpu.adapter.fc == 3'd4);
+wire wberr_hold = wberr_arm && tblacc;
 
 
 sdram_ctrl ram
@@ -329,10 +269,10 @@ sdram_ctrl ram
 	.cpuRD(ctrl_rd),
 	.ramready(ctrl_ready),
 
-	.walker_req(wk_req | (mw_req & ~wberr_arm & ~wberr_fire)),
-	.walker_we(wk_req ? wk_we : mw_we),
-	.walker_addr(wk_req ? wk_addr : mw_addr[24:2]),
-	.walker_wdata(wk_req ? wk_wdata : mw_wdata),
+	.walker_req(wk_req),
+	.walker_we(wk_we),
+	.walker_addr(wk_addr),
+	.walker_wdata(wk_wdata),
 	.walker_ack(wk_ack),
 	.walker_rdata(wk_rdata)
 );
@@ -374,7 +314,7 @@ assign is_fetch   = (cpu_state == 2'b00);
 assign split_this = isplit && is_fetch;
 assign ctrl_cs    = ram_cs && !split_this;
 assign cpuRD_mux  = split_this ? mem[ramaddr[15:1]] : ctrl_rd;
-assign ramready_mux = split_this ? fready : ctrl_ready;
+assign ramready_mux = split_this ? fready : (ctrl_ready & ~wberr_hold);
 
 // split fetches model the DDR3/HPS path: long, VARIABLE latency
 // (10..41 cycles, deterministic pattern), level-held ack like the cache
@@ -613,11 +553,10 @@ always @(posedge clk113) begin
 	end
 	if (ipl_set_w) ipl_lvl <= ipl_set_v;
 	if (ipl_arm_w) ipl_delay <= ipl_arm_v;
-	// auto-release at interrupt acceptance: the handler's $F110 release
-	// write drains through the write buffer, so holding the level until
-	// it lands could re-enter the handler after RTE
-	if (ipl_lvl != 0 && cpu.cpu_inst_p.core.state == 8'd34 &&
-	    cpu.cpu_inst_p.core.exc_is_irq)
+	// auto-release at interrupt acceptance (the acknowledge cycle): the
+	// handler's $F110 release write drains through the write buffer, so
+	// holding the level until it lands could re-enter the handler after RTE
+	if (ipl_lvl != 0 && cpu.cpu_inst_p.ts && cpu.cpu_inst_p.iack)
 		ipl_lvl <= 0;
 end
 
@@ -628,6 +567,7 @@ always @(posedge clk113) begin
 	sdclk_q <= sd_clk;
 	ipl_set_w <= 0;
 	ipl_arm_w <= 0;
+	if (cpu.bus_berr) wberr_arm <= 0;   // the armed access has bus-errored
 	if (chip_tick) begin
 	// shift the read pipeline (one beat per CHIP clock)
 	sd_q    <= rd_pipe_dat[0];
@@ -745,15 +685,23 @@ initial begin
 	if (result == 0) begin
 		errors = errors + 1;
 		$display("FAIL: timeout after %0d cycles", timeout);
-		$display("  final: state=%0d pc=%08x sr=%04x d7=%04x", cpu.cpu_inst_p.core.state,
-			cpu.cpu_inst_p.core.pc, cpu.cpu_inst_p.core.sr,
-			cpu.cpu_inst_p.core.regfile.dreg[7][15:0]);
+		$display("  final: pc=%08x halted=%b", core_pc, cpu.cpu_inst_p.debug_halted);
 		for (kk = 0; kk < 64; kk = kk + 1)
 			$display("  ring[%0d] t=%0d pc=%08x", kk,
 				pc_time[(pc_rp + kk) & 63], pc_ring[(pc_rp + kk) & 63]);
 	end
 	else if (result == 2)
+	begin
 		$display("FAIL: program reports failure, test %0d", failcode);
+		// the programs' fault record: which handler, the fault address and
+		// the stacked PC (hid, hfa, hfpc of t_exceptions and t_mmu)
+		$display("  hid=%04x hfa=%08x hfpc=%08x", mem[16'h3670 >> 1],
+		         {mem[16'h3674 >> 1], mem[16'h3676 >> 1]},
+		         {mem[16'h3678 >> 1], mem[16'h367A >> 1]});
+		for (kk = 0; kk < 64; kk = kk + 1)
+			$display("  ring[%0d] t=%0d pc=%08x", kk,
+				pc_time[(pc_rp + kk) & 63], pc_ring[(pc_rp + kk) & 63]);
+	end
 	else
 		$display("turbo-path run passed (%0d cycles)", timeout);
 

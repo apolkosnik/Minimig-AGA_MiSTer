@@ -1,12 +1,14 @@
 // Co-simulation of cpu_wrapper's 7MHz chip-bus stage machine with the
-// AP040 core and bus16 adapter.  The program TB drives the compat wrapper
-// directly and so never exercises the ph1/ph2 chip handshake that real
-// chip-RAM accesses use; the hardware cputest FADD.P ([]d0.w*8) failure
-// (stale first word of the memory-indirect pointer read at address 0)
-// lives in exactly that gap.  Here the ENTIRE test program runs over the
-// chip bus: turbo chipram off, no Zorro RAM, so every fetch and data
-// access takes the cpu_wrapper chip path with its mixed posedge/negedge
-// stage machine, one CCK per 16-bit transfer, dtack always granted.
+// AP68040 core behind ap68040_minimig and the bus16 adapter.  The core's
+// own bench never exercises the ph1/ph2 chip handshake that real chip-RAM
+// accesses use; the hardware cputest FADD.P ([]d0.w*8) failure of the
+// previous core (stale first word of the memory-indirect pointer read at
+// address 0) lived in exactly that gap.  Here the ENTIRE test program runs
+// over the chip bus: turbo chipram off, no Zorro RAM, so every fetch and
+// data access takes the cpu_wrapper chip path with its mixed
+// posedge/negedge stage machine, one CCK per 16-bit transfer, dtack always
+// granted.  The core runs on clk_cpu, clk_114/2, its edges aligned with
+// clk's as the PLL's are on the board.
 `timescale 1ns/1ns
 
 module tb_cpu_wrapper_chip #(
@@ -17,7 +19,11 @@ module tb_cpu_wrapper_chip #(
 	// leave the chip bus for the accelerated RAM port.  That is how an
 	// accelerated board actually runs, and it means EVERY fastchip access is
 	// preceded by a RAM access rather than a chip-bus one.
-	parameter TURBO_CHIP = 0
+	parameter TURBO_CHIP = 0,
+	// fastramcfg: 0 no Zorro RAM; 4 offers a Zorro III board for a program
+	// to configure (the coherence programs put VBR in Z3 fast RAM).  The RAM
+	// port's model serves its addresses from the chip RAM array.
+	parameter FASTRAM_CFG = 0
 );
 
 reg reset = 0;
@@ -33,6 +39,8 @@ always #5 clk_114 = ~clk_114;
 reg [3:0] div = 0;
 wire clk = (div[1:0] == CPU_PHASE[1:0]) |
 	       (div[1:0] == ((CPU_PHASE[1:0] + 2'd1) & 2'd3));
+// the processor clock: half clk_114, rising with clk's rising edge
+wire clk_cpu = (div[0] == CPU_PHASE[0]);
 reg ph1 = 0, ph2 = 0;
 always @(posedge clk_114) begin
 	div <= div + 1'd1;
@@ -72,32 +80,36 @@ wire [15:0] chip_dout;
 // path without changing any CPU-side timing.
 reg [7:0] cck_count = 0;
 always @(posedge clk_114) if (div == 4'hf) cck_count <= cck_count + 1'd1;
-wire chip_wait = (DTACK_MODE != 0) && !cck_count[0];
+wire chip_wait = ((DTACK_MODE != 0) && !cck_count[0]) | wberr_hold;
 
 reg  [2:0] ipl_lvl = 0;
 reg [15:0] ipl_delay = 0;   // $F148: delayed level-2 IPL countdown
-reg        wberr_arm = 0;   // $F146: one-shot walker bus error
+reg        wberr_arm = 0;   // $F146: one-shot bus error on a table-walk access
 
-wire        walker_req, walker_we, walker_ddr, walker_bad;
-wire [28:2] walker_addr;
-wire [31:0] walker_wdat;
-reg         walker_ack   = 0;
-reg         walker_berr  = 0;
-reg  [31:0] walker_rdata = 0;
+// $F146 (WBERRCTL) arms a bus error for the next table-search access.  The
+// AP68040 walks its tables over the ordinary bus (TM = 3 data, 4 code), so
+// the armed access is simply never acknowledged -- on whichever port it
+// lands -- and cpu_wrapper's own watchdog turns it into the bus error, the
+// path a dead descriptor address takes on the board.  The watchdog is
+// shortened for the bench; chip-bus waits here are a few CCKs.
+wire tblacc     = dut.cpu_req && (dut.adapter.fc == 3'd3 || dut.adapter.fc == 3'd4);
+wire wberr_hold = wberr_arm && tblacc;
 
-cpu_wrapper dut
+cpu_wrapper #(.BUS_TIMEOUT_BITS(12)) dut
 (
-	.snoop_tgl(1'b0),
-	.snoop_adr(24'd0),
+	// the chipset DMA write's snoop, as the RAM controller signals it
+	.snoop_tgl(dma_snoop),
+	.snoop_adr(24'h001A80),     // $003500 (word address)
 	.reset(reset),
 	.reset_out(cpu_nrst_out),
 
 	.clk(clk),
+	.clk_cpu(clk_cpu),
 	.ph1(ph1),
 	.ph2(ph2),
 
 	.cpucfg(2'b10),          // 68040 class, no fastchip acceleration
-	.fastramcfg(3'd0),       // no Zorro RAM: nothing selects the RAM port
+	.fastramcfg(FASTRAM_CFG[2:0]),
 	.cachecfg(TURBO_CHIP ? 3'b101 : 3'd0),  // turbochip + dcache, or all off
 	.bootrom(1'b0),
 
@@ -109,7 +121,7 @@ cpu_wrapper dut
 	.chip_lds(chip_lds),
 	.chip_rw(chip_rw),
 	.chip_dtack(chip_wait),
-	.chip_ipl(~ipl_lvl),
+	.chip_ipl(cart_int7 ? 3'b000 : ~ipl_lvl),   // the cartridge's freeze is level 7
 
 	.fastchip_dout(fc_dout),
 	.fastchip_sel(fc_sel),
@@ -129,16 +141,6 @@ cpu_wrapper dut
 	.ramlds(ramlds),
 	.ramuds(ramuds),
 	.ramshared(),
-
-	.walker_mem_req(walker_req),
-	.walker_mem_we(walker_we),
-	.walker_mem_addr(walker_addr),
-	.walker_mem_wdat(walker_wdat),
-	.walker_mem_ddr(walker_ddr),
-	.walker_mem_bad(walker_bad),
-	.walker_mem_ack(walker_ack),
-	.walker_mem_rdata(walker_rdata),
-	.walker_mem_berr(walker_berr),
 
 	.toccata_ena(),
 	.toccata_base(),
@@ -247,7 +249,7 @@ always @(posedge clk_114) begin
 		ramready_r <= 1'b0;
 		ram_lat    <= 3'd0;
 	end
-	else if (!ramready_r) begin
+	else if (!ramready_r && !wberr_hold) begin
 		if (ram_lat == RAM_LAT[2:0]) begin
 			if (cpustate == 2'd3) begin
 				if (ram_is_fb) begin
@@ -334,64 +336,49 @@ assign pal_dr = clut[pal_a];
 // real chip RAM by the dtack phase; writes latch during the data phase.
 //---------------------------------------------------------------------------
 
-assign chip_dout = mem[chip_addr[15:1]];
-
 //---------------------------------------------------------------------------
-// MMU walker physical port.  On hardware the table walker bypasses the
-// chip bus and reads descriptors over the SDRAM/DDR3 port; here the
-// tables live in the same 64 KB model.  Handshake mirrors the flat TB:
-// a held request is accepted once, re-armed when it drops, acked for one
-// cycle after a short latency.  walker_mem_bad (corrupt table address)
-// answers with a bus error, as Minimig does.
+// The cartridge (HRTMon) and a chipset DMA write, for the coherence
+// programs (asm/coh_*.s).  Both are idle unless a program asks:
+//   $F130 word  DMA: writes {value, $0000} to $3500 behind the CPU, on the
+//               chip RAM side, and toggles the wrapper's snoop input once
+//   $F170 word  asserts the cartridge's freeze (a level 7 interrupt whose
+//               vector read the cartridge overlays with its monitor entry,
+//               $00A1000C; $A1xxxx reads come from $6000 + offset - $C)
+//   $F174 word  the program's observed value, printed
 //---------------------------------------------------------------------------
-
-reg       walker_armed   = 1;
-reg       walker_pending = 0;
-reg [1:0] walker_lat     = 0;
-reg       walker_we_l    = 0;
-reg [13:0] walker_word_l = 0;
-reg       walker_bad_l   = 0;
-reg [31:0] walker_wdat_l = 0;
-
-always @(posedge clk) begin
-	walker_ack  <= 0;
-	walker_berr <= 0;
-	if (!reset) begin
-		walker_armed   <= 1;
-		walker_pending <= 0;
-	end
-	else begin
-		if (!walker_req) walker_armed <= 1;
-		if (walker_req && walker_armed && !walker_pending) begin
-			walker_pending <= 1;
-			walker_armed   <= 0;
-			walker_we_l    <= walker_we;
-			walker_word_l  <= walker_addr[15:2];
-			walker_bad_l   <= walker_bad | walker_ddr | (|walker_addr[28:16]);
-			walker_wdat_l  <= walker_wdat;
-			walker_lat     <= 2'd2;
+reg dma_snoop = 0;
+reg cart_freeze = 0;
+wire cart_int7, cart_ovr;
+wire [15:0] cart_data;
+integer vector_reads = 0;
+cart cart_board (
+	.clk(clk_114), .clk7_en(div == 4'd0), .clk7n_en(1'b0),
+	.cpu_rst(!reset), .cpu_address_in(chip_addr), ._cpu_as(chip_as),
+	.cpu_rd(!chip_as && chip_rw), .cpu_hwr(1'b0), .cpu_lwr(1'b0),
+	.nmi_addr(dut.nmi_addr), .nmi_ack_toggle(dut.nmi_ack_toggle),
+	.reg_address_in(8'd0), .reg_data_in(16'd0), .dbr(1'b0), .ovl(1'b0),
+	.freeze(cart_freeze), .cpuhlt(1'b0), .cart_data_out(cart_data),
+	.int7(cart_int7), .sel_cart(), .ovr(cart_ovr)
+);
+assign chip_dout = cart_ovr ? cart_data :
+                   chip_addr[23:16] == 8'hA1 ? mem[15'h3000 + chip_addr[15:1] - 15'h6] :
+                   mem[chip_addr[15:1]];
+always @(posedge clk_114)
+	if (reset && ph2 && !chip_ph2_d && !chip_as && chip_rw && cart_ovr)
+		vector_reads <= vector_reads + 1;
+reg coh_seen = 0;   // one event per bus write (the chip bus write spans clocks)
+always @(posedge clk_114) begin
+	if (chip_as && !ram_wr_commit) coh_seen <= 0;
+	if (cw_stb && !coh_seen) begin
+		coh_seen <= 1;
+		if (cw_addr == (16'hF130 >> 1)) begin
+			mem[16'h3500 >> 1] <= cw_data;
+			mem[16'h3502 >> 1] <= 16'd0;
+			dma_snoop <= ~dma_snoop;
+			$display("DMA write %h0000 to $3500, snoop toggled", cw_data);
 		end
-		else if (walker_pending) begin
-			if (walker_lat != 0)
-				walker_lat <= walker_lat - 1'd1;
-			else begin
-				walker_pending <= 0;
-				if (walker_bad_l || wberr_arm) begin
-					wberr_arm   <= 0;
-					walker_berr <= 1;
-				end
-				else if (walker_we_l) begin
-					mem[{walker_word_l, 1'b0}] <= walker_wdat_l[31:16];
-					mem[{walker_word_l, 1'b1}] <= walker_wdat_l[15:0];
-					walker_ack <= 1;
-				end
-				else begin
-					walker_rdata <= {mem[{walker_word_l, 1'b0}],
-					                 mem[{walker_word_l, 1'b1}]};
-					walker_ack <= 1;
-				end
-			end
-		end
+		if (cw_addr == (16'hF170 >> 1)) cart_freeze <= 1;
+		if (cw_addr == (16'hF174 >> 1)) $display("observed %h", cw_data);
 	end
 end
 
@@ -436,8 +423,9 @@ always @(posedge clk_114) begin
 		if (cw_addr == (16'hF110 >> 1))
 			ipl_lvl <= cw_data[2:0];
 		if (cw_addr == (16'hF146 >> 1))
-			wberr_arm <= 1;   // next walker transaction bus-errors
+			wberr_arm <= 1;   // the next table-walk access bus-errors
 	end
+	if (dut.bus_berr) wberr_arm <= 0;
 
 	// the 7 MHz bus stretches every instruction ~16x, so scale the armed
 	// delay to sweep the same fraction of the FPU op's window as the
@@ -474,10 +462,10 @@ initial begin
 
 	for (i = 0; i < 32768; i = i + 1) mem[i] = 16'h0000;
 	$readmemh(prog_file, mem);
-	// capability word: bit 0 coarse IPL; bit 3 = the cache_allow window
-	// models production (cache_allow_all=0), so the chip-window I-fetch
-	// bypass is active and t_exceptions 157/158 can assert it
-	mem[16'hF160 >> 1] = 16'h0019;	// coarse IPL + production cache window + fastchip
+	// capability word: bit 0 coarse IPL, bit 4 the real fastchip block.
+	// Bit 3 (the previous core's chip-window I-fetch bypass) is off: the
+	// AP68040 caches what the MMU and the TTRs allow, as a 68040 does.
+	mem[16'hF160 >> 1] = 16'h0011;	// coarse IPL + fastchip
 
 	reset = 0;
 	repeat (50) @(posedge clk);
@@ -497,16 +485,25 @@ initial begin
 	if (result == 0) begin
 		errors = errors + 1;
 		$display("FAIL: timeout after %0d cycles", timeout);
-		$display("  pc=%08x ir=%04x sr=%04x state=%02x",
-		         dut.cpu_inst_p.core.pc, dut.cpu_inst_p.core.ir,
-		         dut.cpu_inst_p.core.sr, dut.cpu_inst_p.core.state);
+		$display("  pc=%08x halted=%b busstate=%0d", dut.cpu_inst_p.debug_pc,
+		         dut.cpu_inst_p.debug_halted, cpustate);
 	end
 	else if (result == 2) begin
+	begin
 		$display("FAIL: program reports failure, test %0d", failcode);
+		// the programs' fault record: which handler, the fault address and
+		// the stacked PC (hid, hfa, hfpc of t_exceptions and t_mmu)
+		$display("  hid=%04x hfa=%08x hfpc=%08x", mem[16'h3670 >> 1],
+		         {mem[16'h3674 >> 1], mem[16'h3676 >> 1]},
+		         {mem[16'h3678 >> 1], mem[16'h367A >> 1]});
+	end
 	end
 	else
 		$display("chip-bus run passed (%0d cycles)", timeout);
 
+	if (cart_freeze)
+		$display("cartridge: active=%b, level 7 acknowledged=%b, vector reads overlaid=%0d",
+		         cart_board.active, dut.nmi_ack_toggle, vector_reads);
 	if (errors == 0) $display("ALL TESTS PASSED");
 	else             $display("TEST FAILED with %0d errors", errors);
 	$finish;

@@ -1,8 +1,8 @@
 derive_pll_clocks
 derive_clock_uncertainty
 
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -setup 2
-set_multicycle_path -from {emu|cpu_wrapper|cpu_inst*} -to {emu|ram*} -hold 1
+set_multicycle_path -from {emu|cpu_wrapper|adapter|*} -to {emu|ram*} -setup 2
+set_multicycle_path -from {emu|cpu_wrapper|adapter|*} -to {emu|ram*} -hold 1
 
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -setup 2
 set_multicycle_path -from {emu|amiga_clk|cck*} -to {emu|ram1|*} -hold 1
