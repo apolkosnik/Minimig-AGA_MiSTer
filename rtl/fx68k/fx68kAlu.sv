@@ -30,18 +30,29 @@ localparam
 		OP_ROXL = 19,
 		OP_ROXR = 20,
 		OP_SLAA = 21,
-		OP_ABCD = 22;
+		OP_ABCD = 22,
+		OP_MULS1 = 23,		// 68010 MUL step: add/subtract and shift, first step
+		OP_MULS = 24;		// 68010 MUL step
 
 module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 	input [15:0] ird,
+	input noCcrForce,				// 68010 MOVES, CCR not affected
+	input fmtCcr, fmtN,				// 68010 RTE format error: N <= fmtN, Z,V <= 0
 	input [2:0] aluColumn,
 	input [1:0] aluDataCtrl,
 	input aluAddrCtrl, alueClkEn, ftu2Ccr, init, finish, aluIsByte,
 	input [15:0] ftu,
 	input [15:0] alub,
 	input [15:0] iDataBus, input [15:0] iAddrBus,
+	// 68010 RTE format 8: restore of the internal state
+	input resume,
+	input [15:0] resLatch, resAlue,
+	input [4:0] resCore,
+	input resH,
+	output [4:0] coreOut,
+	output coreHOut,
 	output ze,
-	output reg [15:0] alue,
+	output reg [15:0] alue = '0,
 	output reg [7:0] ccr,
 	output [15:0] aluOut);
 
@@ -68,17 +79,19 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 
 	reg [15:0] aluLatch;
 	reg [4:0] pswCcr;
-	reg [4:0] ccrCore;
+	reg [4:0] ccrCore = '0;
 	
 	logic [15:0] result;
 	logic [4:0] ccrTemp;
-	reg coreH;		// half carry latch
+	reg coreH = 1'b0;		// half carry latch
 
 	logic [15:0] subResult;
 	logic subHcarry;
 	logic subCout, subOv;
 
 	assign aluOut = aluLatch;
+	assign coreOut = ccrCore;
+	assign coreHOut = coreH;
 	assign ze = ~ccrCore[ ZF];		// Check polarity !!!
 
 	//
@@ -128,7 +141,7 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 		if( enT3) begin
 			row <= cRow;
 			isArX <= cIsArX;
-			noCcrEn <= cNoCcrEn;
+			noCcrEn <= cNoCcrEn | noCcrForce;
 			rIrd8 <= ird[8];
 			isByte <= aluIsByte;
 		end
@@ -165,7 +178,28 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 	// Can't be registered because uses bus operands that aren't available early !
 	wire shftMsb = isLong ? alue[15] : (isByte ? aOperand[7] : aOperand[15]);
 	   
-	aluShifter shifter( .data( { alue, aOperand}),
+	// 68010 MUL step (bank 1 microcode only): the 68000 adds or subtracts the multiplicand
+	// (ALUB) in one microcycle and shifts in the next one, the 68010 does both at once.
+	// The decision is the one of the 68000 microcode: the multiplier bit (MULU), or the bit
+	// and the previous one (Booth, MULS).
+	wire isMulStep = (oper == OP_MULS1) | (oper == OP_MULS);
+	reg mulPrev;
+	wire mulPrv = (oper == OP_MULS1) ? 1'b0 : mulPrev;
+	wire mulAdd = rIrd8 ? (~alue[0] & mulPrv) : alue[0];
+	wire mulSub = rIrd8 & alue[0] & ~mulPrv;
+	wire [16:0] mulSumA = { 1'b0, aOperand} + { 1'b0, alub};
+	wire [16:0] mulSumS = { 1'b0, aOperand} - { 1'b0, alub};
+	wire mulOvA = (aOperand[15] == alub[15]) & (mulSumA[15] != aOperand[15]);
+	wire mulOvS = (aOperand[15] != alub[15]) & (mulSumS[15] != aOperand[15]);
+	wire [15:0] mulSum = mulAdd ? mulSumA[15:0] : mulSub ? mulSumS[15:0] : aOperand;
+	// Bit shifted in: carry (MULU), sign of the true result (MULS)
+	wire mulCin = rIrd8 ? (mulAdd ? (mulSumA[15] ^ mulOvA) : mulSub ? (mulSumS[15] ^ mulOvS) : aOperand[15]) :
+						(mulAdd & mulSumA[16]);
+	always_ff @( posedge clk)
+		if( enT3 & isMulStep)
+			mulPrev <= alue[0];
+
+	aluShifter shifter( .data( { alue, isMulStep ? mulSum : aOperand}),
 		.swapWords( shftIsMul | shftIsDiv),
 		.cin( shftCin), .dir( shftRight), .isByte( isByte), .isLong( isLong),
 		.result( shftResult));
@@ -202,7 +236,8 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 	always_comb begin
 		case( oper)
 		OP_LSL, OP_ASL, OP_ROL, OP_ROXL, OP_SLAA:   shftRight = 1'b0;
-		OP_LSR, OP_ASR, OP_ROR, OP_ROXR:            shftRight = 1'b1;
+		OP_LSR, OP_ASR, OP_ROR, OP_ROXR,
+		OP_MULS1, OP_MULS:                          shftRight = 1'b1;
 		default:									shftRight = 1'bX;
 		endcase
 		
@@ -221,6 +256,8 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 				shftCin = pswCcr[ XF];
 				
 		OP_SLAA:	shftCin = aluColumn[1];   // col4 -> 0, col 6-> 1
+		OP_MULS1,
+		OP_MULS:	shftCin = mulCin;
 		default:	shftCin = 'X;
 		endcase
 	end
@@ -241,7 +278,7 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 		
 		OP_EXT: result = { {8{aOperand[7]}}, aOperand[7:0]};
 		
-		OP_SLAA,
+		OP_SLAA, OP_MULS1, OP_MULS,
 		OP_ASL, OP_ASR,
 		OP_LSL, OP_LSR,
 		OP_ROL, OP_ROR,
@@ -353,6 +390,16 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 				ccrTemp[ VF] = 1'b0;
 			end
 			
+		OP_MULS1,OP_MULS:
+			begin
+				// As the separate add/subtract and shift microcycles of the 68000 MUL: Z of
+				// both results (Z accumulates over the MUL microcycles)
+				ccrTemp[ ZF] = ~(| result) & ~((mulAdd | mulSub) & (| mulSum));
+				ccrTemp[ CF] = 1'b0;
+				ccrTemp[ XF] = aOperand[0];
+				ccrTemp[ VF] = 1'b0;
+			end
+
 		OP_LSR,OP_ROXR:
 			begin
 				// 0 Needed for mul, or carry gets in high word
@@ -423,7 +470,13 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 	end
 		
 	always_ff @( posedge clk) begin
-		if( enT3) begin
+		if( resume) begin
+			aluLatch <= resLatch;
+			alue <= resAlue;
+			ccrCore <= resCore;
+			coreH <= resH;
+		end
+		else if( enT3) begin
 			// Update latches from ALU operators
 			if( (| aluColumn)) begin
 				aluLatch <= result;
@@ -448,6 +501,8 @@ module fx68kAlu ( input clk, pwrUp, enT1, enT3, enT4,
 			pswCcr <= '0;
 		else if( enT3 & ftu2Ccr)
 			pswCcr <= ftu[4:0];	
+		else if( enT3 & fmtCcr)
+			pswCcr <= { pswCcr[ XF], fmtN, 1'b0, 1'b0, pswCcr[ CF]};
 		else if( enT3 &	~noCcrEn & (finish | init))
 			pswCcr <= ccrMasked;
 	end
@@ -576,6 +631,8 @@ module aluGetOp( input [15:0] row, input [2:0] col, input isCorf,
 					2: aluOp = OP_SUB;
 					3: aluOp = OP_ADD;
 					4: aluOp = OP_ROXR;
+					6: aluOp = OP_MULS1;	// 68010
+					7: aluOp = OP_MULS;
 					endcase
                
 				row[8]:
@@ -828,6 +885,7 @@ module ccrTable(
 			endcase
 		
 		5:			ccrMask = row[1] ? KNZ10 : 5'b0;
+		6, 7:		ccrMask = row[7] ? KNZ00 : CUNUSED;		// 68010 MUL steps
 		default:	ccrMask = CUNUSED;
 		endcase
 	end

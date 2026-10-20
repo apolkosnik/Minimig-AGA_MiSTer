@@ -85,3 +85,64 @@ The update of the CCR flags is also time critical. Some compilers might benefit 
 #      -to [get_keepers fx68k:fx68k|excUnit:excUnit|fx68kAlu:alu|pswCcr[*]] 1
 # set_multicycle_path -start -hold -from [fx68k:fx68k|excUnit:excUnit|fx68kAlu:alu|oper[*]]
 #      -to [get_keepers fx68k:fx68k|excUnit:excUnit|fx68kAlu:alu|pswCcr[*]] 1
+
+68010 mode
+
+The cpu010 input selects the 68010 programming model. It is sampled while extReset is asserted. With cpu010 low the
+core is the unmodified 68000: the original micro and nanocode, and the same bus cycles.
+
+In 68010 mode the core has:
+
+- VBR, SFC and DFC. VBR is cleared on reset and relocates all exception vectors except the reset vectors.
+  VBR is also an output, for systems that need the NMI or other vector addresses.
+- MOVEC with SFC, DFC, USP and VBR. Other control registers are an illegal instruction.
+- MOVES (byte, word, long), using SFC for reads and DFC for writes. The condition codes are not affected,
+  a byte moved to an address register is sign extended.
+- RTD, and MOVE from CCR. MOVE from SR is privileged.
+- BKPT runs a breakpoint acknowledge cycle (CPU space, address 0, the data is ignored), then takes the illegal
+  instruction exception.
+- No read before the write in CLR, Scc, MOVE from SR and MOVE from CCR to memory.
+- Format 0 exception stack frames (SR, PC, format/vector offset) for all exceptions except bus and address errors.
+- Format 8 stack frames (29 words) for bus and address errors: the fault address, the special status word (RR, IF,
+  DF, RM, BY, RW, FC), the data output, data input and instruction input buffers, and 16 words of internal state.
+- RTE checks the frame format. Format 0 returns. Format 8 reads the 26 used words of the frame, checks the version
+  number (bits 13:10 of the first internal word, SP+26, must be 0), restores the internal state, reruns the faulted
+  bus cycle and continues the faulted instruction. With the RR bit of the SSW set the handler did the cycle: a read
+  takes the data input buffer of the frame, a write is not repeated. To abandon the faulted instruction a handler
+  replaces the frame with a format 0 frame. Any other format, or a wrong version number, is a format error
+  (vector 14) with SR and SP unchanged and the address of the RTE stacked.
+- Loop mode: a one word loopable instruction (Table A-1 of the User's Manual) followed by DBcc with displacement -4
+  executes without instruction fetches after the first iteration. Interrupts are not taken between the
+  instruction and the DBcc in loop mode.
+- The 68010 instruction and exception timing (Section 9 of the M68000 User's Manual, with the corrections of WinUAE,
+  which were measured on a 68010).
+
+The internal state words of the format 8 frame (SP+28 to SP+56, then SP+26): AU (2 words), AT (2), ALU latch,
+ALUE, ALUB, DBIN, IR, IRD, FTU, MOVEM mask, MOVEC/MOVES extension word, a word with the synthesized instruction
+state, the MOVEM register, the ALU core flags and DCR, a word with DCR and the data capture of the faulted cycle,
+and at SP+26 the microaddress to continue with (bits 9:0). The layout is specific to this core, a frame stacked by
+another 68010 or built by software can't be continued.
+
+Differences from a 68010 that remain:
+
+- Timing: DIVS with a negative dividend or divisor takes 2-4 clocks more than 120 or 122, and 18 clocks (16) when
+  it overflows with a negative dividend: the 68000 microcode negates the dividend and the result in 16 bit ALU
+  steps. BKPT takes 42 clocks with an acknowledge cycle ended by DTACK without wait states (as WinUAE; the manual's
+  45 is an odd count no sequence of bus cycles gives).
+- In loop mode, MOVE and CLR to memory and ADDX, SUBX and CMPM long take 2 to 4 clocks per iteration more than
+  the loop mode tables, the <ea>,Dn operations 2 clocks less.
+- The faulted bus cycle of a read-modify-write (TAS) is rerun as a plain read or write.
+
+Implementation: the microrom has two banks selected by the 68010 mode. Bank 0 is the original 68000 microcode.
+Bank 1 is a copy with next-address patches, some nanowords replaced (the micro to nano address table has a 68010
+section for them), and the new microroutines in microaddresses the 68000 does not use. The new nanowords have extra
+control bits (see the NANO_ localparams in fx68k.sv). A few datapath additions are used in 68010 mode only: the high
+words of the operands of long register ALU operations are latched so the high word operation overlaps the write of
+the low result, the ALU has a combined add/subtract and shift step for MULU/MULS, the AU input can depend on the
+branch condition (Bcc.B, DBcc) or be the displacement of RTD, and AOB can be loaded from PC (DIVU starts the
+prefetch at the end of the instruction before the division, so that an overflow ends at once). MOVEC and MOVES have a short prologue that latches the extension word and loads IR
+with an equivalent MOVE USP or MOVE opcode, which then executes on the original microcode with register and function
+code overrides. CLR to memory executes as MOVE from a zero register. The ROM images and the micro to nano address
+tables are generated by ucode010/gen_ucode010.py from the 68000 ROMs in that directory.
+
+Tests: rtl/sim/fx68k.

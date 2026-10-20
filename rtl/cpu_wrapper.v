@@ -162,8 +162,9 @@ reg         lds_in;
 reg  [15:0] chip_data;
 reg  [31:0] vbr;
 
+// 68000 and 68010 run on FX68K, 68020 and 68030 on TG68K
 always @* begin
-	if(cpucfg[1:0]) begin
+	if(cpucfg[1]) begin
 		cpu_dout     = cpu_dout_p;
 		cpu_addr     = cpu_addr_m;
 		cpustate     = cpustate_p;
@@ -190,7 +191,7 @@ always @* begin
 		cpu_addr     = {cpu_addr_o,1'b0};
 		cpustate     = as_o ? 2'b01 : ~{wr_o,wr_o};
 		cacr         = 1;
-		vbr          = 0;
+		vbr          = vbr_o;
 		wr           = wr_o;
 		uds_in       = uds_o;
 		lds_in       = lds_o;
@@ -269,6 +270,7 @@ cpu_inst_p
 wire [15:0] cpu_dout_o;
 wire [23:1] cpu_addr_o;
 wire  [2:0] fc_o;
+wire [31:0] vbr_o;
 wire        wr_o;
 wire        as_o;
 wire        uds_o;
@@ -305,7 +307,10 @@ fx68k cpu_inst_o
 	.IPL2n(chip_ipl[2]),
 	.iEdb(cpu_din),
 	.oEdb(cpu_dout_o),
-	.eab(cpu_addr_o)
+	.eab(cpu_addr_o),
+
+	.cpu010(cpucfg[1:0] == 2'b01),	// 68010 mode, sampled on reset
+	.VBR(vbr_o)
 );
 
 wire cpu_req = (cpustate != 1);

@@ -115,6 +115,10 @@ New video modes will appear in ScreenMode preference. For more screen modes use 
 If you want to see RTG video on VGA output, then set vga_scaler=1 in MiSTer.ini.
 RTG is available only for 68020 CPU.
 
+### 68000 and 68010
+
+The 68000 and the 68010 of the System page run on the cycle exact FX68K core at the speed of a stock A500. The 68010 has the VBR, SFC and DFC registers, MOVEC, MOVES, RTD, BKPT and MOVE from CCR, a privileged MOVE from SR, the 68010 exception stack frames (format 0, and format 8 with the continuation of the faulted instruction for bus and address errors), loop mode, and the 68010 instruction timing.
+
 ### 68EC020
 
 The 68EC020 of the System page is the CPU of a stock A1200, cycle exact: AIBB and SysInfo give the speed of a real A1200 with no Fast RAM. With the AGA chipset it reads and writes chip RAM 32 bits at a time, as the A1200 does.
@@ -204,6 +208,8 @@ ARM firmware updates and Minimig-tc64 port changes by Christian Vogelsang ([mini
 MiSTer project by Sorgelig ([MiSTer](https://github.com/MiSTer-devel)).
 
 TG68K.C core by Tobias Gubener.
+
+FX68K core by Jorge Cwik, with a 68010 mode added for this core.
 
 
 ## Links & more info

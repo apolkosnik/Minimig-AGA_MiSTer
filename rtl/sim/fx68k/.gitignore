@@ -1,0 +1,9 @@
+work/
+microrom.mem
+nanorom.mem
+transcript
+modelsim.ini
+*.wlf
+dump_*.txt
+__pycache__/
+*.vstf
