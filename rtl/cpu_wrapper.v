@@ -35,7 +35,10 @@ module cpu_wrapper
 	input             clk,
 	input             clk_cpu,         // 2x clk, edges aligned: the AP68060's processor clock
 	input             clk_mem,         // DDRAM_CLK: the processor's Fast RAM port
-	input             fr_dma_wr,       // (clk_mem) ddram_ctrl: a DMA write reached DDR3
+	input             fr_dma_req,      // ddram_ctrl: a DMA write reached DDR3 (toggle) ...
+	output            fr_dma_ack,      // ... the Fast RAM port's cache is clear (toggle)
+	output      [7:0] fr_q_done,       // (clk_mem) the Fast RAM port's queue, for DMA ordering
+	output      [4:0] fr_q_pend,
 	// the processor's Fast RAM port: an Avalon-MM master on clk_mem (Minimig.sv
 	// gives it priority over ddram_ctrl in front of DDRAM)
 	output     [28:0] fr_address,
@@ -111,7 +114,7 @@ module cpu_wrapper
 wire dcache_sw_en_p;
 assign dcache_sw_en = dcache_sw_en_p;
 
-assign ramsel       = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
+assign ramsel       = cpu_req_go & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
 
 // NMI
@@ -189,7 +192,7 @@ always @* begin
 	chip_addr    = cpu_addr_p[23:1];
 	chip_din     = cpu_dout_p;
 	chip_data    = chipdout_i;
-	fastchip_sel = cpu_req & !cpu_addr_p[31:24];
+	fastchip_sel = cpu_req_go & !cpu_addr_p[31:24];
 	fastchip_lw  = longword;
 end
 
@@ -231,7 +234,10 @@ ap060_tg68k_compat #(.NO_FPU(AP060_FPU == 0), .DEBUG_CAPTURE(0)) cpu_inst_p
 	.z3ram_base1(z3ram_base1),
 	.z3ram_ena1(z3ram_ena1),
 	.clk_mem(clk_mem),
-	.fr_dma_wr(fr_dma_wr),
+	.fr_dma_req(fr_dma_req),
+	.fr_dma_ack(fr_dma_ack),
+	.fr_q_done(fr_q_done),
+	.fr_q_pend(fr_q_pend),
 	.fr_address(fr_address),
 	.fr_burstcount(fr_burstcount),
 	.fr_read(fr_read),
@@ -245,6 +251,10 @@ ap060_tg68k_compat #(.NO_FPU(AP060_FPU == 0), .DEBUG_CAPTURE(0)) cpu_inst_p
 
 
 wire cpu_req = (cpustate != 1);
+// (the request goes to the memories and peripherals once the stock-speed
+// spacing after the previous access has passed: below)
+reg  [3:0] cooldown;
+wire cpu_req_go = cpu_req & ~(cpucfg[2] & (cooldown != 4'd0));
 
 wire cchip = turbochip_d & (!cpustate | (dcache_d & (cpustate != 2'd3)));
 wire ckick = turbokick_d & (!cpustate | dcache_d);
@@ -265,21 +275,27 @@ always @(posedge clk) begin
 	end
 end
 
+// Stock speed: a few clocks between the processor's accesses.  They are
+// spent before an access is dispatched (cpu_req_go), never inside one: a
+// peripheral that acts on every clock it is selected (Akiko's C2P port
+// advances its pointer each clock of a write or read) must see one normal
+// access, not one held for the throttle.
 wire stock_speed   = cpucfg[2];
-wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready;
+wire clkena_p_base = ~cpu_req | (cpu_req_go & (chipready | ramready | fastchip_ready));
 
-reg [3:0] cooldown;
 always @(posedge clk) begin
-	if (~reset)                                cooldown <= 4'd0;
-	else if (cooldown != 4'd0)                 cooldown <= cooldown - 4'd1;
-	else if (stock_speed & clkena_p_base)      cooldown <= 4'd4;
+	if (~reset)                                    cooldown <= 4'd0;
+	else if (cooldown != 4'd0)                     cooldown <= cooldown - 4'd1;
+	// (not between the two words of a long word: Gayle's 32-bit IDE data
+	// port takes them as one access, its longword state held across them)
+	else if (stock_speed & cpu_req & clkena_p_base & ~longword) cooldown <= 4'd4;
 end
-wire clkena_p_throttled = clkena_p_base & (cooldown == 4'd0);
+wire clkena_p_throttled = clkena_p_base;
 
 reg       chipreq;
 reg [2:0] cpu_ipl;
 always @(posedge clk) begin
-	chipreq <= cpu_req & ~ramsel & ~fastchip_selack;
+	chipreq <= cpu_req_go & ~ramsel & ~fastchip_selack;
 	cpu_ipl <= ipl_i;
 end
 

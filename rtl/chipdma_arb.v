@@ -27,6 +27,7 @@ module chipdma_arb
 	input       [7:0] cdtv_dma_wbyte,
 	output      [7:0] cdtv_dma_rbyte,
 	output            cdtv_dma_ack,
+	output            cdtv_arm,       // the CDTV request was taken: one ack is owed for it
 
 	output     [24:1] chip_out_addr,
 	output            chip_out_l,
@@ -132,6 +133,7 @@ wire start_candidate = (state == S_IDLE) & c_7m_rise & any_req;
 wire arm_now = start_candidate & minimig_idle;
 
 assign akiko_arm = arm_now & ~arming_is_cdtv;
+assign cdtv_arm  = arm_now &  arming_is_cdtv;
 
 wire [24:1] ak_addr_w    = start_candidate ? {1'b0, live_baddr[23:1]} : ak_addr;
 wire        ak_l_w       = start_candidate ? ~live_baddr[0]           : ak_l;

@@ -27,6 +27,13 @@
 // through, no allocation), and they reach DDR3 in order with the reads,   //
 // so a read never overtakes a write to the same address.                   //
 //                                                                          //
+// Prefetch (PF_LINES, 0..3): a cache miss that allocates reads the next   //
+// PF_LINES lines in the same DDR3 burst, after its own line (whose        //
+// latency is unchanged), and allocates them too.  Reads wait until the    //
+// burst is in; a write posted meanwhile to one of those lines keeps it    //
+// out of the cache (its DDR3 read may predate the write), as do a clear  //
+// and a reset.                                                             //
+//                                                                          //
 // Coherence: the buffers and the cache follow the processor's cache       //
 // maintenance -- a CACR clear of either cache (CI, CEI, CD, CED) empties   //
 // the buffers and sweeps the cache invalid (512 clocks, reads go to DDR3   //
@@ -45,7 +52,8 @@
 //--------------------------------------------------------------------------//
 
 module ap030_fastram_fe
-#(parameter NATIVE_PORT = 0)
+#(parameter NATIVE_PORT = 0,
+  parameter PF_LINES    = 0)
 (
 	input             clk,
 	input             rst,
@@ -128,7 +136,23 @@ reg        rd_ent;                // the buffer it fills
 reg        rd_half;               // next beat expected
 reg        rd_drop;               // it belongs to a cycle a reset abandoned
 
-assign rsp_re = rd_pend && !rsp_rempty;
+// prefetched lines: received after the line read, staged, then written
+// into the cache
+reg  [1:0] pf_left;               // lines still to receive
+reg        pf_half;               // next beat of the one being received
+reg  [1:0] pf_i;                  // its number (0: the line after the miss)
+reg [28:1] pf_base;               // the first prefetched line
+reg [31:0] pf_d [0:3];            // the staged line
+reg        pf_wpend;              // staged, to be written into the cache
+reg  [1:0] pf_wi;                 // its number
+reg  [3:0] pf_kill;               // per line: not allocated (written meanwhile, clear)
+wire [28:1] pf_wline = pf_base + {26'd0, pf_wi};
+wire       pf_busy = (pf_left != 2'd0) || pf_wpend;
+localparam [1:0] PF_N     = PF_LINES;                 // (plain Verilog sizes)
+localparam [3:0] PF_BEATS = 2 * (PF_LINES + 1);
+
+// (a staged line is written before the next one's beats are taken)
+assign rsp_re = !rsp_rempty && (rd_pend || (pf_left != 2'd0 && !pf_wpend));
 
 // longwords of a beat: word k at bits 16k+15..16k, long = {word 2m, word 2m+1}
 function [31:0] beat_long; input [63:0] b; input m;
@@ -231,18 +255,21 @@ wire [31:0] l2_d_q [0:3];
 // data write, and posting and new lookups wait for it (a read of what is
 // being written would return the old contents)
 wire        f_wr     = f_pend && (l2s != L_UPD) && !clear && !rst;
-wire        post_now = wcap && !wcap_ack && !f_wr;
-wire        rd_miss  = access_active && access_rw && !(n_active && n_emit) && !rd_hit && !rd_pend && !wcap && cmd_wlevel <= 4'd7;
+// a staged prefetched line is written after the fill, in a clock of its own
+wire        pf_wr    = pf_wpend && !pf_kill[pf_wi] && !f_pend && (l2s != L_UPD) && !clear && !rst && !sweeping;
+wire        post_now = wcap && !wcap_ack && !f_wr && !pf_wr;
+wire        rd_miss  = access_active && access_rw && !(n_active && n_emit) && !rd_hit && !rd_pend && !pf_busy && !wcap && cmd_wlevel <= 4'd7;
 wire        look_go  = rd_miss && !access_ci && !clear && !sweeping && (l2s == L_IDLE) && !f_pend;
 wire        ddr_go   = rd_miss && (access_ci || clear || sweeping) && (l2s != L_LOOK);
 wire        look_hit = (l2s == L_LOOK) && !sweeping && !clear && l2_tag_q[19] && (l2_tag_q[18:0] == lk_line[28:10]);
 wire        upd_hit  = (l2s == L_UPD) && !sweeping && !clear && !rst && l2_tag_q[19] && (l2_tag_q[18:0] == u_tag);
 assign n_ready = NATIVE_PORT && !rst && as_n && !as_d && !n_active &&
-                 !rd_pend && !wcap && !f_pend && l2s == L_IDLE &&
-                 (n_rw ? cmd_wlevel <= 4'd7 : wr_room);
+                 !rd_pend && !wcap && !f_pend && !pf_wpend && l2s == L_IDLE &&
+                 (n_rw ? (cmd_wlevel <= 4'd7 && pf_left == 2'd0) : wr_room);
 wire native_take = n_req && n_ready;
 wire native_post = native_take && !n_rw;
 wire [28:0] post_addr = post_now ? w_addr : n_ddr_addr;
+wire [27:0] pf_off    = post_addr[28:1] - pf_base;   // its line, from the first prefetched
 wire [1:0] post_long = post_now ? w_long : n_addr[3:2];
 wire [3:0] post_lanes = post_now ? w_lanes : n_be;
 wire [31:0] post_data = post_now ? w_data : n_wdata;
@@ -268,19 +295,20 @@ task native_reply;
  end
 endtask
 
-wire        tag_we   = sweeping || f_wr;
-wire  [8:0] tag_wa   = sweeping ? sw_idx : f_idx;
-wire [19:0] tag_wd   = sweeping ? 20'd0  : {1'b1, f_tag};
+wire        tag_we   = sweeping || f_wr || pf_wr;
+wire  [8:0] tag_wa   = sweeping ? sw_idx : f_wr ? f_idx : pf_wline[9:1];
+wire [19:0] tag_wd   = sweeping ? 20'd0  : {1'b1, f_wr ? f_tag : pf_wline[28:10]};
 
 ap030_l2ram #(.AW(9), .DW(20)) l2_tag (
 	.clk(clk), .we(tag_we), .wa(tag_wa), .wd(tag_wd), .ra(l2_ra), .q(l2_tag_q)
 );
 genvar gl;
 generate for (gl = 0; gl < 4; gl = gl + 1) begin : g_l2d
-	wire dwe = (f_wr && !sweeping) || (upd_hit && u_long == gl);
+	wire dwe = (f_wr && !sweeping) || pf_wr || (upd_hit && u_long == gl);
 	ap030_l2ram_be #(.AW(9)) l2_data (
-		.clk(clk), .we(dwe), .wa(f_wr ? f_idx : u_idx),
-		.be(f_wr ? 4'b1111 : u_lanes), .wd(f_wr ? lb_d[f_ent][gl] : u_data),
+		.clk(clk), .we(dwe), .wa(f_wr ? f_idx : pf_wr ? pf_wline[9:1] : u_idx),
+		.be((f_wr || pf_wr) ? 4'b1111 : u_lanes),
+		.wd(f_wr ? lb_d[f_ent][gl] : pf_wr ? pf_d[gl] : u_data),
 		.ra(l2_ra), .q(l2_d_q[gl])
 	);
 end endgenerate
@@ -310,6 +338,8 @@ always @(posedge clk) begin
 		if (rd_pend) rd_drop <= 1'b1;
 		sweeping <= 1'b1; sw_idx <= 9'd0;
 		l2s <= L_IDLE; f_pend <= 1'b0; f_alloc <= 1'b0;
+		// prefetched lines still in flight complete into nothing
+		pf_kill <= 4'hF; pf_wpend <= 1'b0;
 	end else begin
 		// cache maintenance: the buffers are emptied; a fill in flight
 		// serves only the cycle waiting for it; the cache is swept
@@ -320,7 +350,10 @@ always @(posedge clk) begin
 			end
 			sweeping <= 1'b1; sw_idx <= 9'd0;
 			f_alloc <= 1'b0; f_pend <= 1'b0;
+			pf_kill <= 4'hF; pf_wpend <= 1'b0;
 		end
+		// a staged prefetched line: written, or not to be
+		if (pf_wpend && (pf_wr || pf_kill[pf_wi] || sweeping)) pf_wpend <= 1'b0;
 		// Buffered native reads and continuation beats do not traverse the
 		// pin-bus sequencer. A cache lookup hit emits its first word below.
 		if (n_active && n_rw_q && (n_emit || (rd_hit && !rd_pend && l2s == L_IDLE)))
@@ -341,7 +374,13 @@ always @(posedge clk) begin
 				if (n_active) native_reply(l2_d_q[n_pos], n_pos, n_left);
 			end else begin
 				cmd_we    <= 1'b1;
-				cmd_wdata <= {1'b0, lk_line, 1'b0, 8'hFF, 64'd0};
+				// (beats: the line, and the prefetched lines after it when it allocates)
+				cmd_wdata <= {1'b0, lk_line, 1'b0, 8'hFF, 60'd0,
+				              (PF_LINES != 0 && !sweeping && !clear) ? PF_BEATS : 4'd0};
+				if (PF_LINES != 0 && !sweeping && !clear) begin
+					pf_left <= PF_N; pf_half <= 1'b0; pf_i <= 2'd0;
+					pf_base <= lk_line + 28'd1; pf_kill <= 4'h0;
+				end
 				rd_pend   <= 1'b1;
 				rd_ent    <= lk_ent;
 				rd_half   <= 1'b0;
@@ -358,6 +397,9 @@ always @(posedge clk) begin
 			cmd_wdata <= {1'b1, post_addr, post_be, post_data64};
 			wcap_ack <= post_now;
 			if (native_post) native_reply(32'd0, n_addr[3:2], 3'd1);
+			// a prefetched line not yet in the cache: its data may predate this write
+			if (pf_busy && pf_off < PF_LINES)
+				pf_kill[pf_off[1:0]] <= 1'b1;
 			for (e = 0; e < 2; e = e + 1)
 				if (lb_valid[e] && lb_line[e] == post_addr[28:1])
 					lb_d[e][post_long] <= merge(lb_d[e][post_long], post_data, post_lanes);
@@ -408,8 +450,20 @@ always @(posedge clk) begin
 			lb_line[prog]  <= cur_line;
 		end
 	end
+	// a prefetched line's beat (they follow the line read's)
+	if (rsp_re && !rd_pend) begin
+		pf_d[{pf_half, 1'b0}] <= beat_long(rsp_rdata, 1'b0);
+		pf_d[{pf_half, 1'b1}] <= beat_long(rsp_rdata, 1'b1);
+		pf_half <= !pf_half;
+		if (pf_half) begin
+			pf_left  <= pf_left - 2'd1;
+			pf_i     <= pf_i + 2'd1;
+			pf_wi    <= pf_i;
+			pf_wpend <= !rst && !clear;
+		end
+	end
 	// the line arrives as two beats (lower half first)
-	if (rsp_re) begin
+	if (rsp_re && rd_pend) begin
 		if (!rd_drop && !rst) begin
 			lb_d[rd_ent][{rd_half, 1'b0}] <= beat_long(rsp_rdata, 1'b0);
 			lb_d[rd_ent][{rd_half, 1'b1}] <= beat_long(rsp_rdata, 1'b1);
@@ -442,6 +496,9 @@ initial begin
 	wcap = 1'b0; wcap_done = 1'b0; wcap_ack = 1'b0; cmd_we = 1'b0; cmd_wdata = 0;
 	beat_idx = 2'd0; burst_active = 1'b0; sterm_rec = 1'b0;
 	w_lanes = 4'd0; w_data = 32'd0; w_addr = 29'd0; w_long = 2'd0;
+	pf_left = 2'd0; pf_half = 1'b0; pf_i = 2'd0; pf_base = 28'd0; pf_wpend = 1'b0;
+	pf_wi = 2'd0; pf_kill = 4'h0;
+	for (k = 0; k < 4; k = k + 1) pf_d[k] = 32'd0;
 	l2s = L_IDLE; sweeping = 1'b1; sw_idx = 9'd0; f_alloc = 1'b0; f_pend = 1'b0;
 	lk_ent = 1'b0; lk_line = 28'd0; f_idx = 9'd0; f_tag = 19'd0; f_ent = 1'b0;
 	u_idx = 9'd0; u_tag = 19'd0; u_long = 2'd0; u_lanes = 4'd0; u_data = 32'd0;

@@ -81,7 +81,10 @@ module ap060_tg68k_compat #(
 	// Fast RAM: the processor's own port into DDR3 (ap030_fastram_fe/_be,
 	// as the AP68030's Minimig integration): an Avalon-MM master on clk_mem
 	input             clk_mem,
-	input             fr_dma_wr,       // (clk_mem) a DMA write reached Fast RAM's DDR3
+	input             fr_dma_req,      // ddram_ctrl: flips when a DMA write reached DDR3 ...
+	output reg        fr_dma_ack = 1'b0, // ... answered once the Fast RAM port's cache is clear
+	output      [7:0] fr_q_done,       // (clk_mem) the port's commands completed ...
+	output      [4:0] fr_q_pend,       // ... and queued or in progress (DMA ordering)
 	output     [28:0] fr_address,
 	output      [7:0] fr_burstcount,
 	output            fr_read,
@@ -132,6 +135,9 @@ end
 //--------------------------------------------------------------------------
 // the processor
 //--------------------------------------------------------------------------
+// an interrupt acknowledge is still on its way (below): the processor is
+// shown no interrupt meanwhile
+wire        ipl_hold;
 wire [31:0] a_o, d_o, cacr, vbr, dbg_pc;
 wire        dbg_retire, dbg_halted;
 wire        d_oe, rw_n, ts_n, rsto_n, ciout_n;
@@ -150,7 +156,7 @@ ap68060 #(.NO_FPU(NO_FPU)) cpu (
 	.ciout_n(ciout_n), .lock_n(), .locke_n(), .lock_oe(),
 	.ts_n(ts_n), .tip_n(), .tip_oe(), .sas_n(), .sas_oe(),
 	.ta_n(ta_n & f_ta_n), .tea_n(1'b1), .tra_n(1'b1), .tci_n(tci_n), .tbi_n(tbi_n), .cla_n(1'b1),
-	.ipl_n(nrst_c ? ipl_in : 3'b111), .avec_n(avec_n),
+	.ipl_n(nrst_c ? (ipl_hold ? 3'b111 : ipl_in) : 3'b111), .avec_n(avec_n),
 	.br_n(), .bg_n(1'b0), .bgr_n(1'b1),
 	.bb_n_i(bb_oe ? bb_n_o : 1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
 	.btt_n_i(btt_oe ? btt_n_o : 1'b1), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
@@ -158,11 +164,18 @@ ap68060 #(.NO_FPU(NO_FPU)) cpu (
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted), .dbg_vbr(vbr), .dbg_cacr(cacr)
 );
 
-// RSTO and VBR into clk (VBR: MOVEC only; nmi_addr in cpu_wrapper)
+// RSTO (rsto_out, below: after the posted writes) and VBR into clk (VBR:
+// MOVEC only; nmi_addr in cpu_wrapper)
+reg        rsto_out = 1'b1;
+reg        rsto_pend = 1'b0;
+// the external reset is still to come or in progress: transfers wait
+// (C_ALLOC; Fast RAM too, sent there instead of ap060_fastram meanwhile)
+wire       reset_hold = rsto_pend || !rsto_out;
+
 reg  [1:0] rsto_k = 2'b11;
 reg [31:0] vbr_k1 = 0, vbr_k = 0;
 always @(posedge clk) begin
-	rsto_k <= {rsto_k[0], rsto_n};
+	rsto_k <= {rsto_k[0], rsto_out};
 	vbr_k1 <= vbr;  vbr_k <= vbr_k1;
 end
 assign nresetout = rsto_k[1];
@@ -217,6 +230,9 @@ reg  [31:0] wd;                    // (debug capture: the write beat's data)
 reg   [1:0] k_tgl_c1 = 2'b00, k_tgl_c = 2'b00;
 always @(posedge clk_cpu) begin k_tgl_c1 <= k_tgl; k_tgl_c <= k_tgl_c1; end
 wire  [1:0] busy = p_tgl ^ k_tgl_c;
+// (the interrupt acknowledges, below)
+wire x_intreg = (xa[31:1] == 31'h006FF84D) || (xa[31:1] == 31'h006FF84E);   // $DFF09A, $DFF09C
+reg  [1:0] ackw = 2'b00;           // the slot holds an INTENA/INTREQ write
 
 // cachable: Fast RAM (Zorro II $200000-$9FFFFF, the Zorro III windows) and
 // Kickstart ROM ($F80000-$FFFFFF, $E00000-$E7FFFF)
@@ -241,7 +257,7 @@ wire ts_z30  = (a_o[31:27] == z3b0_c) && z3e0_c[1];
 wire ts_z31  = (a_o[31:28] == z3b1_c) && z3e1_c[1];
 wire ts_z2   = (a_o[31:24] == 8'h00) && (a_o[23] ^ |a_o[22:21]) && z2e_c[1];
 wire ts_nmi  = rw_n && (tm == 3'd1 || tm == 3'd5) && (a_o[31:2] == nmi_vec[31:2]);
-wire ts_fast = (tt != 2'd3) && !ts_nmi && (ts_z30 || ts_z31 || ts_z2);
+wire ts_fast = (tt != 2'd3) && !ts_nmi && (ts_z30 || ts_z31 || ts_z2) && !reset_hold;
 
 // the processor's DDR3 word address, as memory_router maps Zorro RAM for
 // ddram_ctrl (ramaddr; ddram_ctrl's 64-bit word is {3'b001, ramaddr[28:3]})
@@ -252,23 +268,25 @@ wire [31:0] f_d;
 
 // DMA into Fast RAM (Akiko, CDTV through chipdma_arb and ddram_ctrl): the
 // Fast RAM port's own cache is below the 68060's and invisible to its cache
-// instructions, so each DMA write clears it.  A write keeps a level up for
-// eight clk_mem cycles (two processor clocks at least, so none is missed and
-// writes in a row merge); held high, the clear restarts the sweep and lets
-// no fill allocate, so the cache refills only from DDR3 that holds them all.
-reg   [3:0] dma_hold = 4'd0;
-always @(posedge clk_mem) dma_hold <= fr_dma_wr ? 4'd8 : (dma_hold != 4'd0) ? dma_hold - 4'd1 : 4'd0;
-reg   [1:0] dma_clr_c = 2'b00;
-always @(posedge clk_cpu) dma_clr_c <= {dma_clr_c[0], dma_hold != 4'd0};
+// instructions, so each DMA write clears it.  ddram_ctrl flips fr_dma_req
+// once DDR3 has accepted the write; the clear is applied on the edge that
+// flips fr_dma_ack back, and ddram_ctrl acknowledges the DMA only after it
+// sees that -- so a completed DMA write is in memory and in no cache below
+// the 68060 (a fill in flight then is not allocated, the sweep refills
+// from DDR3).  Not reset: an answer is owed whatever the processor does.
+reg   [1:0] dma_req_c = 2'b00;
+always @(posedge clk_cpu) dma_req_c <= {dma_req_c[0], fr_dma_req};
+wire        dma_clr = (dma_req_c[1] != fr_dma_ack);
+always @(posedge clk_cpu) fr_dma_ack <= dma_req_c[1];
 
 ap060_fastram fastram (
-	.clk(clk_cpu), .clk_mem(clk_mem), .rst(!nrst_c), .bclk_en(1'b1), .clear(dma_clr_c[1]),
+	.clk(clk_cpu), .clk_mem(clk_mem), .rst(!nrst_c), .bclk_en(1'b1), .clear(dma_clr),
 	// (reset modes: no ignore states, no extra write hold -- as the core
 	// is reset here, IPL and D15-D0 all negated / zero)
 	.m_ign(1'b0), .m_cnt(16'd0), .m_hold(1'b0),
 	.a(a_o), .rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .bs_n(bs_n), .ts_n(ts_n), .ciout_n(ciout_n),
 	.d_cpu(d_o), .sel(ts_fast), .ddr_addr({3'b001, ts_ramaddr[28:3]}),
-	.ta_n(f_ta_n), .d_o(f_d), .d_oe(f_doe), .busy(f_busy),
+	.ta_n(f_ta_n), .d_o(f_d), .d_oe(f_doe), .busy(f_busy), .q_done(fr_q_done), .q_pend(fr_q_pend),
 	.avm_address(fr_address), .avm_burstcount(fr_burstcount), .avm_read(fr_read), .avm_write(fr_write),
 	.avm_writedata(fr_writedata), .avm_byteenable(fr_byteenable), .avm_waitrequest(fr_waitrequest),
 	.avm_readdata(fr_readdata), .avm_readdatavalid(fr_readdatavalid)
@@ -314,6 +332,7 @@ always @(posedge clk_cpu or negedge nrst_c) begin
 		d_i    <= 32'd0;
 		p_tgl  <= 2'b00;           // (and k_tgl is 0 in reset: nothing owed)
 		ws     <= 1'b0;
+		ackw   <= 2'b00;
 	end
 	else begin
 		ta_n   <= 1'b1;
@@ -322,13 +341,19 @@ always @(posedge clk_cpu or negedge nrst_c) begin
 		avec_n <= 1'b1;
 		// a Fast RAM line's beats (ap060_fastram's TA): lw follows them too
 		if (!f_ta_n) beat <= beat + 2'd1;
+		// an acknowledge's slot answered: done (its posting, below, wins)
+		if (!busy[0]) ackw[0] <= 1'b0;
+		if (!busy[1]) ackw[1] <= 1'b0;
 		case (cst)
 			C_IDLE:
 				if (!ts_n) take_ts;
 			C_ALLOC:
 				// the address, attributes and write data stay driven until
 				// TA (MC68060UM 7.6): wait here for the slot as long as needed
-				if (!busy[ws]) begin
+				// -- and while the external reset (RSTO, below) is still to
+				// come or in progress: what follows RESET must not reach the
+				// chipset before the reset is over, or the reset undoes it
+				if (!busy[ws] && !reset_hold) begin
 					sa[ws]    <= xa;
 					ssiz[ws]  <= xsiz;
 					srd[ws]   <= xrd;
@@ -356,6 +381,7 @@ always @(posedge clk_cpu or negedge nrst_c) begin
 				end
 				else begin
 					p_tgl[ws] <= ~p_tgl[ws];   // posted: the clk half writes it
+					if (x_intreg) ackw[ws] <= 1'b1;
 					ws <= ~ws;
 					if (!ts_n) take_ts;
 					else cst <= C_IDLE;
@@ -384,6 +410,51 @@ always @(posedge clk_cpu or negedge nrst_c) begin
 				else cst <= C_IDLE;
 			default: cst <= C_IDLE;
 		endcase
+	end
+end
+
+// Interrupt acknowledges.  A handler writes INTREQ (or INTENA) to take its
+// request away and returns with RTE; the write is posted, so on the 68060
+// the RTE can complete before it reaches Paula -- through a busy chip bus
+// (bitplanes, the blitter) that can be microseconds -- and the request,
+// still raised, is taken a second time.  (The Player 6.1A, Nexus 7: its
+// CIA-B level 6 handler acknowledges and returns; a second entry runs its
+// second stage 826 us early and the looped samples start in the wrong
+// place.)  The processor waits for nothing here (TG68K and the 68030
+// finish each write first), so it is shown no interrupt while a write to
+// INTENA or INTREQ is queued, and for 64 clocks after it is done: the new
+// level reaches IPL through cpu_wrapper's 7 MHz sampling within that.
+reg  [6:0] ack_settle = 7'd0;
+always @(posedge clk_cpu) begin
+	if (!nrst_c) ack_settle <= 7'd0;
+	else if (ackw != 2'b00) ack_settle <= 7'd64;
+	else if (ack_settle != 7'd0) ack_settle <= ack_settle - 7'd1;
+end
+assign ipl_hold = (ackw != 2'b00) || (ack_settle != 7'd0);
+
+// RSTO waits for the posted writes: a write the processor saw acknowledged
+// may still be queued for the clk side (a chipset register, say), and RESET
+// must not reach the chipset before it does.  Once both slots are answered
+// and no transfer is open, RSTO goes out for 512 clocks at least, and for as
+// long as the processor drives it.
+reg  [9:0] rsto_cnt = 10'd0;
+always @(posedge clk_cpu) begin
+	if (!nrst_c) begin
+		rsto_out <= 1'b1; rsto_pend <= 1'b0; rsto_cnt <= 10'd0;
+	end
+	else if (!rsto_out) begin
+		if (rsto_cnt != 10'd0) rsto_cnt <= rsto_cnt - 10'd1;
+		else if (rsto_n) rsto_out <= 1'b1;
+	end
+	else if (!rsto_n || rsto_pend) begin
+		rsto_pend <= 1'b1;
+		// (a transfer held in C_ALLOC has reached nothing yet: it waits for
+		// the reset, and does not hold it back)
+		if (busy == 2'b00 && (cst == C_IDLE || cst == C_ALLOC || cst == C_ACK)) begin
+			rsto_out  <= 1'b0;
+			rsto_pend <= 1'b0;
+			rsto_cnt  <= 10'd511;
+		end
 	end
 end
 

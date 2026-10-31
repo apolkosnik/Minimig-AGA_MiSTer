@@ -279,6 +279,7 @@ module minimig
 	output [31:0] cdtv_dma_baddr,
 	output  [7:0] cdtv_dma_wbyte,
 	input         cdtv_dma_ack,
+	input         cdtv_dma_arm,
 
 	output        cdtv_nvr_dirty,
 	output        cdtv_card_dirty,
@@ -1106,7 +1107,8 @@ cdtv_bridge cdtv_bridge_inst
 	.cdtv_dma_we     (cdtv_dma_we          ),
 	.cdtv_dma_baddr  (cdtv_dma_baddr       ),
 	.cdtv_dma_wbyte  (cdtv_dma_wbyte       ),
-	.cdtv_dma_ack    (cdtv_dma_ack         )
+	.cdtv_dma_ack    (cdtv_dma_ack         ),
+	.cdtv_dma_arm    (cdtv_dma_arm         )
 );
 
 cdtv_nvram cdtv_nvram_inst

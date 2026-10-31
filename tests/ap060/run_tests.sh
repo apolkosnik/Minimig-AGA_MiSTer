@@ -18,6 +18,17 @@
 #   asm/t_dmacoh.s      DMA into Fast RAM (ddram_ctrl's DMA port, as Akiko and
 #                       CDTV): the Fast RAM port's own cache never serves
 #                       data older than it, around exec's cache maintenance
+#   asm/t_dmaord.s      DMA after the processor's queued Fast RAM writes: a
+#                       DMA read sees them, a DMA write is not overwritten
+#   asm/t_pfstale.s     the Fast RAM port's prefetched lines: a write or a
+#                       DMA while they are on their way is not lost
+#   asm/t_reset.s       RESET after a posted chipset write: RSTO waits for it
+#   asm/t_reset2.s      what follows RESET waits for the external reset
+#   asm/t_idebw.s       Gayle IDE sector reads, 32-bit (t_ide32) and 16-bit
+#                       (t_ide16), with the MMU as 68060.library sets it
+#   asm/t_irqack.s      an interrupt acknowledge (INTREQ) posted before RTE through
+#                       a busy chip bus: the request is taken once (Nexus 7)
+#   asm/t_c2p.s         Akiko's C2P port, one access per transfer (throttled too)
 #   asm/t_iplglitch.s   no interrupt at a level never raised: STOP waits for
 #                       level 3 while one IPL bit crosses late (ddr_iplskew)
 #   asm/core/t_bsrfault.s  fetch faults that must not wedge the decoder
@@ -41,7 +52,7 @@ R=../../rtl
 A=$R/ap060
 VASM=${VASM:-vasmm68k_mot}
 
-PROGS="t_ap060_sys t_irqstore t_l2stale t_nmi t_iplglitch t_clrloop t_dmacoh"
+PROGS="t_ap060_sys t_irqstore t_l2stale t_nmi t_iplglitch t_clrloop t_dmacoh t_dmaord t_pfstale t_reset t_reset2 t_c2p t_irqack"
 CORE="smoke t_integer t_stld t_bitfield_cache t_fpu_dis t_movem_restart"
 for t in $PROGS; do
 	$VASM -quiet -Fbin -m68040 -no-opt -L "$WORK/$t.lst" -o "$WORK/$t.bin" "asm/$t.s"
@@ -57,6 +68,12 @@ done
 $VASM -quiet -Fbin -m68040 -no-opt -DFASTOFS='$200000' -o "$WORK/t_bsrfault_f.bin" asm/core/t_bsrfault.s
 python3 bin2hex.py "$WORK/t_bsrfault_f.bin" "$WORK/t_bsrfault_f.hex"
 CORE="$CORE t_bsrfault_f"
+for w in 2 4; do
+	n=t_ide$((w * 8))
+	$VASM -quiet -Fbin -m68040 -no-opt -DCPU=60 -DNSEC=1 -DWIDTH=$w -DCM=3 -o "$WORK/$n.bin" asm/t_idebw.s
+	python3 bin2hex.py "$WORK/$n.bin" "$WORK/$n.hex"
+done
+CORE="$CORE t_ide16 t_ide32"
 # Dhrystone (c/, from the AP030 bench): dhry from chip RAM, dhry_fast from
 # Fast RAM with both caches on -- a long run of ordinary compiled code that
 # writes Fast RAM continuously; the bench checks every write reached DDR3
@@ -110,9 +127,11 @@ done
 
 fail=0
 # module benches: the DDR3 arbiter keeps a stalled command presented
-# (Avalon), ddram_ctrl takes read data that comes with waitrequest
+# (Avalon), ddram_ctrl takes read data that comes with waitrequest, a CDTV
+# DMA restarted after STOP waits for the stopped one's acknowledge
 for u in "arb_stall:$R/A2065/a2065_ddram_arbiter.v" \
-         "ddram_rdbusy:$R/ddram_ctrl.v $R/cpu_cache_new.v $R/A2065/a2065_ddram_arbiter.v sim_dpram.v"; do
+         "ddram_rdbusy:$R/ddram_ctrl.v $R/cpu_cache_new.v $R/A2065/a2065_ddram_arbiter.v sim_dpram.v" \
+         "cdtv_restart:$R/cdtv_bridge.v $R/chipdma_arb.v $R/memory_router.v sim_dpram.v"; do
 	n=${u%%:*}
 	# shellcheck disable=SC2086
 	if verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-TIMESCALEMOD \
@@ -127,8 +146,8 @@ done
 for c in $CONFIGS; do
 	name=${c%%:*}
 	for t in $PROGS $CORE; do
-		# t_dmacoh drives ddram_ctrl's DMA port: the DDR3 configurations only
-		[ "$t" = t_dmacoh ] && [ "$name" = simple ] && continue
+		# t_dmacoh, t_dmaord, t_pfstale drive ddram_ctrl's DMA port: the DDR3 configurations only
+		case "$t" in t_dmacoh|t_dmaord|t_pfstale) [ "$name" = simple ] && continue ;; esac
 		log="$WORK/${name}_$t.log"
 		if (cd "$WORK" && "./obj_$name/tb" "+prog=$t.hex" +timeout=80000000) > "$log" 2>&1 &&
 		   grep -q "^PASS" "$log" && ! grep -q "LOST WRITE" "$log"; then

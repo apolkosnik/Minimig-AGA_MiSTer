@@ -46,6 +46,12 @@ module ap060_fastram
 	output logic  [31:0] d_o,
 	output logic         d_oe,
 	output logic         busy,
+	// (clk_mem) DMA ordering: commands completed (a count that wraps) and
+	// commands queued or in progress -- a DMA that must follow every write
+	// the processor has posted waits until q_done has advanced by the
+	// q_pend it saw (ddram_ctrl)
+	output logic   [7:0] q_done,
+	output logic   [4:0] q_pend,
 
 	output logic  [28:0] avm_address,
 	output logic   [7:0] avm_burstcount,
@@ -77,14 +83,16 @@ ap060_fastram_bus bus (
 );
 
 logic         cmd_we, cmd_re, cmd_rempty;
+logic   [3:0] cmd_rlevel;
 logic [101:0] cmd_wdata, cmd_rdata;
 logic   [3:0] cmd_wlevel;
 logic         rsp_we, rsp_re, rsp_rempty;
 logic  [63:0] rsp_wdata, rsp_rdata;
-logic   [3:0] rsp_wlevel;
+logic   [4:0] rsp_wlevel;
 
 // (the pin bus of the front end is unused: AS negated, nothing selected)
-ap030_fastram_fe #(.NATIVE_PORT(1)) fe (
+// (a cache miss reads its line and the next three in one DDR3 burst)
+ap030_fastram_fe #(.NATIVE_PORT(1), .PF_LINES(3)) fe (
 	.clk(clk), .rst(rst),
 	.a(32'd0), .fc(3'd0), .siz(2'd0), .rw(1'b1), .as_n(1'b1), .d_o(32'd0), .d_oe(1'b0), .cbreq_n(1'b1),
 	.sel(1'b0), .ci(1'b0), .clear(clear), .ddr_addr(29'd0),
@@ -98,15 +106,15 @@ ap030_fastram_fe #(.NATIVE_PORT(1)) fe (
 
 ap030_async_fifo #(.W(102), .AW(3)) cmd_fifo (
 	.wclk(clk), .we(cmd_we), .wdata(cmd_wdata), .wfull(), .wlevel(cmd_wlevel),
-	.rclk(clk_mem), .re(cmd_re), .rdata(cmd_rdata), .rempty(cmd_rempty), .rlevel()
+	.rclk(clk_mem), .re(cmd_re), .rdata(cmd_rdata), .rempty(cmd_rempty), .rlevel(cmd_rlevel)
 );
 
-ap030_async_fifo #(.W(64), .AW(3)) rsp_fifo (
+ap030_async_fifo #(.W(64), .AW(4)) rsp_fifo (
 	.wclk(clk_mem), .we(rsp_we), .wdata(rsp_wdata), .wfull(), .wlevel(rsp_wlevel),
 	.rclk(clk), .re(rsp_re), .rdata(rsp_rdata), .rempty(rsp_rempty), .rlevel()
 );
 
-ap030_fastram_be be (
+ap030_fastram_be #(.RSP_DEPTH(16)) be (
 	.clk(clk_mem), .rst(1'b0),
 	.cmd_rdata(cmd_rdata), .cmd_rempty(cmd_rempty), .cmd_re(cmd_re),
 	.rsp_we(rsp_we), .rsp_wdata(rsp_wdata), .rsp_wlevel(rsp_wlevel),
@@ -114,5 +122,24 @@ ap030_fastram_be be (
 	.avm_writedata(avm_writedata), .avm_byteenable(avm_byteenable), .avm_waitrequest(avm_waitrequest),
 	.avm_readdata(avm_readdata), .avm_readdatavalid(avm_readdatavalid)
 );
+
+// completions as DDR3 sees them: a write accepted, a read's last beat in
+// (the back end takes one command at a time; a read's beats: bits 3..0 of
+// its data field, 0 for one line)
+logic       q_infl = 1'b0;
+logic [3:0] q_rl = 4'd0;           // beats of the read still to come
+initial q_done = 8'd0;
+always_ff @(posedge clk_mem) begin
+	if (cmd_re) begin
+		q_infl <= 1'b1;
+		q_rl   <= cmd_rdata[3:0] == 4'd0 ? 4'd2 : cmd_rdata[3:0];
+	end
+	if (avm_write && !avm_waitrequest) begin q_infl <= 1'b0; q_done <= q_done + 8'd1; end
+	if (avm_readdatavalid) begin
+		q_rl <= q_rl - 4'd1;
+		if (q_rl == 4'd1) begin q_infl <= 1'b0; q_done <= q_done + 8'd1; end
+	end
+end
+assign q_pend = {1'b0, cmd_rlevel} + {4'd0, q_infl};
 
 endmodule

@@ -7,8 +7,11 @@
 ; As exec does around DMA (CachePreDMA/CachePostDMA), the program pushes
 ; the 68060's data cache before and invalidates it after; then it must
 ; read what the DMA wrote.
-;   1  a line read (cached in the 68060 and in the port), then DMA over
-;      both its first long words: the new data
+;   1  a line read (cached in the 68060 and in the port), then one DMA
+;      write over it, read at once after its completion (the bench holds
+;      every DMA write off in DDR3 for 20000 cycles: a completion before
+;      the write is in memory and the port's cache cleared reads old
+;      data), then three more over both its first long words
 ;   2  sixteen DMA writes in a row over two lines read before: all new
 ;      (a clear per write, none missed when they come close together)
 ;   3  the port's cache refills afterwards: the same lines read twice more
@@ -60,7 +63,10 @@ start:
         ck      d0,#$11223344,1
         move.l  4(a0),d0
         ck      d0,#$55667788,2
-        dmaw    BUFW,$AABB
+        dmaw    BUFW,$AABB              ; one DMA write over the cached line:
+        cinva   dc                      ; its completion must mean the port's
+        move.l  (a0),d0                 ; cache no longer has the old data
+        ck      d0,#$AABB3344,5
         dmaw    BUFW+1,$CCDD
         dmaw    BUFW+2,$EEFF
         dmaw    BUFW+3,$0102

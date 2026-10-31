@@ -28,6 +28,7 @@ wire [23:0] dma_baddr;
 wire  [7:0] dma_wbyte;
 logic [7:0] dma_rbyte;
 logic       dma_ack;
+wire        dma_arm;    // chipdma_arb's akiko_arm: the request taken this clock
 
 akiko #(.NATIVE_CD32(1)) u_dut (
 	.clk(clk), .reset(reset),
@@ -37,7 +38,7 @@ akiko #(.NATIVE_CD32(1)) u_dut (
 	.akiko_irq(irq),
 	.dma_req(dma_req), .dma_we(dma_we),
 	.dma_baddr(dma_baddr), .dma_wbyte(dma_wbyte),
-	.dma_rbyte(dma_rbyte), .dma_ack(dma_ack),
+	.dma_rbyte(dma_rbyte), .dma_ack(dma_ack), .dma_arm(dma_arm),
 	.hps_cmd_pending(), .hps_cmd_byte(),
 	.hps_cmd_pop(1'b0), .hps_cmd_done(1'b0),
 	.hps_result_push(1'b0), .hps_result_byte(8'h00), .hps_result_done(1'b0),
@@ -109,6 +110,8 @@ logic [7:0] mem [65536];
 int    bfm_extra_delay = 0;
 int    bfm_delay_cnt   = 0;
 logic  bfm_in_xfer     = 1'b0;
+// as chipdma_arb: the arm strobe in the clock the request is taken
+assign dma_arm = dma_req && !dma_ack && !bfm_in_xfer;
 
 initial begin
 	dma_ack   = 0;

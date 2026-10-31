@@ -75,9 +75,19 @@ module ddram_ctrl
 	input      [15:0] dmaWR,
 	output reg [15:0] dmaRD,
 	output            dmaACK,
-	// a DMA write reached DDR3 (accepted there; anything read from DDR3 later
-	// sees it): the AP68060's Fast RAM port invalidates its own cache on it
-	output reg        dma_wr_stb
+	// coherence with the AP68060's Fast RAM port (its own cache of this DDR3):
+	// dma_coh_req flips when DDR3 accepts a DMA write; the port flips
+	// dma_coh_ack (any clock) once its cache is cleared, and only then is the
+	// write acknowledged (dmaACK) -- its completion means memory holds it and
+	// no cache below the 68060 serves the old data
+	output reg        dma_coh_req = 1'b0,
+	input             dma_coh_ack,
+	// the Fast RAM port's queue (sysclk): commands completed (wrapping) and
+	// commands queued or in progress.  A DMA goes after every write the
+	// processor posted there before it: it waits until the completions
+	// have passed what was queued when the DMA came
+	input       [7:0] fr_q_done,
+	input       [4:0] fr_q_pend
 );
 
 wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
@@ -191,6 +201,14 @@ reg  [1:0] dmaReadBA;
 reg        dma_read_in_flight;
 reg        dma_after_wr;
 wire       wr_first = dma_after_wr & write_req & ~write_ack;
+reg        dma_wpend;       // a DMA write was presented: acknowledged when ...
+reg        dma_wr_stb = 0;  // (the controller below: DDR3 accepted a DMA write)
+reg  [7:0] dma_fence = 0;   // the Fast RAM port's completion count this DMA waits for
+wire [7:0] dma_fence_d = fr_q_done - dma_fence;
+wire       dma_fenced = ~dma_fence_d[7];
+reg        dma_wacc;        // ... DDR3 has accepted it and the port answered
+reg  [1:0] dma_coh_ack_s = 2'b00;
+always @(posedge sysclk) dma_coh_ack_s <= {dma_coh_ack_s[0], dma_coh_ack};
 
 assign dmaACK = dmaACK_r;
 
@@ -202,11 +220,14 @@ always @ (posedge sysclk) begin
 		dma_read_req  <= 0;
 		dmaACK_r      <= 0;
 		dma_after_wr  <= 0;
+		dma_wpend     <= 0;
+		dma_wacc      <= 0;
 	end else begin
 		if (write_ack) dma_after_wr <= 0;
 
-		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r) begin
+		if (dmaCS_rise & ~dma_write_req & ~dma_read_req & ~dmaACK_r & ~dma_wpend) begin
 			dma_after_wr <= write_req & ~write_ack;
+			dma_fence    <= fr_q_done + {3'd0, fr_q_pend};
 			if (dmaWE) begin
 			dmaWriteAddr  <= dmaAddr;
 			dmaWriteDat   <= dmaWR;
@@ -224,7 +245,13 @@ always @ (posedge sysclk) begin
 
 		if (dma_write_ack) begin
 			dma_write_req <= 1'b0;
-			dmaACK_r      <= 1'b1;
+			dma_wpend     <= 1'b1;
+		end
+		if (dma_wr_stb) dma_wacc <= 1'b1;
+		if (dma_wpend & dma_wacc & (dma_coh_ack_s[1] == dma_coh_req)) begin
+			dmaACK_r  <= 1'b1;
+			dma_wpend <= 1'b0;
+			dma_wacc  <= 1'b0;
 		end
 
 		if (dma_read_ack) begin
@@ -289,7 +316,6 @@ assign mem2_readdata = DDRAM_DOUT;
 reg        ddr_swap;
 reg [15:0] ddr_data;
 reg        dma_we_cmd = 0;      // the write presented is a DMA write
-initial dma_wr_stb = 0;
 
 always @ (posedge sysclk) begin
 	reg  [2:0] state = 0;
@@ -299,6 +325,7 @@ always @ (posedge sysclk) begin
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
 	dma_wr_stb <= ram_we & ~ram_busy & dma_we_cmd;
+	if (ram_we & ~ram_busy & dma_we_cmd) dma_coh_req <= ~dma_coh_req;
 	if (~ram_busy) dma_we_cmd <= 0;
 
 	if(~ram_busy) begin
@@ -316,7 +343,7 @@ always @ (posedge sysclk) begin
 	else begin
 		case(state)
 			0: if(~ram_busy) begin
-					if(~dma_write_ack & dma_write_req & ~wr_first) begin
+					if(~dma_write_ack & dma_write_req & ~wr_first & dma_fenced) begin
 						ram_addr      <= {3'b001, dmaWriteAddr[28:3]};
 						ram_be        <= {6'b000000,dmaWriteBE}<<{dmaWriteAddr[2:1],1'b0};
 						ram_din       <= {dmaWriteDat,dmaWriteDat,dmaWriteDat,dmaWriteDat};
@@ -324,7 +351,7 @@ always @ (posedge sysclk) begin
 						dma_we_cmd    <= 1;
 						dma_write_ack <= 1;
 					end
-					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight & ~wr_first) begin
+					else if(~dma_read_ack & dma_read_req & ~dma_read_in_flight & ~wr_first & dma_fenced) begin
 						ram_addr           <= {3'b001, dmaReadAddr[28:3]};
 						ram_be             <= 8'hFF;
 						ram_rd             <= 1;

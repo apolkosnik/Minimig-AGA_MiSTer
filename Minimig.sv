@@ -350,11 +350,14 @@ wire        cdtv_dma_we;
 wire [31:0] cdtv_dma_baddr;
 wire  [7:0] cdtv_dma_wbyte;
 wire        cdtv_dma_ack;
+wire        cdtv_dma_arm;     // chipdma_arb took the CDTV request (cdtv_bridge)
 
 // the AP68060's Fast RAM port (cpu_wrapper -> ap060_tg68k_compat): an
 // Avalon-MM master on DDRAM, in front of ddram_ctrl (fastram_arbiter below)
 wire [28:0] fr_address;
-wire        ddr_dma_wr;            // ram2: a DMA write reached DDR3 (Fast RAM coherence)
+wire        ddr_dma_req, ddr_dma_ack;   // ram2 <-> the Fast RAM port: DMA write coherence
+wire  [7:0] fr_q_done;             // the Fast RAM port's queue: DMA goes after it
+wire  [4:0] fr_q_pend;
 wire  [7:0] fr_burstcount, fr_byteenable;
 wire        fr_read, fr_write, fr_waitrequest, fr_readdatavalid;
 wire [63:0] fr_writedata, fr_readdata;
@@ -367,7 +370,10 @@ cpu_wrapper cpu_wrapper
 	.clk          (clk_sys         ),
 	.clk_cpu      (clk_cpu         ),
 	.clk_mem      (clk_114         ),
-	.fr_dma_wr    (ddr_dma_wr      ),
+	.fr_dma_req   (ddr_dma_req     ),
+	.fr_dma_ack   (ddr_dma_ack     ),
+	.fr_q_done    (fr_q_done       ),
+	.fr_q_pend    (fr_q_pend       ),
 	.fr_address   (fr_address      ),
 	.fr_burstcount(fr_burstcount   ),
 	.fr_read      (fr_read         ),
@@ -523,6 +529,7 @@ chipdma_arb chipdma_arb
 	.cdtv_dma_wbyte  (cdtv_dma_wbyte       ),
 	.cdtv_dma_rbyte  (                     ),
 	.cdtv_dma_ack    (cdtv_dma_ack         ),
+	.cdtv_arm        (cdtv_dma_arm         ),
 
 	.chip_out_addr   (arb_chip_addr        ),
 	.chip_out_l      (arb_chip_l           ),
@@ -639,7 +646,10 @@ ddram_ctrl ram2
 	.dmaWR        (dma_ddr_wr      ),
 	.dmaRD        (dma_ddr_rd      ),
 	.dmaACK       (dma_ddr_ack     ),
-	.dma_wr_stb   (ddr_dma_wr      )
+	.dma_coh_req  (ddr_dma_req     ),
+	.dma_coh_ack  (ddr_dma_ack     ),
+	.fr_q_done    (fr_q_done       ),
+	.fr_q_pend    (fr_q_pend       )
 );
 
 ////////////////////////////  A2065 ETHERNET  ///////////////////////////////
@@ -922,6 +932,7 @@ minimig minimig
 	.cdtv_dma_baddr      (cdtv_dma_baddr       ),
 	.cdtv_dma_wbyte      (cdtv_dma_wbyte       ),
 	.cdtv_dma_ack        (cdtv_dma_ack         ),
+	.cdtv_dma_arm        (cdtv_dma_arm         ),
 
 	.cdtv_nvr_dirty      (cdtv_nvr_dirty       ),
 	.cdtv_card_dirty     (cdtv_card_dirty      ),

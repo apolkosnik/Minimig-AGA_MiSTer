@@ -11,6 +11,7 @@ reg [28:1] cpu_a = 28'h8000004;
 wire rd, ack, rdy;
 wire [15:0] dma_d, cpu_d;
 wire [28:0] addr;
+wire        coh;                   // (DMA reads only: the coherence answer looped back)
 integer errors = 0;
 ddram_ctrl dut (
 	.sysclk(clk), .reset_n(nrst), .cache_rst(nrst), .cache_inhibit(1'b0),
@@ -23,7 +24,8 @@ ddram_ctrl dut (
 	.cpuAddr(cpu_a), .cpuCS(cpu_cs), .cpustate(2'd2), .cpuL(1'b0), .cpuU(1'b0), .cpuWR(16'd0),
 	.cpuRD(cpu_d), .ramshared(1'b0), .ramready(rdy),
 	.dmaAddr(28'h8000000), .dmaCS(dma_cs), .dmaWE(1'b0), .dmaL(1'b0), .dmaU(1'b0), .dmaWR(16'd0),
-	.dmaRD(dma_d), .dmaACK(ack), .dma_wr_stb());
+	.dmaRD(dma_d), .dmaACK(ack), .dma_coh_req(coh), .dma_coh_ack(coh),
+	.fr_q_done(8'd0), .fr_q_pend(5'd0));
 task chk(input c, input string what);
 	if (!c) begin errors = errors + 1; $display("FAIL: %s (t=%0t)", what, $time); end
 endtask

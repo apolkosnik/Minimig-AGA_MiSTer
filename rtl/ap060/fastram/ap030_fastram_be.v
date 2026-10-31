@@ -5,13 +5,15 @@
 // commands of ap030_fastram_fe (via the command FIFO) as Avalon-MM         //
 // transfers on the 64-bit DDRAM interface.                                 //
 //   write: one beat with byte enables                                      //
-//   read:  a two-beat burst for a 16-byte line; both beats go to the       //
-//          response FIFO in order                                          //
+//   read:  a burst of 16-byte lines, two beats each (the command's data   //
+//          field, bits 3..0: the beats; 0 = one line); every beat goes to  //
+//          the response FIFO in order                                      //
 // Commands execute strictly in order, so a read never passes a write.     //
 // A read is issued only when the response FIFO has room for its beats.    //
 //--------------------------------------------------------------------------//
 
 module ap030_fastram_be
+#(parameter RSP_DEPTH = 8)       // entries of the response FIFO
 (
 	input              clk,
 	input              rst,
@@ -24,7 +26,7 @@ module ap030_fastram_be
 	// response FIFO
 	output reg         rsp_we,
 	output reg  [63:0] rsp_wdata,
-	input        [3:0] rsp_wlevel,
+	input        [4:0] rsp_wlevel,
 
 	// Avalon-MM master
 	output reg  [28:0] avm_address,
@@ -42,14 +44,16 @@ wire        c_write = cmd_rdata[101];
 wire [28:0] c_addr  = cmd_rdata[100:72];
 wire  [7:0] c_be    = cmd_rdata[71:64];
 wire [63:0] c_data  = cmd_rdata[63:0];
+wire  [3:0] c_beats = (c_data[3:0] == 4'd0) ? 4'd2 : c_data[3:0];   // a read's beats
 
 localparam B_IDLE = 2'd0, B_CMD = 2'd1, B_DATA = 2'd2;
 reg [1:0] bst;
 reg       rd_act;             // a read command is presented or accepted
-reg [1:0] rcv;                // its beats received so far
+reg [3:0] rcv;                // its beats received so far
+reg [3:0] nbeats;             // and its length
 
 // a command is taken when idle and, for a read, the response FIFO can hold it
-wire take = (bst == B_IDLE) && !cmd_rempty && (c_write || rsp_wlevel <= 4'd6);
+wire take = (bst == B_IDLE) && !cmd_rempty && (c_write || {1'b0, rsp_wlevel} <= RSP_DEPTH - c_beats);
 assign cmd_re = take;
 wire beat = avm_readdatavalid && rd_act;
 
@@ -57,24 +61,25 @@ always @(posedge clk) begin
 	rsp_we <= 1'b0;
 	if (rst) begin
 		bst <= B_IDLE;
-		avm_read <= 1'b0; avm_write <= 1'b0; rd_act <= 1'b0; rcv <= 2'd0;
+		avm_read <= 1'b0; avm_write <= 1'b0; rd_act <= 1'b0; rcv <= 4'd0;
 	end else begin
 		// read data: qualified by readdatavalid alone
 		if (beat) begin
 			rsp_we    <= 1'b1;
 			rsp_wdata <= avm_readdata;
-			rcv       <= rcv + 2'd1;
+			rcv       <= rcv + 4'd1;
 		end
 		case (bst)
 			B_IDLE: if (take) begin
 				avm_address    <= c_addr;
 				avm_byteenable <= c_write ? c_be : 8'hFF;
 				avm_writedata  <= c_data;
-				avm_burstcount <= c_write ? 8'd1 : 8'd2;
+				avm_burstcount <= c_write ? 8'd1 : {4'd0, c_beats};
+				nbeats         <= c_beats;
 				avm_write      <= c_write;
 				avm_read       <= !c_write;
 				rd_act         <= !c_write;
-				rcv            <= 2'd0;
+				rcv            <= 4'd0;
 				bst <= B_CMD;
 			end
 			B_CMD: if (!avm_waitrequest) begin
@@ -83,8 +88,8 @@ always @(posedge clk) begin
 				bst <= avm_write ? B_IDLE : B_DATA;
 			end
 			default: begin
-				// both beats of the line are in
-				if (rcv + (beat ? 2'd1 : 2'd0) == 2'd2) begin
+				// every beat of the burst is in
+				if (rcv + (beat ? 4'd1 : 4'd0) == nbeats) begin
 					rd_act <= 1'b0;
 					bst <= B_IDLE;
 				end
@@ -94,7 +99,7 @@ always @(posedge clk) begin
 end
 
 initial begin
-	bst = B_IDLE; rd_act = 1'b0; rcv = 2'd0; rsp_we = 1'b0; rsp_wdata = 64'd0;
+	bst = B_IDLE; rd_act = 1'b0; rcv = 4'd0; nbeats = 4'd2; rsp_we = 1'b0; rsp_wdata = 64'd0;
 	avm_address = 29'd0; avm_burstcount = 8'd1; avm_read = 1'b0; avm_write = 1'b0;
 	avm_writedata = 64'd0; avm_byteenable = 8'd0;
 end

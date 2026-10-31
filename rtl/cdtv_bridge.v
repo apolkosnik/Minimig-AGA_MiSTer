@@ -65,7 +65,8 @@ module cdtv_bridge
 	output            cdtv_dma_we,
 	output     [31:0] cdtv_dma_baddr,
 	output      [7:0] cdtv_dma_wbyte,
-	input             cdtv_dma_ack
+	input             cdtv_dma_ack,
+	input             cdtv_dma_arm    // chipdma_arb took our request: its ack is owed
 );
 
 localparam CNTR_TCEN_BIT  = 3'd7;
@@ -422,6 +423,20 @@ dpram #(13,8) sec_fifo_ram (
 	.q_b      (sec_fifo_q)
 );
 
+// A request chipdma_arb has taken is acknowledged later whatever happens
+// here: a STOP (or a reset of the port) that drops the transfer must not let
+// that acknowledge count for the next one -- after a restart at a new
+// address it would advance the new transfer without its byte written.  So
+// an acknowledge owed is remembered (from the arbiter's arm strobe: it takes
+// the request a clock after this drops it, too), and no request starts
+// until it has come.
+reg ack_owed;
+always @(posedge clk) begin
+	if (reset)             ack_owed <= 1'b0;
+	else if (cdtv_dma_arm) ack_owed <= 1'b1;
+	else if (cdtv_dma_ack) ack_owed <= 1'b0;
+end
+
 always @(posedge clk) begin
 	if (reset) begin
 		drain_state <= DRAIN_IDLE;
@@ -436,7 +451,7 @@ always @(posedge clk) begin
 			case (drain_state)
 				DRAIN_IDLE: begin
 					drain_req_r <= 1'b0;
-					if ((wtc != 32'h0) && (sec_avail >= 13'd2)) begin
+					if ((wtc != 32'h0) && (sec_avail >= 13'd2) && !ack_owed) begin
 						drain_state <= DRAIN_WAIT_U;
 					end
 				end
