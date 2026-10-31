@@ -38,6 +38,7 @@ reg         dack = 0;
 chipdma_arb arb (
 	.clk(clk), .reset(reset), .c_7m(phase == 2'd0),
 	.chip_in_addr(24'd0), .chip_in_l(1'b1), .chip_in_u(1'b1), .chip_in_rw(1'b1), .chip_in_dma(1'b1), .chip_in_wr(16'd0),
+	.chip_in_long(1'b0), .chip_in_wr2(16'd0), .chip_out_long(), .chip_out_wr2(),
 	.akiko_dma_req(1'b0), .akiko_dma_we(1'b0), .akiko_dma_baddr(24'd0), .akiko_dma_wbyte(8'd0), .akiko_dma_rbyte(),
 	.akiko_dma_ack(), .akiko_arm(),
 	.cdtv_dma_req(req), .cdtv_dma_we(we), .cdtv_dma_baddr(baddr), .cdtv_dma_wbyte(wbyte), .cdtv_dma_rbyte(),

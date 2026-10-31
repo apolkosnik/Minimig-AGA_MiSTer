@@ -58,6 +58,9 @@ module sdram_ctrl
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
 	output     [47:0] chip48,
+	input             chip32,
+	input      [15:0] chipWR2,
+	output reg [15:0] chipRD2,
 	// cpu
 	input      [24:1] cpuAddr,
 	input             cpuCS,
@@ -107,6 +110,11 @@ wire ramsel = cpuCS & (~&cpustate | ~cpuU | ~cpuL);
 wire cache_rd_ack;
 wire cache_wr_ack;
 wire cache_req;
+reg        a_wr2 = 0;
+reg        a_rd2 = 0;
+reg [15:0] datawr2;
+reg        chipWE2 = 0;
+reg        snoop2 = 0;
 cpu_cache_new cpu_cache
 (
 	.clk              (sysclk),                // clock
@@ -124,13 +132,21 @@ cpu_cache_new cpu_cache
 	.cpu_dat_r        (cpuRD),                 // cpu read data
 	.cpu_ack          (cache_rd_ack),          // cpu acknowledge
 	.wb_en            (cache_wr_ack),          // write enable
+	.cpu_idle         (),
 	.sdr_dat_r        (sdata_reg),             // sdram read data
 	.sdr_read_req     (cache_req),             // sdram read request from cache
 	.sdr_read_ack     (cache_fill),            // sdram read acknowledge to cache
-	.snoop_act        (chipWE),                // snoop act (write only - just update existing data in cache)
-	.snoop_adr        (chipAddr),              // snoop address
-	.snoop_dat_w      (chipWR),                // snoop write data
-	.snoop_bs         ({!chipU, !chipL})       // snoop byte selects
+	.snoop_act        (chipWE | chipWE2),      // snoop act (write only - just update existing data in cache)
+	.snoop_adr        (snoop2 ? {chipAddr[24:2], 1'b1} : chipAddr), // snoop address
+	.snoop_dat_w      (snoop2 ? chipWR2 : chipWR), // snoop write data
+	.snoop_bs         (snoop2 ? 2'b11 : {!chipU, !chipL}), // snoop byte selects
+	.buf_ok           (1'b0),
+	.buf_dat          (64'd0),
+	.buf_take         (),
+	.cpu_long         (1'b0),
+	.cpu_dat_w_lo     (16'd0),
+	.cpu_dat_hi       (),
+	.cpu_ack_l        ()
 );
 
 reg cache_fill;
@@ -170,8 +186,8 @@ always @ (posedge sysclk) begin
 					writeAddr <= cpuAddr;
 					writeDat  <= cpuWR;
 					write_dqm <= {cpuU, cpuL};
-					write_req <= 1;
 					if(cache_wr_ack) begin
+						write_req   <= 1;
 						write_ena   <= 1;
 						write_state <= 1;
 					end
@@ -209,7 +225,10 @@ always @ (posedge sysclk) begin
 	if(slot_type == CHIP) begin
 		case(sdram_state)
 			 9: chipRD   <= (fwd_en && fwd_pos==2'd0) ? m : sdata_chip;
-			11: chip48_1 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_chip;
+			11: begin
+					chip48_1 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_chip;
+					if(a_rd2) chipRD2 <= (fwd_en && fwd_pos==2'd1) ? m : sdata_chip;
+				end
 			13: chip48_2 <= (fwd_en && fwd_pos==2'd2) ? m : sdata_chip;
 			15: chip48_3 <= (fwd_en && fwd_pos==2'd3) ? m : sdata_chip;
 		endcase
@@ -242,14 +261,17 @@ end
 
 //// sdram state ////
 reg [3:0] sdram_state;
+reg       old_7m;
 always @ (posedge sysclk) begin
-	reg old_7m;
-
 	sdram_state <= sdram_state + 1'd1;
 
 	old_7m <= c_7m;
 	if(~old_7m & c_7m) sdram_state <= 0;
 end
+
+wire [3:0] next_state     = (~old_7m & c_7m) ? 4'd0 : sdram_state + 1'd1;
+wire       next_init      = reset & (init_done | (sdram_state == 15 && &initstate));
+wire [3:0] next_initstate = !reset ? 4'd0 : (sdram_state == 15 && ~&initstate) ? initstate + 1'd1 : initstate;
 
 //// sdram control ////
 
@@ -257,53 +279,62 @@ reg  [2:0] slot_type = IDLE;
 reg [15:0] sdata_reg;
 reg        chipWE;
 
+reg [12:0] p_addr;
+reg  [1:0] p_ba;
+reg        p_ras = 1;
+reg        p_cas = 1;
+reg        p_we  = 1;
+reg  [1:0] p_dqm = 3;
+reg        p_oe  = 0;
+reg [15:0] p_data;
+reg        p_act = 0;
+
+wire        chip_req = ~chipDMA | ~chipRW;
+wire        act_chip = p_act & chip_req;
+wire        act_cpu  = p_act & (write_req | cache_req);
+(* keep *) wire        cpu_slot;
+(* keep *) wire [14:0] row_chip;
+assign      cpu_slot = p_act & ~chip_req;
+assign      row_chip = act_chip ? chipAddr[24:10] : {p_ba, p_addr};
+wire [14:0] row      = (cpu_slot & write_req) ? writeAddr[24:10] : (cpu_slot & cache_req) ? cpuAddr[24:10] : row_chip;
+wire        ras      = p_ras & ~act_chip & ~act_cpu;
+wire        cas      = p_cas | act_chip | act_cpu;
+
 always @ (posedge sysclk) begin
 	reg        cas_sd_cas;
 	reg        cas_sd_we;
 	reg  [1:0] cas_dqm;
 	reg [15:0] datawr;
 	reg  [9:0] casaddr;
-	reg  [3:0] rcnt;
+	reg  [3:0] rcnt, rcnt_n;
 	
 	sd_clk <= sdram_state[0];
 
-	if(~sdram_state[0]) begin
-		sd_ras                <= 1;
-		sd_cas                <= 1;
-		sd_we                 <= 1;
-		sd_data               <= 16'hZZZZ;
-		chipWE                <= 0;
+	{sd_ba, sd_addr} <= row;
+	sd_ras  <= ras;
+	sd_cas  <= cas;
+	sd_we   <= p_we;
+	sd_dqm  <= p_dqm;
+	sd_data <= p_oe ? p_data : 16'hZZZZ;
+
+	if(~sdram_state[0]) chipWE <= 0;
+
+	if(sdram_state == 4) begin
+		chipWE2 <= a_wr2;
+		snoop2  <= a_wr2;
 	end
+	if(sdram_state == 6) chipWE2 <= 0;
+	if(sdram_state == 8) snoop2  <= 0;
 
 	if(sdram_state[0]) sdata_reg <= sd_data;
 
+	rcnt_n = rcnt;
 	if(!init_done) begin
 		slot_type             <= IDLE;
 		casaddr               <= 0;
-		rcnt                  <= 0;
-		sd_dqm                <= 3;
-		sd_ba                 <= 0;
-		if(sdram_state == 0) begin
-			case(initstate)
-				4 : begin // PRECHARGE
-					sd_addr[10]  <= 1; // all banks
-					sd_ras       <= 0;
-					sd_cas       <= 1;
-					sd_we        <= 0;
-				end
-				8,10 : begin // AUTOREFRESH
-					sd_ras       <= 0;
-					sd_cas       <= 0;
-					sd_we        <= 1;
-				end
-				13 : begin // LOAD MODE REGISTER
-					sd_ras       <= 0;
-					sd_cas       <= 0;
-					sd_we        <= 0;
-					sd_addr      <= 13'b0001000100010; // CL=2, BURST=4
-				end
-			endcase
-		end
+		rcnt_n                 = 0;
+		a_wr2                 <= 0;
+		a_rd2                 <= 0;
 	end else begin
 
 		case(sdram_state)
@@ -313,23 +344,26 @@ always @ (posedge sysclk) begin
 				cas_sd_cas      <= 1;
 				cas_sd_we       <= 1;
 				cas_dqm         <= 0;
-				sd_dqm          <= 3;
 				slot_type       <= IDLE;
 				fwd_en          <= 0;
+				a_wr2           <= 0;
+				a_rd2           <= 0;
 
-				if(~&rcnt) rcnt <= rcnt + 1'd1;
+				if(~&rcnt) rcnt_n = rcnt + 1'd1;
 
 				// we give the chipset first priority
 				// (this includes anything on the "motherboard" - chip RAM, slow RAM and Kickstart, turbo modes notwithstanding)
-				if(~chipDMA | ~chipRW) begin
+				if(chip_req) begin
 					slot_type    <= CHIP;
-					{sd_ba,sd_addr,casaddr[8:0]} <= chipAddr;
-					sd_ras       <= 0;
+					casaddr[8:0] <= chipAddr[9:1];
 					cas_dqm      <= {chipU,chipL};
 					cas_sd_cas   <= 0;
 					cas_sd_we    <= chipRW;
 					datawr       <= chipWR;
 					chipWE       <= !chipRW;
+					a_wr2        <= chip32 & !chipRW;
+					a_rd2        <= chip32 &  chipRW;
+					datawr2      <= chipWR2;
 					if(chipRW & write_req & (writeAddr[24:3] == chipAddr[24:3])) begin
 						fwd_en  <= 1'b1;
 						fwd_pos <= writeAddr[2:1] - chipAddr[2:1];
@@ -339,8 +373,7 @@ always @ (posedge sysclk) begin
 				end
 				else if(write_req) begin
 					slot_type    <= CPU_WRITECACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= writeAddr;
-					sd_ras       <= 0;
+					casaddr[8:0] <= writeAddr[9:1];
 					cas_dqm      <= write_dqm;
 					cas_sd_we    <= 0;
 					cas_sd_cas   <= 0;
@@ -350,30 +383,91 @@ always @ (posedge sysclk) begin
 				// request from read cache
 				else if(cache_req) begin
 					slot_type    <= CPU_READCACHE;
-					{sd_ba,sd_addr,casaddr[8:0]} <= cpuAddr;
-					sd_ras       <= 0;
+					casaddr[8:0] <= cpuAddr[9:1];
 					cas_sd_cas   <= 0;
 				end
 				else if(&rcnt) begin
 					// REFRESH
-					sd_ras       <= 0;
-					sd_cas       <= 0;
-					rcnt         <= 0;
+					rcnt_n        = 0;
+				end
+			end
+
+			// CAS
+			2 : write_ack       <= 0; // indicate to write that it's safe to accept the next write
+		endcase
+	end
+	rcnt <= rcnt_n;
+
+	{p_ba, p_addr} <= row;
+	p_ras <= ras;
+	p_cas <= cas;
+	p_act <= 0;
+	if(~next_state[0]) begin
+		p_ras <= 1;
+		p_cas <= 1;
+		p_we  <= 1;
+		p_oe  <= 0;
+	end
+
+	if(!next_init) begin
+		p_dqm <= 3;
+		p_ba  <= 0;
+		if(next_state == 0) begin
+			case(next_initstate)
+				4 : begin // PRECHARGE
+					p_addr[10]   <= 1; // all banks
+					p_ras        <= 0;
+					p_cas        <= 1;
+					p_we         <= 0;
+				end
+				8,10 : begin // AUTOREFRESH
+					p_ras        <= 0;
+					p_cas        <= 0;
+					p_we         <= 1;
+				end
+				13 : begin // LOAD MODE REGISTER
+					p_ras        <= 0;
+					p_cas        <= 0;
+					p_we         <= 0;
+					p_addr       <= 13'b0001000100010; // CL=2, BURST=4
+				end
+			endcase
+		end
+	end else begin
+		case(next_state)
+
+			// RAS
+			0 : begin
+				p_dqm           <= 3;
+				p_act           <= 1;
+				if(&rcnt_n) begin
+					// REFRESH
+					p_ras        <= 0;
+					p_cas        <= 0;
 				end
 			end
 
 			// CAS
 			2 : begin
-				sd_addr         <= {1'b1, casaddr}; // AUTO PRECHARGE
-				sd_cas          <= cas_sd_cas;
-				sd_dqm          <= 0;
+				p_addr          <= {~a_wr2, casaddr}; // AUTO PRECHARGE
+				p_cas           <= cas_sd_cas;
+				p_dqm           <= 0;
 				if(!cas_sd_we) begin
-					sd_data      <= datawr;
-					sd_addr[12:11]<= cas_dqm;
-					sd_dqm       <= cas_dqm;
-					sd_we        <= 0;
+					p_oe         <= 1;
+					p_data       <= datawr;
+					p_addr[12:11]<= cas_dqm;
+					p_dqm        <= cas_dqm;
+					p_we         <= 0;
 				end
-				write_ack       <= 0; // indicate to write that it's safe to accept the next write
+			end
+
+			4 : if(a_wr2) begin
+				p_addr          <= {2'b00, 1'b1, casaddr[9:1], 1'b1};
+				p_dqm           <= 0;
+				p_oe            <= 1;
+				p_data          <= datawr2;
+				p_cas           <= 0;
+				p_we            <= 0;
 			end
 		endcase
 	end

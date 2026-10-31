@@ -23,6 +23,7 @@ ddram_ctrl dut (
 	.mem2_waitrequest(),
 	.cpuAddr(cpu_a), .cpuCS(cpu_cs), .cpustate(2'd2), .cpuL(1'b0), .cpuU(1'b0), .cpuWR(16'd0),
 	.cpuRD(cpu_d), .ramshared(1'b0), .ramready(rdy),
+	.cpuLong(1'b0), .cpuLong1(1'b0), .cpuWR_lo(16'd0), .cpuRD_hi(), .ramready_l(),
 	.dmaAddr(28'h8000000), .dmaCS(dma_cs), .dmaWE(1'b0), .dmaL(1'b0), .dmaU(1'b0), .dmaWR(16'd0),
 	.dmaRD(dma_d), .dmaACK(ack), .dma_coh_req(coh), .dma_coh_ack(coh),
 	.fr_q_done(8'd0), .fr_q_pend(5'd0));

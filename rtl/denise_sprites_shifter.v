@@ -15,6 +15,7 @@ module denise_sprites_shifter
   input  aen,          // address enable
   input  [1:0] address,         // register address input
   input  [8:0] hpos,        // horizontal beam counter
+  input aga,
   input [15:0] fmode,
   input shift,
   input [48-1:0] chip48,
@@ -35,6 +36,7 @@ reg    [63:0] datlb;    // data register B
 reg    [63:0] shifta;    // shift register A
 reg    [63:0] shiftb;    // shift register B
 reg    [8:0] hstart;    // horizontal start value
+reg    [1:0] hstart_lo;
 reg    armed;        // sprite "armed" signal
 reg    load;        // load shift register signal
 reg    load_del;
@@ -92,7 +94,7 @@ always @(posedge clk)
 always @(posedge clk)
   if (clk7_en) begin
     if (aen && address==CTL)
-      {attach,hstart[0]} <= {data_in[7],data_in[0]};
+      {attach,hstart[0],hstart_lo} <= {data_in[7],data_in[0],aga ? data_in[4:3] : 2'b00};
   end
 
 // data register A
@@ -117,14 +119,24 @@ end
 
 //--------------------------------------------------------------------------------------
 
+reg  [2:0] load_d;
+wire [3:0] load_s = {load_d, clk7_en & load};
+always @(posedge clk) load_d <= load_s[2:0];
+
+reg  [2:0] shift_d;
+wire [3:0] shift_s = {shift_d, shift};
+always @(posedge clk) shift_d <= shift_s[2:0];
+reg  [1:0] hstart_lo_l = 0;
+
 // sprite shift register
 always @(posedge clk)
-  if (clk7_en && load) // AMR - load_del) // load new data into shift register
+  if (load_s[hstart_lo]) // AMR - load_del) // load new data into shift register
   begin
     shifta[63:0] <= datla[63:0];
     shiftb[63:0] <= datlb[63:0];
+    hstart_lo_l <= hstart_lo;
   end
-  else if (shift)
+  else if (shift_s[hstart_lo_l])
   begin
     shifta[63:0] <= {shifta[62:0],1'b0};
     shiftb[63:0] <= {shiftb[62:0],1'b0};

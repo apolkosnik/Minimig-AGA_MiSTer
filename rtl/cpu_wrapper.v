@@ -53,7 +53,8 @@ module cpu_wrapper
 	input             ph1,
 	input             ph2,
 
-	input       [2:0] cpucfg,
+	input       [4:0] cpucfg,
+	input             ntsc,
 	input       [2:0] fastramcfg,
 	input       [2:0] cachecfg,
 	input             bootrom,
@@ -67,7 +68,11 @@ module cpu_wrapper
 	output reg        chip_rw,
 	input             chip_dtack,
 	input       [2:0] chip_ipl,
-	
+	input             chip32_en,
+	output reg        chip_long,
+	output reg [15:0] chip_din2,
+	input      [15:0] chip_dout2,
+
 	input      [15:0] fastchip_dout,
 	output reg        fastchip_sel,
 	output            fastchip_lds,
@@ -81,6 +86,7 @@ module cpu_wrapper
 	output     [28:1] ramaddr,
 	output     [15:0] ramdin,
 	input      [15:0] ramdout,
+	input      [15:0] ramdout2,
 	input             ramready,
 	output            ramlds,
 	output            ramuds,
@@ -95,6 +101,9 @@ module cpu_wrapper
 	input             cdtv_mode,
 	output reg  [7:0] cdtv_base,
 
+	input             ar_on,         // the Action Replay is fitted ($A80000-$AFFFFF through the chip bus)
+	output reg        ar_fetch = 0,  // an instruction fetch outside $A80000-$AFFFFF (one clock)
+
 	input      [15:0] cdtv_din,
 	input             cdtv_selack,
 
@@ -108,17 +117,32 @@ module cpu_wrapper
 	output reg  [3:0] z3ram_base1,
 	output reg        z3ram_ena1,
 
+	output            ramlong1,
+	output     [15:0] ramdin_lo,
+	input      [15:0] ramdout_hi,
+	input             ramready_l,
 	output            dcache_sw_en
 );
 
 wire dcache_sw_en_p;
 assign dcache_sw_en = dcache_sw_en_p;
 
+// Upstream's TG68K paths that the AP68060 does not use: no 32-bit chip bus
+// cycles (chip32_en), no paired long word to Fast RAM (ramlong1)
+always @* begin
+	chip_long = 1'b0;
+	chip_din2 = 16'd0;
+end
+assign ramlong1  = 1'b0;
+assign ramdin_lo = 16'd0;
+
 assign ramsel       = cpu_req_go & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
 assign ramshared    = sel_dd;
 
 // NMI
 always @(posedge clk) nmi_addr <= vbr + 32'h7c;
+reg [31:0] nmi_addr2;
+always @(posedge clk) nmi_addr2 <= vbr + 32'h7e;
 
 wire sel_chipram;
 wire sel_kickram;
@@ -134,6 +158,7 @@ memory_router u_memory_router
 	.wr            (wr            ),
 	.bootrom       (bootrom       ),
 	.cdtv_mode     (cdtv_mode     ),
+	.ar_on         (ar_on         ),
 	.z2ram_ena     (z2ram_ena     ),
 	.z3ram_base0   (z3ram_base0   ),
 	.z3ram_ena0    (z3ram_ena0    ),
@@ -150,14 +175,16 @@ memory_router u_memory_router
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here).
-wire sel_nmi_vector = (cpu_addr[31:2] == nmi_addr[31:2]) && (cpustate == 2);
+wire sel_nmi_vector = ((cpu_addr[31:1] == nmi_addr[31:1]) || (cpu_addr[31:1] == nmi_addr2[31:1])) && (cpustate == 2);
 
 wire [15:0] ramdat;
 
 assign ramlds = sel_rtg ? uds_in : lds_in;
 assign ramuds = sel_rtg ? lds_in : uds_in;
 assign ramdin = sel_rtg ? {cpu_dout[7:0],cpu_dout[15:8]} : cpu_dout;
-assign ramdat = sel_rtg ? {ramdout[7:0], ramdout[15:8]}  : ramdout;
+// (SDRAM: chip and Kickstart RAM; DDR3: the Zorro cards, RTG)
+wire [15:0] ramdout_m = |ramaddr[28:26] ? ramdout2 : ramdout;
+assign ramdat = sel_rtg ? {ramdout_m[7:0], ramdout_m[15:8]}  : ramdout_m;
 
 assign fastchip_lds = lds_in;
 assign fastchip_uds = uds_in;
@@ -291,6 +318,14 @@ always @(posedge clk) begin
 	else if (stock_speed & cpu_req & clkena_p_base & ~longword) cooldown <= 4'd4;
 end
 wire clkena_p_throttled = clkena_p_base;
+
+// the Action Replay hides at the first instruction fetched from outside it
+// (cart.v): a fetch on this bus taken outside $A80000-$AFFFFF.  (The
+// AP68060's Fast RAM fetches do not come here: a return to code in Fast RAM
+// is seen at the next fetch from chip RAM or ROM.)
+always @(posedge clk)
+	ar_fetch <= cpu_req_go & clkena_p_base & (cpustate_p == 2'd0) &
+	            ~(cpu_addr_p[31:19] == {8'h00, 5'b10101});
 
 reg       chipreq;
 reg [2:0] cpu_ipl;

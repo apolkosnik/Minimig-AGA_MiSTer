@@ -172,16 +172,19 @@ wire [15:0] fc_dout;
 cpu_wrapper #(.AP060_FPU(FPU)) dut (
 	.reset(reset), .reset_out(reset_out),
 	.clk(clk), .clk_cpu(clk_cpu), .ph1(cpu_ph1), .ph2(cpu_ph2),
-	.cpucfg({THROTTLE != 0, 2'b11}), .fastramcfg(FASTRAM ? 3'd1 : 3'd0), .cachecfg(3'd0), .bootrom(1'b0),
+	.cpucfg({2'b00, THROTTLE != 0, 2'b11}), .ntsc(1'b0), .fastramcfg(FASTRAM ? 3'd1 : 3'd0), .cachecfg(3'd0), .bootrom(1'b0),
 	.chip_addr(chip_addr), .chip_dout(chip_dout), .chip_din(chip_din),
 	.chip_as(chip_as), .chip_uds(chip_uds), .chip_lds(chip_lds), .chip_rw(chip_rw),
 	.chip_dtack(chip_dtack), .chip_ipl(chip_ipl_eff),
+	.chip32_en(1'b0), .chip_long(), .chip_din2(), .chip_dout2(16'd0),
 	.fastchip_dout(fc_dout), .fastchip_sel(fc_sel), .fastchip_lds(fc_lds), .fastchip_uds(fc_uds),
 	.fastchip_rnw(fc_rnw), .fastchip_lw(fc_lw), .fastchip_selack(fc_selack), .fastchip_ready(fc_ready),
-	.ramsel(ram_sel), .ramaddr(ramaddr), .ramdin(ramdin), .ramdout(ramdout), .ramready(ram_ready),
+	.ramsel(ram_sel), .ramaddr(ramaddr), .ramdin(ramdin), .ramdout(16'd0), .ramdout2(ramdout), .ramready(ram_ready),
 	.ramlds(ramlds), .ramuds(ramuds), .ramshared(ramshared),
 	.toccata_ena(), .toccata_base(), .a2065_ena(), .a2065_base(),
 	.cdtv_mode(1'b0), .cdtv_base(), .cdtv_din(16'd0), .cdtv_selack(1'b0),
+	.ar_on(1'b0), .ar_fetch(),
+	.ramlong1(), .ramdin_lo(), .ramdout_hi(16'd0), .ramready_l(1'b0),
 	.cpustate(cpustate), .cacr(cacr), .nmi_addr(nmi_addr),
 	.z2ram_ena(z2ram_ena), .z3ram_base0(z3ram_base0), .z3ram_ena0(z3ram_ena0),
 	.z3ram_base1(z3ram_base1), .z3ram_ena1(z3ram_ena1),
@@ -466,6 +469,8 @@ generate if (REAL_DDR) begin : g_ddr
 		.mem2_byteenable(mb_byteenable), .mem2_write(mb_write), .mem2_waitrequest(mb_waitrequest),
 		.cpuWR(ramdin), .cpuAddr(ramaddr), .cpuU(ramuds), .cpuL(ramlds), .cpustate(cpustate),
 		.cpuCS(zram_sel & ram_cs), .cpuRD(ramdout), .ramshared(ramshared), .ramready(ram_ready),
+		// (as Minimig.sv: a long word's first half pairs with its second)
+		.cpuLong(fc_lw & ~ramaddr[1]), .cpuLong1(1'b0), .cpuWR_lo(16'd0), .cpuRD_hi(), .ramready_l(),
 		.dmaAddr(dm_addr), .dmaCS(dm_cs), .dmaWE(dm_we), .dmaL(1'b0), .dmaU(1'b0), .dmaWR(dm_dat),
 		.dmaRD(dm_rd), .dmaACK(dm_ack), .dma_coh_req(fr_dma_req), .dma_coh_ack(fr_dma_ack),
 		.fr_q_done(fr_q_done), .fr_q_pend(fr_q_pend)
@@ -719,8 +724,8 @@ generate if (REAL_DDR) begin : g_detect
 				         {11'd1, w, 1'b0}, sh_bus[w], sh_port[w], ddr_word(w), cycles);
 		end
 	endtask
-	always @(posedge clk_114) if (!g_ddr.DDRAM_BUSY && g_ddr.DDRAM_RD && !g_ddr.ram2.write_req && !g_ddr.ram2.write_ack) begin
-		// (only when no write is in flight in ddram_ctrl: it serialises; the
+	always @(posedge clk_114) if (!g_ddr.DDRAM_BUSY && g_ddr.DDRAM_RD && !g_ddr.ram2.wq_any) begin
+		// (only when no write is queued in ddram_ctrl: it serialises; the
 		// Fast RAM port keeps its writes and reads in one ordered queue)
 		for (int b = 0; b < g_ddr.DDRAM_BURSTCNT; b++)
 			for (int j = 0; j < 4; j++)
@@ -760,10 +765,10 @@ generate if (REAL_DDR) begin : g_trace2
 	always @(posedge clk_114)
 		if (tfrom >= 0 && cycles >= tfrom && t2 < 400) begin
 			t2 <= t2 + 1;
-			$display("%8d.%0d sel=%b cs=%b cyc=%b rdy=%b | csm=%0d hit=%b req=%b fill=%b wena=%b wreq=%b wack=%b | rd=%b we=%b busy=%b dv=%b | req=%b ena=%b cd=%0d a=%h st=%0d",
+			$display("%8d.%0d sel=%b cs=%b cyc=%b rdy=%b | csm=%0d hit=%b req=%b fill=%b wena=%b wq=%b wqn=%0d | rd=%b we=%b busy=%b dv=%b | req=%b ena=%b cd=%0d a=%h st=%0d",
 			         cycles, tick, ram_sel, ram_cs, cyc, ram_ready,
 			         g_ddr.ram2.cpu_cache.cpu_sm_state, g_ddr.ram2.cache_hit, g_ddr.ram2.cache_req,
-			         g_ddr.ram2.cache_fill, g_ddr.ram2.write_ena, g_ddr.ram2.write_req, g_ddr.ram2.write_ack,
+			         g_ddr.ram2.cache_fill, g_ddr.ram2.write_ena, g_ddr.ram2.wq_any, g_ddr.ram2.wq_n,
 			         g_ddr.DDRAM_RD, g_ddr.DDRAM_WE, g_ddr.DDRAM_BUSY, g_ddr.DDRAM_DOUT_READY,
 			         dut.cpu_req, dut.clkena_p_throttled, dut.cooldown, dut.cpu_addr, cpustate);
 		end

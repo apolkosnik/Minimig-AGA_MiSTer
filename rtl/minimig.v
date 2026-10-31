@@ -157,11 +157,16 @@ module minimig
 	input 	     _cpu_uds,    // m68k upper data strobe
 	input 	     _cpu_lds,    // m68k lower data strobe
 	input 	     cpu_r_w,     // m68k read / write
+	input 	     cpu_long,
+	output 	     chip32_en,
+	output 	     ram_long,
 	output 	     _cpu_dtack,  // m68k data acknowledge
 	output 	     _cpu_reset,  // m68k reset
 	input 	     _cpu_reset_in,//m68k reset in
 	input  [31:0] nmi_addr,    // m68k NMI address
 	output 	     ovr,         // NMI address decoding override
+	input         cart_ar,     // the cartridge is the Action Replay (AR5, DeMoN v2), not HRTmon
+	input         ar_fetch,    // the CPU fetched an instruction outside $A80000-$AFFFFF
 
 	//sram pins
 	output [15:0] ram_data,    // sram data bus
@@ -288,7 +293,7 @@ module minimig
 	output        cdtv_cdda_volume_valid,
 
 	//user i/o
-	output  [2:0] cpucfg,
+	output  [4:0] cpucfg,
 	output  [2:0] cachecfg,
 	output  [6:0] memcfg,
 	output        bootrom,     // enable bootrom magic in gary.v
@@ -308,6 +313,7 @@ module minimig
 	output  [6:0] USER_OUT,
 	output  user_port_mode,
 	output   [2:0] mister_floppy_status,
+	output   [8:0] drive_snd,
 
 	// A2065 register file + doorbell
 	// A2065 memory port — goes to ddram_ctrl alongside the fast RAM
@@ -459,6 +465,10 @@ wire        int7;					//int7 interrupt request from Action Replay
 wire  [2:0] _iplx;			   //interrupt request lines from Paula
 wire        sel_cart;			//Action Replay RAM select
 wire [15:0] cart_data_out;
+wire [15:0] cart_data_mask;
+wire        ar_on = cart_ar & memory_config[6];
+wire        ar_vsel;
+wire [23:1] ar_vadr;
 
 wire        usrrst;				//user reset from osd interface
 wire        hires;				//hires signal from Denise for interpolation filter enable in Amber
@@ -515,6 +525,7 @@ assign ide_fast = ~ide_config[5];       // (the AP68060 is the only CPU)
 //--------------------------------------------------------------------------------------
 
 wire 			floppy_speed;
+wire        blit_nasty;
 
 //instantiate agnus
 agnus AGNUS1
@@ -556,6 +567,7 @@ agnus AGNUS1
 	.harddis(harddis),
 	.varbeamen(varbeamen),
 	.int3(int3),
+	.blit_nasty(blit_nasty),
 	.audio_dmal(audio_dmal),
 	.audio_dmas(audio_dmas),
 	.disk_dmal(disk_dmal),
@@ -622,6 +634,7 @@ paula PAULA1
 	
 	.enable_mister_floppy(user_port_mode),	
 	.mister_floppy_status(mister_floppy_status),
+	.drive_snd(drive_snd),
 
 	.USER_IN(USER_IN),
 	.USER_OUT(USER_OUT)
@@ -764,6 +777,10 @@ ciab CIAB1
 	.portb_out({_motor,_sel3,_sel2,_sel1,_sel0,side,direc,_step})
 );
 
+wire cpu_long_en;
+assign chip32_en = cpucfg[1] & (chipset_config[4] | (chipset_config[3] & ~cpucfg[0])) & ~ovr & ~cpuhlt;
+assign ram_long  = cpu_long_en & ~dbr & |bank[3:0];
+
 //instantiate cpu bridge
 minimig_m68k_bridge CPU1 
 (
@@ -780,11 +797,14 @@ minimig_m68k_bridge CPU1
 	.xbs(xbs),
 	.nrdy((gayle_nrdy & rd_cyc) | a2065_nrdy),
 	.bls(bls),
+	.blit_nasty(blit_nasty),
 	.memory_config(memory_config[3:0]),
 	._as(_cpu_as),
 	._lds(_cpu_lds),
 	._uds(_cpu_uds),
 	.r_w(cpu_r_w),
+	.cpu_long(cpu_long),
+	.long_en(cpu_long_en),
 	._dtack(_cpu_dtack),
 	.rd(cpu_rd),
 	.rd_cyc(rd_cyc),
@@ -832,7 +852,7 @@ minimig_sram_bridge RAM1
 	.c1(c1),
 	.c3(c3),	
 	.bank(bank),
-	.address_in(ram_address_out),
+	.address_in(ar_vsel ? ar_vadr : ram_address_out),
 	.data_in(ram_data_in),
 	.data_out(ram_data_out),
 	.rd(ram_rd),
@@ -858,13 +878,19 @@ cart CART1
   .cpu_rd(cpu_rd),
   .cpu_hwr(cpu_hwr),
   .cpu_lwr(cpu_lwr),
+  .cpu_data(cpu_data_out),
   .nmi_addr(nmi_addr),
   .reg_address_in(reg_address),
   .reg_data_in(custom_data_in),
   .dbr(dbr),
   .ovl(ovl),
   .freeze(freeze),
+  .ar_en(ar_on),
+  .ar_fetch(ar_fetch),
   .cart_data_out(cart_data_out),
+  .cart_data_mask(cart_data_mask),
+  .ar_vsel(ar_vsel),
+  .ar_vadr(ar_vadr),
   .int7(int7),
   .sel_cart(sel_cart),
   .ovr(ovr),
@@ -903,6 +929,7 @@ gary GARY1
 	.a2065_ena(a2065_ena),
 	.a2065_base(a2065_base),
 	.cdtv_mode(chipset_config[5]),
+	.ar_on(ar_on),
 	.ram_rd(ram_rd),
 	.ram_hwr(ram_hwr),
 	.ram_lwr(ram_lwr),
@@ -1164,7 +1191,7 @@ assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram | sel_cdtv_card;
 //-------------------------------------------------------------------------------------
 
 //data multiplexer
-assign cpu_data_in[15:0]= gary_data_out[15:0]
+assign cpu_data_in[15:0]= (gary_data_out[15:0] & cart_data_mask)
 							 | cia_data_out[15:0]
 							 | gayle_data_out[15:0]
 							 | cart_data_out[15:0]

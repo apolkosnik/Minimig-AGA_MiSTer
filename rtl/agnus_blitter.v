@@ -90,6 +90,8 @@ module agnus_blitter
 	output	reg zero,					// blitter zero status
 	output	reg busy,					// blitter busy status
 	output	int3,						// blitter finish interrupt request
+	output	active,
+	output	flush,
 	input 	[15:0] data_in,	    		// bus data in
 	output	[15:0] data_out,			// bus data out
 	input 	[8:1] reg_address_in,		// register address inputs
@@ -525,6 +527,8 @@ always @(posedge clk)
 
 // blitter finish interrupt request
 assign int3 = done;
+assign active = (busy | |blt_state) & (blt_state != BLT_FROZEN);
+assign flush = blt_state == BLT_E || blt_state == BLT_F;
 
 // FSM start control (one bus clock cycle delay for cycle exact compatibility)
 always @(posedge clk)
