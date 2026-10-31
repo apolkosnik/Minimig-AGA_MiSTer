@@ -104,9 +104,8 @@ module ap040_fpu
 	// exception (FMOVEM image), or the one an FRESTORE loaded
 	output reg [95:0] fstate_et,
 	input             frestore_idle,   // FRESTORE of an IDLE or EXCP frame
-	input             frestore_we,     // FRESTORE: a frame long word,
-	input       [1:0] frestore_wf,     // 0 the exponent word, 1 and 2 the mantissa
-	input      [31:0] frestore_wd,
+	input             frestore_we,     // FRESTORE: the frame's exception operand,
+	input      [79:0] frestore_wd,     // once every word is read: exponent, mantissa
 	input             unimp_ack,       // the core trapped an unimplemented instruction or
 	                                   // a packed operand: IDLE state, operand zero,
 	input             fs_clr,          // and (not FMOVECR) the exception byte cleared
@@ -1290,11 +1289,7 @@ always @(posedge clk) begin
 			fr_nice  <= 0;
 		end
 		if (frestore_idle) fpu_used <= 1;
-		if (frestore_we) case (frestore_wf)
-			2'd0:    fstate_et[95:64] <= {frestore_wd[31:16], 16'd0};
-			2'd1:    fstate_et[63:32] <= frestore_wd;
-			default: fstate_et[31:0]  <= frestore_wd;
-		endcase
+		if (frestore_we) fstate_et <= {frestore_wd[79:64], 16'd0, frestore_wd[63:0]};
 		if (unimp_ack) begin
 			fstate_et <= 96'd0;
 			fpu_used  <= 1;
@@ -1440,11 +1435,24 @@ always @(posedge clk) begin
 					// rounding bit positions); B/W/L go through the shifter
 					case (r_fmt)
 						3'd2: begin
-							// raw X pass-through can set no status bits, so
-							// it alone skips the F_STDONE enabled-trap check
-							dout <= {a_s, a_e[14:0], 16'd0, a_m};
-							done <= 1; fpu_used <= 1;
-							begin fst <= F_IDLE; acc_r <= 1'b0; end
+							// X passes the register image through, except
+							// a signaling NaN: stored quieted with SNAN and
+							// accrued IOP, then the F_STDONE enabled-trap
+							// check (6.6.2: written, then the SNAN trap).
+							// Anything else sets no status bits and is done
+							// now.  (FMOVEM's raw images go through fm_*.)
+							if (a_t == T_NAN && !a_m[62]) begin
+								dout <= {a_s, a_e[14:0], 16'd0,
+								         a_m | 64'h4000_0000_0000_0000};
+								fpsr[14] <= 1;
+								fpsr[7]  <= 1;
+								fpu_used <= 1; begin fst <= F_STDONE; acc_r <= 1'b0; end
+							end
+							else begin
+								dout <= {a_s, a_e[14:0], 16'd0, a_m};
+								done <= 1; fpu_used <= 1;
+								begin fst <= F_IDLE; acc_r <= 1'b0; end
+							end
 						end
 						3'd1: begin : pk_s
 							reg [24:0] mr;

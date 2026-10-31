@@ -250,10 +250,13 @@ logic  [3:0] f_cc;
 logic [31:0] f_crrd;
 logic        f_bsun_en;
 logic [95:0] f_xop;            // the EXCP frame's exception operand
-// FRESTORE: the frame's words go to the exception operand as they are read
+// FRESTORE: the frame's words are staged as they are read and go to the
+// exception operand together, once the last one is in: a format error or a
+// fault on a later word leaves the operand as it was (Appendix D, 8.2.1)
 logic        f_rwe;
-logic  [1:0] f_rwf;
-logic [31:0] f_rwd;
+logic [15:0] rs_w0;            // the exponent word's upper half
+logic [31:0] rs_w1;
+logic [31:0] f_rwd;            // the last word
 
 generate if (!NO_FPU) begin : g_fpu
 	ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
@@ -272,7 +275,7 @@ generate if (!NO_FPU) begin : g_fpu
 		.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
 		.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
 		.fstate_et(f_xop), .frestore_idle(f_rest_idle),
-		.frestore_we(f_rwe), .frestore_wf(f_rwf), .frestore_wd(f_rwd),
+		.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
 		.unimp_ack(f_uack), .fs_clr(f_fsclr),
 		.fp_reset(f_rst)
 	);
@@ -823,7 +826,7 @@ always_ff @(posedge clk) begin
 		f_class <= '0; f_fmt <= '0; f_srcr <= '0; f_dstr <= '0; f_fmsel <= '0; f_opm <= '0;
 		f_aok <= 1'b0; f_bok <= 1'b0;
 		f_din <= '0; f_dnice <= 1'b0; f_crsel <= '0; f_crwd <= '0; f_iapc <= '0;
-		f_rwe <= 1'b0; f_rwf <= '0; f_rwd <= '0;
+		f_rwe <= 1'b0; rs_w0 <= '0; rs_w1 <= '0; f_rwd <= '0;
 	end
 	else begin
 		f_req <= 1'b0; f_crwe <= 1'b0; f_iawe <= 1'b0; f_bsun <= 1'b0; f_fmwe <= 1'b0;
@@ -1044,17 +1047,18 @@ always_ff @(posedge clk) begin
 				sv_v    <= (sv_now == 2'd2) ? pend_vc : 3'd0;
 			end
 			FC_RS0: if (adv) begin
-				// the exponent word goes to the exception operand now
 				rs_kind <= rs_now;
 				rs_v    <= av[2:0];
-				f_rwe   <= 1'b1;
-				f_rwf   <= 2'd0;
-				f_rwd   <= av;
+				rs_w0   <= av[31:16];
 			end
 			FC_RSW: if (adv) begin
-				f_rwe <= 1'b1;
-				f_rwf <= immb[3:2];
-				f_rwd <= av;
+				// words 1 and 2: the second is the last read, and with it
+				// the whole operand is written
+				if (immb[3:2] == 2'd1) rs_w1 <= av;
+				else begin
+					f_rwe <= 1'b1;
+					f_rwd <= av;
+				end
 			end
 			default: ;
 		endcase
