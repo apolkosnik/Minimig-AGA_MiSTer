@@ -50,11 +50,30 @@ module a2065_regfile (
     reg [6:0]  rap;
     reg [15:0] csr_shadow [0:3];
 
+    // The CSRs come from the mailbox on the DDR3 clock (clk_ddr, the same
+    // PLL as clk).  They are copied one at a time through one 4:1 choice,
+    // each refreshed every fourth clock: the choice keeps a logic level
+    // between the mailbox's registers and these, where a bare register
+    // copy left the path's hold to the clock skew between the two PLL
+    // outputs (-0.24 ns in a fit).  The 68k polls them; three clocks more
+    // to see the ARM's update do not matter.  (Each register written by
+    // its own condition: no memory is inferred for the four.)
+    reg  [1:0]  csr_rr = 2'd0;
+    reg  [15:0] csr_pick;
+    always @(*) begin
+        case (csr_rr)
+        2'd0:    csr_pick = csr0_in;
+        2'd1:    csr_pick = csr1_in;
+        2'd2:    csr_pick = csr2_in;
+        default: csr_pick = csr3_in;
+        endcase
+    end
     always @(posedge clk) begin
-        csr_shadow[0] <= csr0_in;
-        csr_shadow[1] <= csr1_in;
-        csr_shadow[2] <= csr2_in;
-        csr_shadow[3] <= csr3_in;
+        csr_rr <= csr_rr + 2'd1;
+        if (csr_rr == 2'd0) csr_shadow[0] <= csr_pick;
+        if (csr_rr == 2'd1) csr_shadow[1] <= csr_pick;
+        if (csr_rr == 2'd2) csr_shadow[2] <= csr_pick;
+        if (csr_rr == 2'd3) csr_shadow[3] <= csr_pick;
     end
 
     reg [15:0] chip_id_out;

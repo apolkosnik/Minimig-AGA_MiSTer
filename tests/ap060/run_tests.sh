@@ -128,10 +128,12 @@ done
 fail=0
 # module benches: the DDR3 arbiter keeps a stalled command presented
 # (Avalon), ddram_ctrl takes read data that comes with waitrequest, a CDTV
-# DMA restarted after STOP waits for the stopped one's acknowledge
+# DMA restarted after STOP waits for the stopped one's acknowledge, the
+# A2065's CSR mirror follows the mailbox's CSRs
 for u in "arb_stall:$R/A2065/a2065_ddram_arbiter.v" \
          "ddram_rdbusy:$R/ddram_ctrl.v $R/cpu_cache_new.v $R/A2065/a2065_ddram_arbiter.v sim_dpram.v" \
-         "cdtv_restart:$R/cdtv_bridge.v $R/chipdma_arb.v $R/memory_router.v sim_dpram.v"; do
+         "cdtv_restart:$R/cdtv_bridge.v $R/chipdma_arb.v $R/memory_router.v sim_dpram.v" \
+         "a2065_csr:$R/A2065/a2065_regfile.v"; do
 	n=${u%%:*}
 	# shellcheck disable=SC2086
 	if verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-TIMESCALEMOD \
