@@ -23,6 +23,10 @@
 #   asm/t_pfstale.s     the Fast RAM port's prefetched lines: a write or a
 #                       DMA while they are on their way is not lost
 #   asm/t_reset.s       RESET after a posted chipset write: RSTO waits for it
+#   asm/t_chip32.s      AGA's 32-bit chip RAM cycles: long words in one cycle,
+#                       every width reading back what the others wrote
+#   asm/t_chipcode.s    chip RAM code in the instruction cache, rewritten by
+#                       DMA behind it: the new code after a WaitBlit
 #   asm/t_reset2.s      what follows RESET waits for the external reset
 #   asm/t_idebw.s       Gayle IDE sector reads, 32-bit (t_ide32) and 16-bit
 #                       (t_ide16), with the MMU as 68060.library sets it
@@ -39,6 +43,8 @@
 # on a DDR3 model (random waitrequest in ddr_wait), ddr_throttle with the
 # stock speed option, ddr_1x with the processor on clk itself, ddr_cpu20 with
 # it at 20 MHz (below the bus side), ddr_lc060 with no FPU (MC68LC060),
+# ddr_70 the full MC68060 at 70 MHz as the build runs it,
+# ddr_c16 with the chip bus's 16-bit cycles only (the rest: 32-bit, AGA's),
 # ddr_iplskew with IPL0 reaching the adapter's synchroniser late,
 # simple through a plain RAM port model;
 # the others run it at 55 MHz, unrelated to the Minimig clocks.  Every run
@@ -52,7 +58,7 @@ R=../../rtl
 A=$R/ap060
 VASM=${VASM:-vasmm68k_mot}
 
-PROGS="t_ap060_sys t_irqstore t_l2stale t_nmi t_iplglitch t_clrloop t_dmacoh t_dmaord t_pfstale t_reset t_reset2 t_c2p t_irqack"
+PROGS="t_ap060_sys t_irqstore t_l2stale t_nmi t_iplglitch t_clrloop t_dmacoh t_dmaord t_pfstale t_reset t_reset2 t_c2p t_irqack t_chip32 t_chipcode"
 CORE="smoke t_integer t_stld t_bitfield_cache t_fpu_dis t_movem_restart"
 for t in $PROGS; do
 	$VASM -quiet -Fbin -m68040 -no-opt -L "$WORK/$t.lst" -o "$WORK/$t.bin" "asm/$t.s"
@@ -114,6 +120,8 @@ ddr_throttle:-GWAIT=1,-GTHROTTLE=1
 ddr_1x:-GWAIT=1,-GCPU_1X=1
 ddr_cpu20:-GWAIT=1,-GCPU_HALF=25.0
 ddr_lc060:-GWAIT=1,-GFPU=0
+ddr_70:-GWAIT=1,-GCPU_HALF=7.1429
+ddr_c16:-GWAIT=1,-GCHIP32=0
 ddr_iplskew:-GWAIT=1,+define+AP060_SIM_IPL_SKEW=5
 simple:-GREAL_DDR=0"
 for c in $CONFIGS; do

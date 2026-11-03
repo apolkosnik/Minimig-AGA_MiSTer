@@ -26,7 +26,9 @@
 
 module cpu_wrapper
 #(
-	parameter AP060_FPU = 1          // 1: a full MC68060; 0: an MC68LC060 (no FPU, ~4,000 ALMs less)
+	parameter AP060_FPU = 1,         // 1: a full MC68060; 0: an MC68LC060 (no FPU, ~3,800 ALMs less)
+	parameter TOCCATA   = 1,         // 0: no Toccata board offered by autoconfig
+	parameter CDTV      = 1          // 0: no CDTV board offered by autoconfig
 )
 (
 	input             reset,
@@ -35,6 +37,9 @@ module cpu_wrapper
 	input             clk,
 	input             clk_cpu,         // 2x clk, edges aligned: the AP68060's processor clock
 	input             clk_mem,         // DDRAM_CLK: the processor's Fast RAM port
+	input             chip_wev,        // (clk_mem) sdram_ctrl: a chip RAM write slot ...
+	input      [20:4] chip_wline,      // ... its line (the instruction cache drops it)
+	input             chip2m,          // 2 MB of chip RAM (chip RAM code cachable)
 	input             fr_dma_req,      // ddram_ctrl: a DMA write reached DDR3 (toggle) ...
 	output            fr_dma_ack,      // ... the Fast RAM port's cache is clear (toggle)
 	output      [7:0] fr_q_done,       // (clk_mem) the Fast RAM port's queue, for DMA ordering
@@ -127,12 +132,8 @@ module cpu_wrapper
 wire dcache_sw_en_p;
 assign dcache_sw_en = dcache_sw_en_p;
 
-// Upstream's TG68K paths that the AP68060 does not use: no 32-bit chip bus
-// cycles (chip32_en), no paired long word to Fast RAM (ramlong1)
-always @* begin
-	chip_long = 1'b0;
-	chip_din2 = 16'd0;
-end
+// (no paired long word to Fast RAM, ramlong1: the AP68060 has its own
+// Fast RAM port)
 assign ramlong1  = 1'b0;
 assign ramdin_lo = 16'd0;
 
@@ -216,8 +217,12 @@ always @* begin
 	chip_rw      = c_rw;
 	chip_uds     = c_uds;
 	chip_lds     = c_lds;
-	chip_addr    = cpu_addr_p[23:1];
-	chip_din     = cpu_dout_p;
+	// a 32-bit chip cycle writes the long word at its first address: the
+	// high word held (w32), the low one the access at hand
+	chip_addr    = ((c_long | w32_fl) & ~c_rw) ? {w32_adr, 1'b0} : cpu_addr_p[23:1];
+	chip_din     = ((c_long | w32_fl) & ~c_rw) ? w32_hi : cpu_dout_p;
+	chip_long    = c_long;
+	chip_din2    = cpu_dout_p;
 	chip_data    = chipdout_i;
 	fastchip_sel = cpu_req_go & !cpu_addr_p[31:24];
 	fastchip_lw  = longword;
@@ -261,6 +266,7 @@ ap060_tg68k_compat #(.NO_FPU(AP060_FPU == 0), .DEBUG_CAPTURE(0)) cpu_inst_p
 	.z3ram_base1(z3ram_base1),
 	.z3ram_ena1(z3ram_ena1),
 	.clk_mem(clk_mem),
+	.chip_wev(chip_wev), .chip_wline(chip_wline), .chip2m(chip2m),
 	.fr_dma_req(fr_dma_req),
 	.fr_dma_ack(fr_dma_ack),
 	.fr_q_done(fr_q_done),
@@ -340,14 +346,36 @@ always @(posedge clk) begin
 	ph2n <= ph2;
 end
 
+// 32-bit chip RAM cycles (AGA's, as the A1200's CPU makes them; Minimig's
+// chip32_en): the adapter hands a long word over as two word accesses, A
+// with longword high, then A + 2 (as TG68K does).  An aligned long word in
+// chip RAM is one chip cycle (chip_long): a write's high word is held (w32)
+// and the cycle goes with the low one; a read's cycle brings both words and
+// the second access takes the low one (r32).  Whatever comes instead of the
+// low word of a held write first writes the high word alone (w32_fl).
+wire c32 = chip32_en & longword & ~uds_in & ~lds_in & ~|cpu_addr_p[1:0] & ~|cpu_addr_p[31:21] &
+           ~sel_nmi_vector & ~ramsel & ~fastchip_selack & ~cdtv_selack;
+
 reg        chipready;
 reg [15:0] chipdout_i;
 reg  [2:0] ipl_i;
 reg        c_as,c_rw,c_uds,c_lds;
+reg        c_long;
+reg        w32;
+reg [23:2] w32_adr;
+reg [15:0] w32_hi;
+reg        w32_fl;
+reg        r32;
+reg [23:2] r32_adr;
+reg [15:0] r32_lo;
+reg [15:0] chip_dout2_p;
+always @(posedge clk) chip_dout2_p <= chip_dout2;
+
 always @(negedge clk, negedge reset) begin
 	reg [1:0] stage;
 	reg waitm;
 	reg ready;
+	reg now;
 
 	if(~reset) begin
 		stage <= 0;
@@ -355,7 +383,11 @@ always @(negedge clk, negedge reset) begin
 		c_rw <= 1;
 		c_uds <= 1;
 		c_lds <= 1;
+		c_long <= 0;
 		ready <= 0;
+		w32 <= 0;
+		w32_fl <= 0;
+		r32 <= 0;
 	end
 	else begin
 		if (ph2n) begin
@@ -363,16 +395,45 @@ always @(negedge clk, negedge reset) begin
 			if(~stage[0]) ipl_i <= chip_ipl;
 		end
 
-		chipready <= 0;
+		// answered here, no chip cycle: a held long word's low half
+		// (read), or the high half of a long word write (held)
+		now = 0;
+		if (~|stage & cpu_req_go) begin
+			if (r32 & wr & (cpu_addr_p[23:2] == r32_adr) & cpu_addr_p[1]) begin
+				chipdout_i <= r32_lo;
+				r32 <= 0;
+				now = 1;
+			end
+			else if (c32 & ~wr & ~w32) begin
+				w32_adr <= cpu_addr_p[23:2];
+				w32_hi  <= cpu_dout_p;
+				w32 <= 1;
+				now = 1;
+			end
+		end
+
+		chipready <= now;
 		if (ph1n) begin
-			chipready <= ready;
+			chipready <= now | ready;
 			ready <= 0;
 			case (stage)
-				0: if (chipreq) begin
+				0: if (chipreq & ~now) begin
 						c_as <= 0;
-						c_rw <= wr;
-						c_uds <= uds_in;
-						c_lds <= lds_in;
+						if (w32 & (wr | (cpu_addr_p[23:2] != w32_adr) | ~cpu_addr_p[1] | uds_in | lds_in)) begin
+							// not the held write's low half: its high half alone first
+							c_rw <= 0;
+							c_uds <= 0;
+							c_lds <= 0;
+							c_long <= 0;
+							w32_fl <= 1;
+						end
+						else begin
+							c_rw <= wr;
+							c_uds <= uds_in;
+							c_lds <= lds_in;
+							c_long <= w32 | (c32 & wr);
+						end
+						r32 <= 0;
 						stage <= 1;
 					end
 				1: stage <= 2;
@@ -383,11 +444,23 @@ always @(negedge clk, negedge reset) begin
 							c_rw <= 1;
 							c_uds <= 1;
 							c_lds <= 1;
-							ready <= 1;
+							c_long <= 0;
+							w32 <= 0;
+							if (c_long & c_rw) begin
+								r32     <= 1;
+								r32_adr <= cpu_addr_p[23:2];
+							end
+							// (the held high half's own write: the access at hand
+							// still waits for its cycle)
+							ready <= ~w32_fl;
+							w32_fl <= 0;
 							stage <= 3;
 						end
 					end
-				3: stage <= 0;
+				3: begin
+						r32_lo <= chip_dout2_p;
+						stage <= 0;
+					end
 			endcase
 		end
 	end
@@ -510,9 +583,9 @@ always @(posedge clk) begin
 
 	if (~reset | ~reset_out) begin
 		ac_memcard  <= fastramcfg;
-		ac_toccata  <= cdtv_mode ? 1'b0 : 1'b1;
+		ac_toccata  <= (TOCCATA != 0) && !cdtv_mode;
 		ac_a2065    <= 1;
-		ac_cdtv     <= cdtv_mode;
+		ac_cdtv     <= (CDTV != 0) && cdtv_mode;
 		cdtv_base   <= 8'hE9;
 		z2ram_ena   <= 0;
 		z3ram_ena0  <= 0;
@@ -565,7 +638,7 @@ always @(posedge clk) begin
 	end
 end
 
-assign toccata_ena = ~ac_toccata & ~cdtv_mode;
+assign toccata_ena = (TOCCATA != 0) & ~ac_toccata & ~cdtv_mode;
 assign a2065_ena   = ~ac_a2065;
 
 endmodule

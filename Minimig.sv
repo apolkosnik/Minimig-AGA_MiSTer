@@ -172,7 +172,7 @@ pll pll
 
 wire [63:0] reconfig_to_pll;
 
-// the AP68060's processor clock, 50 MHz, unrelated to the Minimig clocks
+// the AP68060's processor clock, 70 MHz, unrelated to the Minimig clocks
 wire clk_cpu;
 pll_cpu pll_cpu
 (
@@ -324,6 +324,8 @@ wire [15:0] chip_dout;
 wire [15:0] chip_din;
 wire [23:1] chip_addr;
 wire        chip32_en;
+wire        chip_wev;        // sdram_ctrl: a chip RAM write (the 68060's instruction cache drops its line)
+wire [20:4] chip_wline;
 wire        chip_long;
 wire [15:0] chip_din2;
 wire [15:0] chip_rd2;
@@ -373,7 +375,8 @@ wire  [7:0] fr_burstcount, fr_byteenable;
 wire        fr_read, fr_write, fr_waitrequest, fr_readdatavalid;
 wire [63:0] fr_writedata, fr_readdata;
 
-cpu_wrapper cpu_wrapper
+// Toccata and CDTV off in this build: room for the 70 MHz processor
+cpu_wrapper #(.TOCCATA(0), .CDTV(0)) cpu_wrapper
 (
 	.reset        (cpu_rst         ),
 	.reset_out    (cpu_nrst_out    ),
@@ -381,6 +384,9 @@ cpu_wrapper cpu_wrapper
 	.clk          (clk_sys         ),
 	.clk_cpu      (clk_cpu         ),
 	.clk_mem      (clk_114         ),
+	.chip_wev     (chip_wev        ),
+	.chip_wline   (chip_wline      ),
+	.chip2m       (memcfg[1:0] == 2'b11),
 	.fr_dma_req   (ddr_dma_req     ),
 	.fr_dma_ack   (ddr_dma_ack     ),
 	.fr_q_done    (fr_q_done       ),
@@ -526,7 +532,9 @@ sdram_ctrl ram1
 	.chip48       (chip48          ),
 	.chip32       (arb_chip_long   ),
 	.chipWR2      (arb_chip_wr2    ),
-	.chipRD2      (chip_rd2        )
+	.chipRD2      (chip_rd2        ),
+	.chip_wev     (chip_wev        ),
+	.chip_wline   (chip_wline      )
 );
 
 chipdma_arb chipdma_arb
@@ -596,6 +604,11 @@ wire  [7:0] ddr1_burstcnt, ddr1_be;
 wire [28:0] ddr1_addr;
 wire [63:0] ddr1_dout, ddr1_din;
 
+wire [28:0] fa_address;
+wire  [7:0] fa_burstcount, fa_byteenable;
+wire        fa_read, fa_write, fa_waitrequest;
+wire [63:0] fa_writedata;
+
 a2065_ddram_arbiter fastram_arbiter
 (
 	.clk             (clk_114),
@@ -618,15 +631,39 @@ a2065_ddram_arbiter fastram_arbiter
 	.m1_byteenable   (ddr1_be),
 	.m1_write        (ddr1_we),
 	.m1_waitrequest  (ddr1_busy),
-	.s_address       (DDRAM_ADDR),
-	.s_burstcount    (DDRAM_BURSTCNT),
-	.s_read          (DDRAM_RD),
+	.s_address       (fa_address),
+	.s_burstcount    (fa_burstcount),
+	.s_read          (fa_read),
 	.s_readdata      (DDRAM_DOUT),
 	.s_readdatavalid (DDRAM_DOUT_READY),
-	.s_writedata     (DDRAM_DIN),
-	.s_byteenable    (DDRAM_BE),
-	.s_write         (DDRAM_WE),
-	.s_waitrequest   (DDRAM_BUSY)
+	.s_writedata     (fa_writedata),
+	.s_byteenable    (fa_byteenable),
+	.s_write         (fa_write),
+	.s_waitrequest   (fa_waitrequest)
+);
+
+// a one-deep skid stage between the arbiter and the HPS DDR3 port: the
+// port's waitrequest (with the hard block's clock skew) reaches one flip-flop
+// here, not the arbiter's beat count (the 114 MHz critical path).  Commands
+// stay in order through it; read data passes straight back.
+ddram_hold fastram_hold
+(
+	.clk           (clk_114),
+	.rst           (reset_d),
+	.u_address     (fa_address),
+	.u_burstcount  (fa_burstcount),
+	.u_read        (fa_read),
+	.u_writedata   (fa_writedata),
+	.u_byteenable  (fa_byteenable),
+	.u_write       (fa_write),
+	.u_waitrequest (fa_waitrequest),
+	.d_address     (DDRAM_ADDR),
+	.d_burstcount  (DDRAM_BURSTCNT),
+	.d_read        (DDRAM_RD),
+	.d_writedata   (DDRAM_DIN),
+	.d_byteenable  (DDRAM_BE),
+	.d_write       (DDRAM_WE),
+	.d_waitrequest (DDRAM_BUSY)
 );
 
 ddram_ctrl ram2
@@ -710,6 +747,12 @@ wire        mem2_readdatavalid, mem2_waitrequest;
 wire [28:0] dsnd_addr;
 wire        dsnd_rd, dsnd_busy, dsnd_ready;
 
+// Floppy drive sounds (drive_sounds: samples read from DDR3, mixed into the
+// audio).  Off in this build for area (~300 ALMs with its DDR3 arbiter):
+// the A2065 has ddram_ctrl's second port to itself and nothing is mixed.
+localparam DRIVE_SOUNDS = 0;
+
+generate if (DRIVE_SOUNDS) begin : g_dsnd_arb
 a2065_ddram_arbiter dsnd_arb
 (
 	.clk             (clk_114),
@@ -745,6 +788,19 @@ a2065_ddram_arbiter dsnd_arb
 	.s_write         (mem2_write),
 	.s_waitrequest   (mem2_waitrequest)
 );
+end else begin : g_no_dsnd_arb
+assign mem2_address            = a2065_mem_address;
+assign mem2_burstcount         = a2065_mem_burstcount;
+assign mem2_read               = a2065_mem_read;
+assign a2065_mem_readdata      = mem2_readdata;
+assign a2065_mem_readdatavalid = mem2_readdatavalid;
+assign mem2_writedata          = a2065_mem_writedata;
+assign mem2_byteenable         = a2065_mem_byteenable;
+assign mem2_write              = a2065_mem_write;
+assign a2065_mem_waitrequest   = mem2_waitrequest;
+assign dsnd_busy  = 1'b1;
+assign dsnd_ready = 1'b0;
+end endgenerate
 
 wire [15:0] fastchip_dout;
 wire        fastchip_sel;
@@ -764,7 +820,8 @@ wire [15:0] ide_f_readdata;
 
 // fastchip is working on CPU clock.
 // Only high performance 68020 devices are inside
-fastchip fastchip
+// Akiko (CD32) off in this build: room for the 70 MHz processor
+fastchip #(.AKIKO(0)) fastchip
 (
 	.clk          (clk_114           ),
 	.cyc          (cyc               ),
@@ -883,10 +940,12 @@ wire  [8:0] drive_snd;
 wire [6:0]  IndirectUserOutmt32;
 wire [6:0]  IndirectUserOutFlop;
 wire        user_port_mode;
-assign USER_OUT = user_port_mode ? IndirectUserOutFlop : IndirectUserOutmt32;
+// physical floppy drives off (paula_floppy MISTER_FLOPPY = 0): the user
+// port is the MT32-pi's whatever the menu's user port mode says
+assign USER_OUT = IndirectUserOutmt32;
 
 
-minimig minimig
+minimig #(.TOCCATA(0), .CDTV(0)) minimig
 (
 	//m68k pins
 	.cpu_address  (chip_addr        ), // M68K address bus
@@ -1421,6 +1480,7 @@ wire aud_1200  = status[49];
 wire paula_pwm = status[50];
 
 wire [15:0] dsnd_l, dsnd_r;
+generate if (DRIVE_SOUNDS) begin : g_dsnd
 drive_sounds drive_sounds
 (
 	.clk(clk_114),
@@ -1435,6 +1495,12 @@ drive_sounds drive_sounds
 	.ddr_dout(DDRAM_DOUT),
 	.ddr_dout_ready(dsnd_ready)
 );
+end else begin : g_no_dsnd
+assign dsnd_l    = 16'd0;
+assign dsnd_r    = 16'd0;
+assign dsnd_addr = 29'd0;
+assign dsnd_rd   = 1'b0;
+end endgenerate
 
 wire [15:0] paula_smp_l = (paula_pwm ? {ldata_okk[8:0], 7'b0} : {ldata[14:0], 1'b0});
 wire [15:0] paula_smp_r = (paula_pwm ? {rdata_okk[8:0], 7'b0} : {rdata[14:0], 1'b0});

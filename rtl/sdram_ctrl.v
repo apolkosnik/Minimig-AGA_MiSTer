@@ -58,6 +58,11 @@ module sdram_ctrl
 	input      [15:0] chipWR,
 	output reg [15:0] chipRD,
 	output     [47:0] chip48,
+	// every chip RAM write slot (the CPU's, the chipset's, Akiko's or the
+	// CDTV's DMA), as its command starts: the 16-byte line it writes (the
+	// AP68060's instruction cache drops the line; sysclk)
+	output reg        chip_wev = 1'b0,
+	output reg [20:4] chip_wline,
 	input             chip32,
 	input      [15:0] chipWR2,
 	output reg [15:0] chipRD2,
@@ -309,6 +314,7 @@ always @ (posedge sysclk) begin
 	reg  [3:0] rcnt, rcnt_n;
 	
 	sd_clk <= sdram_state[0];
+	chip_wev <= 1'b0;   // (one clock: set below with a chip write slot)
 
 	{sd_ba, sd_addr} <= row;
 	sd_ras  <= ras;
@@ -361,6 +367,8 @@ always @ (posedge sysclk) begin
 					cas_sd_we    <= chipRW;
 					datawr       <= chipWR;
 					chipWE       <= !chipRW;
+					chip_wev     <= !chipRW && (chipAddr[24:21] == 4'd0);
+					chip_wline   <= chipAddr[20:4];
 					a_wr2        <= chip32 & !chipRW;
 					a_rd2        <= chip32 &  chipRW;
 					datawr2      <= chipWR2;

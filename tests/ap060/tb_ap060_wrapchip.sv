@@ -26,6 +26,10 @@
 //       $F130.w  the next DDR3 read burst longer than a line waits this   //
 //                many clk_114 clocks after its first line (the Fast RAM   //
 //                port's prefetched lines arrive late)                     //
+//       $F138.l  an address in chip RAM; $F13C.w: the bench writes that  //
+//                word there, as chipset DMA would (and reports the write   //
+//                as sdram_ctrl does, so the instruction cache drops the    //
+//                line; +nosnoop: not reported)                             //
 //       $F12E.w  the run ends when RSTO asserts: PASS when nothing posted  //
 //                is unfinished and chip RAM $8100.w holds $1234 (t_reset)  //
 //       $F1D0.w  IDE: load a 256-word sector into drive 0 (fastchip's      //
@@ -68,7 +72,8 @@ module tb_ap060_wrapchip #(
 	                                   // run between two copies of one clock)
 	parameter real CPU_HALF = 9.0909,  // the processor clock's half period: 55 MHz
 	parameter A2065      = 1,          // the A2065 mailbox on ddram_ctrl's second port, polling
-	parameter FPU        = 1           // a full MC68060 (0: an MC68LC060)
+	parameter FPU        = 1,          // a full MC68060 (0: an MC68LC060)
+	parameter CHIP32     = 1           // AGA's 32-bit chip RAM cycles for the CPU (Minimig's chip32_en)
 );
 
 //--------------------------------------------------------------------------
@@ -168,6 +173,24 @@ wire  [4:0] fr_q_pend;
 // in clk_sys without the chip bus
 wire        fc_sel, fc_lds, fc_uds, fc_rnw, fc_lw, fc_selack, fc_ready;
 wire [15:0] fc_dout;
+wire        chip_long;                 // a 32-bit chip cycle (CHIP32): ...
+reg  [15:0] c32_n = 16'd0;             // the 32-bit chip cycles (chip RAM $F134.w)
+// chip RAM writes reported to the adapter, as sdram_ctrl does (one event a
+// write, clk_114): the processor's and the bench's DMA ($F13C); +nosnoop
+// leaves the DMA's out (the test must then fail)
+reg         cwt = 1'b0;                 // (clk) flips per write ...
+reg  [20:4] cwt_line;                   // ... its line
+reg  [31:0] dw_addr = 32'd0;            // $F138/$F13A: the DMA write's address
+reg  [1:0]  cwt_s = 2'b00;
+reg         cw_ev = 1'b0;
+reg  [20:4] cw_line;
+always @(posedge clk_114) begin
+	cwt_s <= {cwt_s[0], cwt};
+	cw_ev <= (cwt_s[1] != cwt_s[0]);
+	cw_line <= cwt_line;
+end
+wire [15:0] chip_din2;                 // ... the low word written
+reg  [15:0] chip_dout2 = 16'hFFFF;     // ... and read
 
 cpu_wrapper #(.AP060_FPU(FPU)) dut (
 	.reset(reset), .reset_out(reset_out),
@@ -176,7 +199,7 @@ cpu_wrapper #(.AP060_FPU(FPU)) dut (
 	.chip_addr(chip_addr), .chip_dout(chip_dout), .chip_din(chip_din),
 	.chip_as(chip_as), .chip_uds(chip_uds), .chip_lds(chip_lds), .chip_rw(chip_rw),
 	.chip_dtack(chip_dtack), .chip_ipl(chip_ipl_eff),
-	.chip32_en(1'b0), .chip_long(), .chip_din2(), .chip_dout2(16'd0),
+	.chip32_en(CHIP32 != 0), .chip_long(chip_long), .chip_din2(chip_din2), .chip_dout2(chip_dout2),
 	.fastchip_dout(fc_dout), .fastchip_sel(fc_sel), .fastchip_lds(fc_lds), .fastchip_uds(fc_uds),
 	.fastchip_rnw(fc_rnw), .fastchip_lw(fc_lw), .fastchip_selack(fc_selack), .fastchip_ready(fc_ready),
 	.ramsel(ram_sel), .ramaddr(ramaddr), .ramdin(ramdin), .ramdout(16'd0), .ramdout2(ramdout), .ramready(ram_ready),
@@ -189,7 +212,7 @@ cpu_wrapper #(.AP060_FPU(FPU)) dut (
 	.z2ram_ena(z2ram_ena), .z3ram_base0(z3ram_base0), .z3ram_ena0(z3ram_ena0),
 	.z3ram_base1(z3ram_base1), .z3ram_ena1(z3ram_ena1),
 	.dcache_sw_en(dcache_sw_en),
-	.clk_mem(clk_114), .fr_dma_req(fr_dma_req), .fr_dma_ack(fr_dma_ack), .fr_q_done(fr_q_done), .fr_q_pend(fr_q_pend),
+	.clk_mem(clk_114), .chip_wev(cw_ev), .chip_wline(cw_line), .chip2m(1'b1), .fr_dma_req(fr_dma_req), .fr_dma_ack(fr_dma_ack), .fr_q_done(fr_q_done), .fr_q_pend(fr_q_pend),
 	.fr_address(fr_address), .fr_burstcount(fr_burstcount), .fr_read(fr_read), .fr_write(fr_write),
 	.fr_writedata(fr_writedata), .fr_byteenable(fr_byteenable), .fr_waitrequest(fr_waitrequest),
 	.fr_readdata(fr_readdata), .fr_readdatavalid(fr_readdatavalid)
@@ -226,8 +249,56 @@ integer cycles = 0;
 wire [19:0] cwi = chip_addr[20:1];
 wire        cmem = (chip_addr[23:21] == 3'd0);
 
+// the bench's registers, for each word written (a 32-bit chip cycle: both)
+task automatic mmio_wr(input [23:0] wa, input [15:0] wd);
+	case (wa)
+		24'h00F100: testno <= wd;
+		24'h00F102: begin
+			result <= wd;
+			if (wd != 16'h600D)
+				$display("FAIL: program reports failure, test %0d (cycle %0d)", testno, cycles);
+		end
+		24'h00F110: chip_ipl <= ~wd[2:0];
+		// INTREQ: a write clearing bits (SET, bit 15, clear) takes the
+		// bench's request away, as Paula's acknowledge does
+		24'hDFF09C: if (!wd[15]) chip_ipl <= 3'b111;
+		24'h00F118: nmi_req  <= 1'b1;
+		24'h00F112: rnd_lvl  <= wd[2:0];
+		24'h00F10A: progress <= wd;
+		24'h00F114: rnd_max  <= wd;
+		24'h00F126: dma_dat  <= wd;
+		24'h00F12C: cw_extra <= wd;
+		24'h00F12E: rst_end  <= 1'b1;
+		24'h00F1D0: ide_tgl  <= ~ide_tgl;
+		24'h00F124: begin dma_q[dma_qw % 64] <= {dma_rdnext, wd, dma_dat}; dma_qw <= dma_qw + 1; dma_rdnext <= 1'b0; end
+		24'h00F11C: dma_rdnext <= 1'b1;
+		24'h00F11E: fq_hold_tgl <= ~fq_hold_tgl;
+		24'h00F138: dw_addr[31:16] <= wd;
+		24'h00F13A: dw_addr[15:0]  <= wd;
+		24'h00F13C: begin
+			// a DMA write (as the blitter's): chip RAM, behind the processor
+			chip[dw_addr[20:1]] <= wd;
+			if (!$test$plusargs("nosnoop")) begin cwt <= ~cwt; cwt_line <= dw_addr[20:4]; end
+		end
+		24'h00F130: begin pg_val <= wd; pg_tgl <= ~pg_tgl; end
+		24'h00F108: begin
+			// a time stamp: the time since the previous one
+			$display("STAMP %04h %0d ns", wd, $rtoi($realtime - stamp_t));
+			stamp_t = $realtime;
+		end
+		24'h00F120: begin
+			// chipset DMA: rewrite $8000.l behind the processor
+			chip[20'h4000] <= ~chip[20'h4000];
+			chip[20'h4001] <= ~chip[20'h4001];
+		end
+		default: ;
+	endcase
+endtask
+
 always @(posedge clk) begin
 	cycles <= cycles + 1;
+	chip[20'h789A] <= c32_n;                    // $F134
+	chip[20'h789B] <= (CHIP32 != 0) ? 16'd1 : 16'd0; // $F136
 	// random interrupts: count down while none is pending, then raise one
 	if (rnd_lvl != 0 && chip_ipl == 3'b111) begin
 		if (rnd_cnt <= 0) begin
@@ -250,6 +321,9 @@ always @(posedge clk) begin
 		chip_dtack <= 1'b0;
 		if (chip_rw) begin
 			chip_dout <= cmem ? chip[cwi] : 16'hFFFF;
+			chip_dout2 <= cmem ? chip[cwi + 20'd1] : 16'hFFFF;   // (a 32-bit cycle's low word)
+			// (chip RAM $F134.w: the 32-bit cycles so far, $F136.w: CHIP32)
+			if (chip_long) c32_n <= c32_n + 16'd1;
 			// interrupt acknowledge reads ($FFFFFFF0 + level * 2)
 			if (chip_addr[23:4] == 20'hFFFFF) begin
 				chip[20'h7900] <= {13'd0, chip_addr[3:1]};     // $F200
@@ -260,42 +334,12 @@ always @(posedge clk) begin
 			if (cmem) begin
 				if (!chip_uds) chip[cwi][15:8] <= chip_din[15:8];
 				if (!chip_lds) chip[cwi][7:0]  <= chip_din[7:0];
+				if (chip_long) chip[cwi + 20'd1] <= chip_din2;   // a 32-bit cycle: the long word
+				cwt <= ~cwt; cwt_line <= {chip_addr[20:4]};
+				if (chip_long) c32_n <= c32_n + 16'd1;
 			end
-			case ({chip_addr[23:1], 1'b0})
-				24'h00F100: testno <= chip_din;
-				24'h00F102: begin
-					result <= chip_din;
-					if (chip_din != 16'h600D)
-						$display("FAIL: program reports failure, test %0d (cycle %0d)", testno, cycles);
-				end
-				24'h00F110: chip_ipl <= ~chip_din[2:0];
-				// INTREQ: a write clearing bits (SET, bit 15, clear) takes the
-				// bench's request away, as Paula's acknowledge does
-				24'hDFF09C: if (!chip_din[15]) chip_ipl <= 3'b111;
-				24'h00F118: nmi_req  <= 1'b1;
-				24'h00F112: rnd_lvl  <= chip_din[2:0];
-				24'h00F10A: progress <= chip_din;
-				24'h00F114: rnd_max  <= chip_din;
-				24'h00F126: dma_dat  <= chip_din;
-				24'h00F12C: cw_extra <= chip_din;
-				24'h00F12E: rst_end  <= 1'b1;
-				24'h00F1D0: ide_tgl  <= ~ide_tgl;
-				24'h00F124: begin dma_q[dma_qw % 64] <= {dma_rdnext, chip_din, dma_dat}; dma_qw <= dma_qw + 1; dma_rdnext <= 1'b0; end
-				24'h00F11C: dma_rdnext <= 1'b1;
-				24'h00F11E: fq_hold_tgl <= ~fq_hold_tgl;
-				24'h00F130: begin pg_val <= chip_din; pg_tgl <= ~pg_tgl; end
-				24'h00F108: begin
-					// a time stamp: the time since the previous one
-					$display("STAMP %04h %0d ns", chip_din, $rtoi($realtime - stamp_t));
-					stamp_t = $realtime;
-				end
-				24'h00F120: begin
-					// chipset DMA: rewrite $8000.l behind the processor
-					chip[20'h4000] <= ~chip[20'h4000];
-					chip[20'h4001] <= ~chip[20'h4001];
-				end
-				default: ;
-			endcase
+			mmio_wr({chip_addr[23:1], 1'b0}, chip_din);
+			if (chip_long) mmio_wr({chip_addr[23:1], 1'b0} + 24'd2, chip_din2);
 		end
 	end
 end
@@ -437,6 +481,13 @@ generate if (REAL_DDR) begin : g_ddr
 	wire [28:0] DDRAM_ADDR;
 	wire [63:0] DDRAM_DIN, DDRAM_DOUT;
 	wire        ddr1_busy, ddr1_dout_ready, ddr1_rd, ddr1_we;
+	// DMA writes held where they leave ddram_ctrl, before the arbiter (only
+	// DMA writes come out of ddram_ctrl in this bench: the processor's Fast
+	// RAM is the port's): for 20000 clocks, as a DDR3 kept busy by the Fast
+	// RAM port would keep them.  A completion before the write is past the
+	// arbiter lets a later port read of the line overtake it.
+	wire        ddr1_busy_a, dgate;
+	assign      ddr1_busy = ddr1_busy_a | dgate;
 	wire  [7:0] ddr1_burstcnt, ddr1_be;
 	wire [28:0] ddr1_addr;
 	wire [63:0] ddr1_dout, ddr1_din;
@@ -453,10 +504,22 @@ generate if (REAL_DDR) begin : g_ddr
 		.m0_write(fr_write_a), .m0_waitrequest(fr_waitrequest_a),
 		.m1_address(ddr1_addr), .m1_burstcount(ddr1_burstcnt), .m1_read(ddr1_rd), .m1_readdata(ddr1_dout),
 		.m1_readdatavalid(ddr1_dout_ready), .m1_writedata(ddr1_din), .m1_byteenable(ddr1_be),
-		.m1_write(ddr1_we), .m1_waitrequest(ddr1_busy),
-		.s_address(DDRAM_ADDR), .s_burstcount(DDRAM_BURSTCNT), .s_read(DDRAM_RD), .s_readdata(DDRAM_DOUT),
-		.s_readdatavalid(DDRAM_DOUT_READY), .s_writedata(DDRAM_DIN), .s_byteenable(DDRAM_BE),
-		.s_write(DDRAM_WE), .s_waitrequest(DDRAM_BUSY)
+		.m1_write(ddr1_we && !dgate), .m1_waitrequest(ddr1_busy_a),
+		.s_address(fa_address), .s_burstcount(fa_burstcount), .s_read(fa_read), .s_readdata(DDRAM_DOUT),
+		.s_readdatavalid(DDRAM_DOUT_READY), .s_writedata(fa_writedata), .s_byteenable(fa_byteenable),
+		.s_write(fa_write), .s_waitrequest(fa_waitrequest)
+	);
+	// (as Minimig.sv: the skid stage in front of the DDR3 port)
+	wire [28:0] fa_address;
+	wire  [7:0] fa_burstcount, fa_byteenable;
+	wire        fa_read, fa_write, fa_waitrequest;
+	wire [63:0] fa_writedata;
+	ddram_hold fastram_hold (
+		.clk(clk_114), .rst(!reset),
+		.u_address(fa_address), .u_burstcount(fa_burstcount), .u_read(fa_read), .u_writedata(fa_writedata),
+		.u_byteenable(fa_byteenable), .u_write(fa_write), .u_waitrequest(fa_waitrequest),
+		.d_address(DDRAM_ADDR), .d_burstcount(DDRAM_BURSTCNT), .d_read(DDRAM_RD), .d_writedata(DDRAM_DIN),
+		.d_byteenable(DDRAM_BE), .d_write(DDRAM_WE), .d_waitrequest(DDRAM_BUSY)
 	);
 	ddram_ctrl ram2 (
 		.sysclk(clk_114), .reset_n(reset),
@@ -544,8 +607,14 @@ generate if (REAL_DDR) begin : g_ddr
 	end
 	assign fq_hold = fq_on && fr_write && (fr_address[28:18] == 11'h181);
 	always @(posedge clk_114) if ($test$plusargs("ddrtrace") && !DDRAM_BUSY && (DDRAM_WE || DDRAM_RD) && DDRAM_ADDR[28:18] == 11'h181)
-		$display("%0d DDR %s a=%h d=%h be=%h dma=%b", cycles, DDRAM_WE ? "WR" : "RD", DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, ram2.dma_we_cmd);
-	assign DDRAM_BUSY = busy | (ram2.dma_we_cmd && !fq_dma && dm_wcnt != 15'd20000) | fq_hold;
+		$display("%0d DDR %s a=%h d=%h be=%h dma=%b", cycles, DDRAM_WE ? "WR" : "RD", DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, ddr_dma_wr);
+	// (trace: a DMA write at the DDR3 port -- from the arbiter's m1, passing
+	// through the skid stage or held in it)
+	reg  hold_m1 = 1'b0;
+	always @(posedge clk_114) if (!fastram_hold.h_v) hold_m1 <= (fastram_arbiter.sel_a == 1'b1);
+	wire ddr_dma_wr = DDRAM_WE && (fastram_hold.h_v ? hold_m1 : (fastram_arbiter.sel_a == 1'b1));
+	assign DDRAM_BUSY = busy | fq_hold;
+	assign dgate = ddr1_we && !fq_dma && dm_wcnt != 15'd20000;
 	assign DDRAM_DOUT = dout_r;
 	assign DDRAM_DOUT_READY = dout_v;
 	integer k;
@@ -563,7 +632,7 @@ generate if (REAL_DDR) begin : g_ddr
 		// from its first clock, ~175 us: many of the program's polls of
 		// $F12A, each a chip-bus read): a controller that acknowledged a DMA
 		// write on presenting it would let the program read the old data
-		dm_wcnt <= !ram2.dma_we_cmd ? 15'd0 : (dm_wcnt != 15'd20000) ? dm_wcnt + 15'd1 : dm_wcnt;
+		dm_wcnt <= !ddr1_we ? 15'd0 : (dm_wcnt != 15'd20000) ? dm_wcnt + 15'd1 : dm_wcnt;
 		// Avalon: a command the slave stalls stays as it was presented
 		// (address, burst count, read/write, write data and byte enables)
 		if (av_stall && (DDRAM_RD != av_rd || DDRAM_WE != av_we || DDRAM_ADDR != av_a ||
@@ -727,9 +796,15 @@ generate if (REAL_DDR) begin : g_detect
 	always @(posedge clk_114) if (!g_ddr.DDRAM_BUSY && g_ddr.DDRAM_RD && !g_ddr.ram2.wq_any) begin
 		// (only when no write is queued in ddram_ctrl: it serialises; the
 		// Fast RAM port keeps its writes and reads in one ordered queue)
-		for (int b = 0; b < g_ddr.DDRAM_BURSTCNT; b++)
+		// (the line the read is for: its first two beats.  The Fast RAM
+		// port's prefetched lines after it may be written while the burst
+		// waits in the port's queue -- such a line is not cached, t_pfstale
+		// -- so they are checked at the end, not here)
+		for (int b = 0; b < g_ddr.DDRAM_BURSTCNT && b < 2; b++)
 			for (int j = 0; j < 4; j++)
-				check({g_ddr.DDRAM_ADDR[17:0] + 18'(b), 2'(j)}, "on read");
+				check({g_ddr.DDRAM_ADDR[17:0] + 18'(b), 2'(j)},
+				      $sformatf("on read (burst $%06x n=%0d beat %0d)", 24'h200000 + {3'd0, g_ddr.DDRAM_ADDR[17:0], 3'b000},
+				                g_ddr.DDRAM_BURSTCNT, b));
 	end
 	final begin
 		for (i = 0; i < (1<<20); i = i + 1) check(i[19:0], "at end");

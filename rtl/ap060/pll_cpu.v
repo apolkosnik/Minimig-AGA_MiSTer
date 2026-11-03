@@ -1,4 +1,4 @@
-// pll_cpu.v - the AP68060's processor clock: 50 MHz from the 50 MHz board
+// pll_cpu.v - the AP68060's processor clock: 70 MHz from the 50 MHz board
 // clock (CLK_50M), a PLL of its own (altera_pll, General: Quartus picks the
 // counters).  Unrelated to the Minimig clocks: ap060_tg68k_compat crosses
 // between them with synchronised handshakes.
@@ -23,7 +23,7 @@ module  pll_cpu(
 		.reference_clock_frequency("50.0 MHz"),
 		.operation_mode("direct"),
 		.number_of_clocks(1),
-		.output_clock_frequency0("50.000000 MHz"),
+		.output_clock_frequency0("70.000000 MHz"),
 		.phase_shift0("0 ps"),
 		.duty_cycle0(50),
 		.output_clock_frequency1("0 MHz"),

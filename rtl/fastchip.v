@@ -18,6 +18,9 @@
 //----------------------------------------------------------------------------------  
 
 module fastchip
+#(
+	parameter AKIKO = 1     // 0: no Akiko (CD32): $B80000 reads 0, no CD, no C2P, no DMA
+)
 (
 	input         clk,
 	input         cyc,
@@ -120,6 +123,7 @@ wire        akiko_hps_nvr_clear_dirty;
 wire        akiko_hps_nvr_dirty;
 wire        akiko_hps_nvr_done;
 
+generate if (AKIKO) begin : g_akiko
 akiko #(.NATIVE_CD32(NATIVE_CD32)) akiko
 (
 	.clk(clk_sys),
@@ -206,6 +210,21 @@ akiko_hps_bridge akiko_hps_bridge
 	.rx_busy_out(akiko_uio_rx_busy),
 	.nvr_dirty_out(akiko_uio_nvr_dirty)
 );
+end else begin : g_no_akiko
+// (the Akiko window still answers, with 0: Kickstart's CD32 probe of its ID
+// at $B80002 finds no Akiko)
+assign akiko_dout          = 16'd0;
+assign akiko_irq           = 1'b0;
+assign akiko_dma_req       = 1'b0;
+assign akiko_dma_we        = 1'b0;
+assign akiko_dma_baddr     = 24'd0;
+assign akiko_dma_wbyte     = 8'd0;
+assign akiko_uio_dout      = 16'd0;
+assign akiko_uio_req       = 1'b0;
+assign akiko_uio_sec_req   = 1'b0;
+assign akiko_uio_rx_busy   = 1'b0;
+assign akiko_uio_nvr_dirty = 1'b0;
+end endgenerate
 
 wire sel_ide   = ide_ena && sel && addr[23:16] ==  8'b1101_1010;       //IDE registers at $DA0000 - $DAFFFF	
 wire sel_gayle = ide_ena && sel && addr[23:12] == 12'b1101_1110_0001;  //GAYLE registers at $DE1000 - $DE1FFF

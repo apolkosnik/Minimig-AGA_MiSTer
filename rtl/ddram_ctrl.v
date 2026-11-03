@@ -462,6 +462,11 @@ assign mem2_readdata = DDRAM_DOUT;
 reg        ddr_swap;
 reg [15:0] ddr_data;
 reg        dma_we_cmd = 0;      // the write presented is a DMA write
+reg        dma_in_hold = 0;     // ... taken by the skid stage, not yet out
+wire       dma_u_acc = ram_we & ~ram_busy & dma_we_cmd;      // the skid stage takes it
+wire       d_wacc    = DDRAM_WE & ~DDRAM_BUSY;               // a write leaves (DDRAM_*)
+// (taken with the stage empty, it leaves the same clock it is accepted there)
+wire       dma_done  = (dma_u_acc & ~hs_waitrequest & d_wacc) | (dma_in_hold & d_wacc);
 
 reg  [2:0] state = 0;
 reg  [1:0] ba;
@@ -547,8 +552,15 @@ always @ (posedge sysclk) begin
 
 	cache_fill <= 0;
 	ddr_data <= dout[{ba, 4'b0000} +:16];
-	dma_wr_stb <= ram_we & ~ram_busy & dma_we_cmd;
-	if (ram_we & ~ram_busy & dma_we_cmd) dma_coh_req <= ~dma_coh_req;
+	// a DMA write is done when it leaves this controller (DDRAM_*): the
+	// skid stage (hold) takes it a clock after it is issued, but until it is
+	// out the arbiter in front of DDR3 can still let a Fast RAM port read of
+	// its line go first.  From DDRAM_* on, everything is in order.
+	if (~reset_n) dma_in_hold <= 1'b0;
+	else if (dma_u_acc & ~d_wacc) dma_in_hold <= 1'b1;
+	else if (dma_in_hold & d_wacc) dma_in_hold <= 1'b0;
+	dma_wr_stb <= dma_done;
+	if (dma_done) dma_coh_req <= ~dma_coh_req;
 	if (~ram_busy) dma_we_cmd <= 0;
 
 	if(~ram_busy) begin

@@ -238,7 +238,9 @@ always @(posedge clk) begin : exsel_decode
 		exsel_map[k] <= first;
 		any = any | first;
 	end
-	exsel_any <= enable_mister_floppy ? any : 4'b0000;
+	// (no physical drives without MISTER_FLOPPY: a drive mapped to one in
+	// the menu stays emulated)
+	exsel_any <= (MISTER_FLOPPY != 0 && enable_mister_floppy) ? any : 4'b0000;
 end
 
 assign _exsel[0] = &(~exsel_map[0] | _sel);

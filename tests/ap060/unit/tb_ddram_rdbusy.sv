@@ -1,7 +1,8 @@
 // ddram_ctrl: read data is taken whenever readdatavalid is high -- Avalon
 // lets the slave return it while it holds waitrequest for a new command.
 // A DMA read and a CPU cache-line read, each answered once with waitrequest
-// low and once with it high, must complete with the right data.
+// low and once with it high, must complete with the right data.  (Every
+// beat a burst asks for is returned.)
 `timescale 1ns/1ps
 module tb_ddram_rdbusy;
 reg clk = 0; always #5 clk = ~clk;
@@ -11,12 +12,13 @@ reg [28:1] cpu_a = 28'h8000004;
 wire rd, ack, rdy;
 wire [15:0] dma_d, cpu_d;
 wire [28:0] addr;
+wire  [7:0] bcnt;
 wire        coh;                   // (DMA reads only: the coherence answer looped back)
 integer errors = 0;
 ddram_ctrl dut (
 	.sysclk(clk), .reset_n(nrst), .cache_rst(nrst), .cache_inhibit(1'b0),
 	.cpu_cache_ctrl(4'b0001), .dcache_sw_en(1'b1),
-	.DDRAM_CLK(), .DDRAM_BUSY(busy), .DDRAM_BURSTCNT(), .DDRAM_ADDR(addr), .DDRAM_DOUT(dout),
+	.DDRAM_CLK(), .DDRAM_BUSY(busy), .DDRAM_BURSTCNT(bcnt), .DDRAM_ADDR(addr), .DDRAM_DOUT(dout),
 	.DDRAM_DOUT_READY(valid), .DDRAM_RD(rd), .DDRAM_DIN(), .DDRAM_BE(), .DDRAM_WE(),
 	.mem2_address(29'd0), .mem2_burstcount(8'd1), .mem2_read(1'b0), .mem2_readdata(),
 	.mem2_readdatavalid(), .mem2_writedata(64'd0), .mem2_byteenable(8'd0), .mem2_write(1'b0),
@@ -30,13 +32,19 @@ ddram_ctrl dut (
 task chk(input c, input string what);
 	if (!c) begin errors = errors + 1; $display("FAIL: %s (t=%0t)", what, $time); end
 endtask
-// answer the read the controller issues, with waitrequest w as the data comes
+// answer the read the controller issues, with waitrequest w as the data
+// comes: every beat of its burst (a CPU miss reads its line and the next
+// one, the stream buffer's)
 task answer(input w);
+	integer n;
 	begin
-		wait (rd); @(posedge clk); #1;
+		wait (rd); n = bcnt; @(posedge clk); #1;
 		repeat (3) @(negedge clk);
-		busy = w; valid = 1;
-		@(negedge clk); valid = 0; busy = 0;
+		repeat (n) begin
+			busy = w; valid = 1;
+			@(negedge clk);
+		end
+		valid = 0; busy = 0;
 	end
 endtask
 integer w;

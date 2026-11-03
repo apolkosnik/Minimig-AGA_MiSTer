@@ -353,8 +353,17 @@ i_loop:
 	rte
 i_back2:
 	move.w	#$2000,sr		; a request still to come is taken here
+	if	FASTOFS
+	; (on the Minimig bench the window is chip bus reads: its length must
+	; not depend on whether this code runs from the instruction cache --
+	; chip RAM code is cached there)
+	move.w	#299,d1
+i_w:	tst.w	(RNDLVL).l
+	dbra	d1,i_w
+	else
 	moveq	#99,d1
 i_w:	dbra	d1,i_w
+	endif
 	move.w	#$2700,sr
 	chkl	d6,1,80
 	addq.l	#1,d4

@@ -147,6 +147,10 @@
 // 2012-03-23 - fixed sprite enable signal (coppermaster demo)
 
 module minimig
+#(
+	parameter TOCCATA = 1,  // 0: no Toccata sound card (its autoconfig is cpu_wrapper's)
+	parameter CDTV    = 1   // 0: no CDTV hardware (the bridge, its NVRAM and card memory)
+)
 (
 	//m68k pins
 	input  [23:1] cpu_address, // m68k address bus
@@ -778,7 +782,10 @@ ciab CIAB1
 );
 
 wire cpu_long_en;
-assign chip32_en = cpucfg[1] & (chipset_config[4] | (chipset_config[3] & ~cpucfg[0])) & ~ovr & ~cpuhlt;
+// 32-bit chip RAM cycles for the CPU: AGA's (the A1200's), whatever the
+// menu's CPU type -- the AP68060 is always a 32-bit processor; ECS as
+// upstream has it (the 68030 setting)
+assign chip32_en = (chipset_config[4] | (chipset_config[3] & cpucfg[1] & ~cpucfg[0])) & ~ovr & ~cpuhlt;
 assign ram_long  = cpu_long_en & ~dbr & |bank[3:0];
 
 //instantiate cpu bridge
@@ -1023,6 +1030,7 @@ end
 // Toccata soundcard
 
 wire [15:0] toccata_out;
+generate if (TOCCATA) begin : g_toccata
 toccata #(
   .CLK_FREQUENCY(28_359_380)
 ) toccata_board (
@@ -1040,6 +1048,12 @@ toccata #(
 	.out_left(toccata_aud_left),
 	.out_right(toccata_aud_right)
 );
+end else begin : g_no_toccata
+assign toccata_out       = 16'd0;
+assign int6_toccata      = 1'b0;
+assign toccata_aud_left  = 16'd0;
+assign toccata_aud_right = 16'd0;
+end endgenerate
 
 //-------------------------------------------------------------------------------------
 // A2065 Ethernet card. Everything the card needs is inside this module; the
@@ -1081,6 +1095,7 @@ a2065 a2065_inst (
 //
 //-------------------------------------------------------------------------------------
 
+generate if (CDTV) begin : g_cdtv
 cdtv_bridge cdtv_bridge_inst
 (
 	.clk             (clk                  ),
@@ -1185,6 +1200,33 @@ cdtv_nvram #(.ADDR_W(13)) cdtv_card_inst
 	.dirty           (cdtv_card_dirty       ),
 	.clear_dirty     (cdtv_card_clear_dirty )
 );
+end else begin : g_no_cdtv
+assign cdtv_bridge_selack     = 1'b0;
+assign cdtv_bridge_dout       = 16'd0;
+assign cdtv_irq_w             = 1'b0;
+assign cdtv_cdda_volume       = 10'd0;
+assign cdtv_cdda_volume_valid = 1'b0;
+assign cdtv_uio_dout          = 16'd0;
+assign cdtv_req               = 1'b0;
+assign cdtv_nvr_addr          = 0;
+assign cdtv_nvr_load_din      = 0;
+assign cdtv_nvr_load_we       = 1'b0;
+assign cdtv_nvr_clear_dirty   = 1'b0;
+assign cdtv_card_addr         = 0;
+assign cdtv_card_load_din     = 0;
+assign cdtv_card_load_we      = 1'b0;
+assign cdtv_card_clear_dirty  = 1'b0;
+assign cdtv_dma_req           = 1'b0;
+assign cdtv_dma_we            = 1'b0;
+assign cdtv_dma_baddr         = 32'd0;
+assign cdtv_dma_wbyte         = 8'd0;
+assign cdtv_nvr_dout          = 16'd0;
+assign cdtv_nvr_save_dout     = 0;
+assign cdtv_nvr_dirty         = 1'b0;
+assign cdtv_card_dout         = 16'd0;
+assign cdtv_card_save_dout    = 0;
+assign cdtv_card_dirty        = 1'b0;
+end endgenerate
 
 assign cdtv_din    = sel_cdtv_nvram ? cdtv_nvr_dout : sel_cdtv_card ? cdtv_card_dout : cdtv_bridge_dout;
 assign cdtv_selack = cdtv_bridge_selack | sel_cdtv_nvram | sel_cdtv_card;

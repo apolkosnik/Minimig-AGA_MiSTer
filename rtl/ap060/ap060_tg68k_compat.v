@@ -81,6 +81,14 @@ module ap060_tg68k_compat #(
 	// Fast RAM: the processor's own port into DDR3 (ap030_fastram_fe/_be,
 	// as the AP68030's Minimig integration): an Avalon-MM master on clk_mem
 	input             clk_mem,
+	// chip RAM writes, every one (the chipset's DMA, Akiko's, the CDTV's, the
+	// processor's own), as sdram_ctrl starts them (clk_mem): the line each
+	// writes.  The instruction cache drops that line, so chip RAM code can be
+	// cached; chip2m (clk, static): 2 MB of chip RAM, no mirrors, the only
+	// configuration where it is
+	input             chip_wev,
+	input      [20:4] chip_wline,
+	input             chip2m,
 	input             fr_dma_req,      // ddram_ctrl: flips when a DMA write reached DDR3 ...
 	output reg        fr_dma_ack = 1'b0, // ... answered once the Fast RAM port's cache is clear
 	output      [7:0] fr_q_done,       // (clk_mem) the port's commands completed ...
@@ -148,9 +156,39 @@ wire        bb_n_o, bb_oe, btt_n_o, btt_oe;
 reg  [31:0] d_i;
 reg         ta_n, tbi_n, tci_n, avec_n;
 
+//--------------------------------------------------------------------------
+// chip RAM writes into the instruction cache (the snooper's side band): a
+// dual-clock FIFO of the lines written, one taken each clock (the snooper
+// merges a line already queued, and turns a full queue into dropping every
+// line); a write the FIFO cannot take drops every line too.  Ordering: the
+// fetch unit makes these only outside a line fill, so a line filled with
+// data older than a write is dropped after it goes in, and a write's line
+// goes in only after the write is in SDRAM (its slot comes first)
+//--------------------------------------------------------------------------
+reg  [1:0] c2m_s = 2'b00;
+always @(posedge clk_cpu) c2m_s <= {c2m_s[0], chip2m};
+wire       chip2m_c = c2m_s[1];
+wire       cw_full, cw_empty;
+wire [20:4] cw_line;
+ap030_async_fifo #(.W(17), .AW(4)) cw_fifo (
+	.wclk(clk_mem), .we(chip_wev && !cw_full), .wdata(chip_wline), .wfull(cw_full), .wlevel(),
+	.rclk(clk_cpu), .re(!cw_empty), .rdata(cw_line), .rempty(cw_empty), .rlevel()
+);
+reg        cw_ovt = 1'b0;            // (clk_mem) flips when a write found the FIFO full
+always @(posedge clk_mem) if (chip_wev && cw_full) cw_ovt <= ~cw_ovt;
+reg  [2:0] cw_ovs = 3'b000;
+always @(posedge clk_cpu) cw_ovs <= {cw_ovs[1:0], cw_ovt};
+wire        ic_xinv = !cw_empty && chip2m_c;
+wire [27:0] ic_xl   = {11'd0, cw_line};
+wire        ic_xall = (cw_ovs[2] != cw_ovs[1]);
+// synthesis translate_off
+always @(posedge clk_mem) if (chip_wev && cw_full) $display("NOTE: ap060_tg68k_compat: chip write FIFO full, every instruction cache line dropped");
+// synthesis translate_on
+
 ap68060 #(.NO_FPU(NO_FPU)) cpu (
 	.clk(clk_cpu), .bclk_en(1'b1), .rsti_n(nrst_c),
 	.a_o(a_o), .a_oe(), .a_i(a_o), .ts_n_i(1'b1), .tt_i(tt), .snoop_n(1'b1),
+	.ic_xinv(ic_xinv), .ic_xl(ic_xl), .ic_xall(ic_xall),
 	.d_i(nrst_c ? (f_doe ? f_d : d_i) : 32'd0), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(), .upa(),
 	.ciout_n(ciout_n), .lock_n(), .locke_n(), .lock_oe(),
@@ -240,7 +278,11 @@ wire c_z2   = z2e_c[1] && (xa[31:24] == 8'h00) && (xa[23] ^ |xa[22:21]);
 wire c_z30  = z3e0_c[1] && (xa[31:27] == z3b0_c);
 wire c_z31  = z3e1_c[1] && (xa[31:28] == z3b1_c);
 wire c_rom  = (xa[31:19] == 13'h001F) || (xa[31:19] == 13'h001C);
-wire x_cach = c_z2 | c_z30 | c_z31 | c_rom;
+// (instruction fetches from chip RAM too, with 2 MB of it: the chip RAM
+// writes reach the instruction cache below; data stays uncached -- the
+// chipset reads what the processor writes)
+wire c_chipc = chip2m_c && xcode && (xa[31:21] == 11'd0);
+wire x_cach = c_z2 | c_z30 | c_z31 | c_rom | c_chipc;
 
 // a line's beats go A3-A2 first, then on modulo four (MC68060UM 7.7.2)
 wire  [1:0] lw   = xa[3:2] + beat;
