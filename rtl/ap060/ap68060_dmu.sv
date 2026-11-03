@@ -1647,8 +1647,10 @@ always_ff @(posedge clk) begin
 				// later bus cycle of this one; FA stays the first byte
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
+				// (TTR: the access is mapped by a TTR, 8.4.4 -- a bus
+				// error too; the translation's why carries it)
 				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc) |
-				           ((e_part || bo_later) ? FSLW_MA : 32'd0);
+				           ((e_part || bo_later) ? FSLW_MA : 32'd0) | (e_x.why & FSLW_TTR);
 				e_st    <= E_S_DONE;
 			end
 			else begin
@@ -1778,7 +1780,8 @@ always_ff @(posedge clk) begin
 				st_fault_r   <= 1'b1;
 				st_fslw    <= mk_fslw(FSLW_WE, m4.r.lock, (m4.r.mem == M_RMW) ? 2'b11 : 2'b01,
 				                      m4.r.msz, m4.r.fc) |
-				              (((m4.split && e_part) || bo_later) ? FSLW_MA : 32'd0);
+				              (((m4.split && e_part) || bo_later) ? FSLW_MA : 32'd0) |
+				              (e_x.why & FSLW_TTR);
 				st_faddr   <= m4.r.a;
 				e_wst_done <= 1'b1;
 				e_st       <= E_IDLE;
@@ -2066,7 +2069,7 @@ always_ff @(posedge clk) begin
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
 				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc) |
-				           ((e_part || bo_got[e_va[3:2]]) ? FSLW_MA : 32'd0);
+				           ((e_part || bo_got[e_va[3:2]]) ? FSLW_MA : 32'd0) | (e_x.why & FSLW_TTR);
 				e_st    <= E_S_DONE;
 			end
 			else if (bo_tci) begin

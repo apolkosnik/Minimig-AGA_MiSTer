@@ -21,6 +21,8 @@
 // buffer, a push queued for the bus) goes through the DMU's full lookup,  //
 // which also cancels the push: at most two such lines exist.  The         //
 // instruction cache's invalidations go through the fetch unit's request; //
+// an integration's side band (ic_xinv) adds lines written by a master not //
+// on this bus, whoever owns it;                                            //
 // a full queue there turns into an invalidation of every line (more than  //
 // the 68060 drops, never less: its contents are only copies).  dc_ovf     //
 // records a data-cache queue overflow for the bench (it cannot happen).   //
@@ -74,7 +76,12 @@ module ap68060_snoop
 	output logic        ic_req,
 	output logic [31:0] ic_pa,
 	output logic        ic_all,         // ... or every line (queue overflow)
-	input  logic        ic_done
+	input  logic        ic_done,
+	// a line written behind the processor (not on this bus): the
+	// instruction cache only, whoever owns the bus; or every line
+	input  logic        ic_xinv,
+	input  logic [27:0] ic_xl,
+	input  logic        ic_xall
 );
 
 // a snooped transfer starts on this bus clock edge
@@ -273,6 +280,19 @@ always_ff @(posedge clk) begin
 			if (!v0) begin v0 = 1'b1; a0 = 1'b0; l0 = nl; end
 			else if (a0 || l0 == nl || ov || (v1 && l1 == nl)) ;   // covered
 			else if (!v1) begin v1 = 1'b1; l1 = nl; end
+			else ov = 1'b1;
+		end
+		// the side band, after the snoop of the same clock (the fetch unit
+		// makes these, as the snooped ones, only outside a line fill: a line
+		// being filled when its invalidation comes is dropped once it is in)
+		if (ic_xall) begin
+			if (!v0) begin v0 = 1'b1; a0 = 1'b1; end
+			else if (!a0) ov = 1'b1;
+		end
+		else if (ic_xinv) begin
+			if (!v0) begin v0 = 1'b1; a0 = 1'b0; l0 = ic_xl; end
+			else if (a0 || l0 == ic_xl || ov || (v1 && l1 == ic_xl)) ;   // covered
+			else if (!v1) begin v1 = 1'b1; l1 = ic_xl; end
 			else ov = 1'b1;
 		end
 		ic_req <= v0; ic_all <= a0; ic_pa <= {l0, 4'd0};

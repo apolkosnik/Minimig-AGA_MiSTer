@@ -102,7 +102,8 @@ module ap68060_fetch
 	input  logic        iw_done,
 	input  atce_t       iw_ent,       // the walk's entry (r clear: it failed)
 	input  logic [31:0] iw_cause,     // ... and the failure's FSLW cause
-	output logic [31:0] if_cause,     // FSLW cause of the last faulted fetch translation
+	output logic [31:0] if_cause,     // FSLW cause of the last faulted fetch (its translation
+	                                  // fault; a bus error: TTR when an ITT maps it)
 	input  logic        iatc_wr,
 	input  logic [31:0] iatc_wla,
 	input  logic        iatc_wfc2,
@@ -316,6 +317,14 @@ logic          c_we;
 logic  [6:0]   c_waddr;
 logic  [1:0]   c_wway;
 logic [20:0]   c_wtag;
+logic          cw_q;              // ... a clock later: the tag read in that clock is stale
+logic  [6:0]   cw_set_q;
+logic  [1:0]   cw_way_q;
+always_ff @(posedge clk) begin
+	cw_q     <= c_we;
+	cw_set_q <= c_waddr;
+	cw_way_q <= c_wway;
+end
 logic [127:0]  cd [4];
 logic [23:0]   ct [4];
 
@@ -379,6 +388,7 @@ logic [31:0] m_la;             // the fetch address
 logic [31:0] m_pa;
 logic  [1:0] m_upa;
 logic        m_s, m_dem, m_ci, m_alloc;
+logic        m_tt;             // the fetch is mapped by ITT0/ITT1 (its bus error's FSLW.TTR)
 logic  [1:0] m_way;
 
 // invalidation
@@ -441,8 +451,13 @@ always_comb begin
 	tg     = {f1_e.pa[19:1], tc_p ? f1_pc[12] : f1_e.pa[0], f1_pc[11]};
 	x_hit  = 1'b0;
 	x_way  = 2'd0;
+	// (a way whose tag the fill wrote in the clock F0 read this set: the
+	// tag RAM gave the old tag while the valid bit is already the new one
+	// -- an old tag of zero matches any address below $800 --; that way is
+	// no hit here: the line just filled is the line buffer's, x_lb)
 	for (int i = 3; i >= 0; i--) begin
-		x_mj[i] = ivf_q[i] && (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
+		x_mj[i] = ivf_q[i] && !(cw_q && cw_set_q == f1_pc[10:4] && cw_way_q == 2'(i)) &&
+		          (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
 		if (x_mj[i]) begin x_hit = 1'b1; x_way = 2'(i); end
 	end
 	x_hit  = x_hit && x_cach;
@@ -532,7 +547,7 @@ always_ff @(posedge clk) begin
 		for (int i = 0; i < 2; i++) begin f3_w[i] <= '0; f3_p[i] <= '0; end
 		lb_v  <= 1'b0; lb_pa <= '0; m_tci <= 1'b0;
 		busy  <= 1'b0; stale <= 1'b0; b_req_r <= 1'b0;
-		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0;
+		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0; m_tt <= 1'b0;
 		m_alloc <= 1'b0; m_way <= '0; m_line <= '0;
 		iw_req <= 1'b0;
 		c_we  <= 1'b0; c_waddr <= '0; c_wway <= '0; c_wtag <= '0;
@@ -711,6 +726,7 @@ always_ff @(posedge clk) begin
 			m_s    <= f1_s;
 			m_dem  <= f1_dem;
 			m_ci   <= x_cm[1];
+			m_tt   <= f1_tt0 || f1_tt1;
 			if (x_walk) begin
 				st     <= S_WALK;
 				iw_req <= 1'b1;
@@ -844,6 +860,8 @@ always_ff @(posedge clk) begin
 					f2_n <= m_la[1] ? 2'd1 : 2'd2;
 					for (int i = 0; i < 2; i++) f2_w[i] <= 16'd0;
 					f2_f <= 1'b1; f2_d <= m_dem; f2_a <= 1'b0;
+					// (a bus error's cause: the fetch mapped by a TTR, 8.4.4)
+					if_cause <= m_tt ? FSLW_TTR : 32'd0;
 					st   <= S_HALT;
 				end
 			end
@@ -885,6 +903,7 @@ always_ff @(posedge clk) begin
 					f2_w[0] <= 16'd0;
 					f2_w[1] <= 16'd0;
 					f2_f <= 1'b1; f2_d <= m_dem; f2_a <= 1'b0;
+					if_cause <= m_tt ? FSLW_TTR : 32'd0;
 					st   <= S_HALT;
 				end
 				else st <= S_RUN;
